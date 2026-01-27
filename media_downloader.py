@@ -14,6 +14,7 @@ from rich.logging import RichHandler
 
 from module.app import Application, ChatDownloadConfig, DownloadStatus, TaskNode
 from module.bot import start_download_bot, stop_download_bot
+from module.db import db
 from module.download_stat import update_download_status
 from module.get_chat_history_v2 import get_chat_history_v2
 from module.language import _t
@@ -651,47 +652,83 @@ def main():
     """Main function of the downloader."""
     tasks = []
 
-    # Check for session string in environment variables (for PaaS deployment)
-    session_name = os.getenv("PYROGRAM_SESSION_STRING")
-    if not session_name:
-        session_name = "media_downloader"
+    session_string = None
+    if db.conn:
+        session_string = db.load_setting("session")
 
-    client = HookClient(
-        session_name,
-        api_id=app.api_id,
-        api_hash=app.api_hash,
-        proxy=app.proxy,
-        workdir=app.session_file_path,
-        start_timeout=app.start_timeout,
-    )
+    in_memory = not bool(session_string)
+
+    client = None
+    if app.api_id and app.api_hash:
+        try:
+            client = HookClient(
+                "media_downloader",
+                api_id=app.api_id,
+                api_hash=app.api_hash,
+                proxy=app.proxy,
+                workdir=app.session_file_path,
+                start_timeout=app.start_timeout,
+                session_string=session_string,
+                in_memory=in_memory,
+            )
+        except Exception as e:
+            logger.error(f"Failed to initialize client: {e}")
+
     try:
         app.pre_run()
-        init_web(app)
+        init_web(app, client)
 
-        set_max_concurrent_transmissions(client, app.max_concurrent_transmissions)
+        if client and session_string:
+            set_max_concurrent_transmissions(client, app.max_concurrent_transmissions)
 
-        app.loop.run_until_complete(start_server(client))
-        logger.success(_t("Successfully started (Press Ctrl+C to stop)"))
+            app.loop.run_until_complete(start_server(client))
 
-        app.loop.create_task(download_all_chat(client))
-        for _ in range(app.max_download_task):
-            task = app.loop.create_task(worker(client))
-            tasks.append(task)
+            # Auto-save session if changed (rare but possible)
+            async def save_session_to_db():
+                if db.conn:
+                    try:
+                        s = await client.export_session_string()
+                        db.save_setting("session", s)
+                    except Exception as e:
+                        logger.warning(f"Failed to export/save session string: {e}")
 
-        if app.bot_token:
-            app.loop.run_until_complete(
-                start_download_bot(app, client, add_download_task, download_chat_task)
-            )
-        _exec_loop()
+            app.loop.run_until_complete(save_session_to_db())
+
+            logger.success(_t("Successfully started (Press Ctrl+C to stop)"))
+
+            app.loop.create_task(download_all_chat(client))
+            for _ in range(app.max_download_task):
+                task = app.loop.create_task(worker(client))
+                tasks.append(task)
+
+            if app.bot_token:
+                app.loop.run_until_complete(
+                    start_download_bot(
+                        app, client, add_download_task, download_chat_task
+                    )
+                )
+            _exec_loop()
+        else:
+            if not client:
+                logger.warning(
+                    "No API ID/Hash found in config. Please set them via Web UI."
+                )
+            elif not session_string:
+                logger.warning("No session found. Please login via Web UI.")
+
+            logger.info(f"Web UI running at http://{app.web_host}:{app.web_port}")
+            app.loop.run_forever()
+
     except KeyboardInterrupt:
         logger.info(_t("KeyboardInterrupt"))
     except Exception as e:
         logger.exception("{}", e)
     finally:
         app.is_running = False
-        if app.bot_token:
-            app.loop.run_until_complete(stop_download_bot())
-        app.loop.run_until_complete(stop_server(client))
+        if client:
+            if app.bot_token:
+                app.loop.run_until_complete(stop_download_bot())
+            app.loop.run_until_complete(stop_server(client))
         for task in tasks:
             task.cancel()
         logger.info(_t("Stopped!"))
@@ -707,12 +744,5 @@ def main():
 
 
 if __name__ == "__main__":
-    # Support injecting config via environment variable (useful for Docker/PaaS)
-    config_env_content = os.getenv("CONFIG_YAML")
-    if config_env_content:
-        print("Detected CONFIG_YAML environment variable, creating config.yaml...")
-        with open(CONFIG_NAME, "w", encoding="utf-8") as f:
-            f.write(config_env_content)
-
     if _check_config():
         main()

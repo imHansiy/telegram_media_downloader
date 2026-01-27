@@ -3,12 +3,23 @@
 import logging
 import os
 import threading
-
-from flask import Flask, jsonify, render_template, request
+import asyncio
+import json
+from flask import (
+    Flask,
+    jsonify,
+    render_template,
+    request,
+    redirect,
+    url_for,
+    flash,
+    session,
+)
 from flask_login import LoginManager, UserMixin, login_required, login_user
-
+from pyrogram import Client, errors
 import utils
 from module.app import Application
+from module.db import db
 from module.download_stat import (
     DownloadState,
     get_download_result,
@@ -30,6 +41,7 @@ _login_manager.login_view = "login"
 _login_manager.init_app(_flask_app)
 web_login_users: dict = {}
 deAesCrypt = AesBase64("1234123412ABCDEF", "ABCDEF1234123412")
+_client: Client = None
 
 
 class User(UserMixin):
@@ -71,7 +83,7 @@ def run_web_server(app: Application):
 
 
 # pylint: disable = W0603
-def init_web(app: Application):
+def init_web(app: Application, client: Client = None):
     """
     Set the value of the users variable.
 
@@ -82,6 +94,9 @@ def init_web(app: Application):
         None.
     """
     global web_login_users
+    global _client
+    _client = client
+
     if app.web_login_secret:
         web_login_users = {"root": app.web_login_secret}
     else:
@@ -141,6 +156,130 @@ def index():
             "pause" if get_download_state() is DownloadState.Downloading else "continue"
         ),
     )
+
+
+@_flask_app.route("/config", methods=["GET", "POST"])
+@login_required
+def config():
+    """Config Editor"""
+    if request.method == "POST":
+        try:
+            new_config = json.loads(request.form.get("config"))
+            if db.conn:
+                db.save_setting("config", new_config)
+                # Ideally trigger a reload or restart, but for now just save
+                return jsonify(
+                    {
+                        "status": "success",
+                        "message": "Config saved to DB. Please restart container.",
+                    }
+                )
+            else:
+                return jsonify({"status": "error", "message": "Database not connected"})
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)})
+
+    # Load current config
+    current_config = {}
+    if db.conn:
+        current_config = db.load_setting("config") or {}
+
+    return render_template("config.html", config=json.dumps(current_config, indent=2))
+
+
+# --- Telegram Login Routes ---
+
+
+@_flask_app.route("/tg_login", methods=["GET", "POST"])
+@login_required
+def tg_login():
+    if request.method == "POST":
+        phone_number = request.form.get("phone_number")
+        session["phone_number"] = phone_number
+        try:
+            if not _client.is_connected:
+                asyncio.run_coroutine_threadsafe(
+                    _client.connect(), _client.loop
+                ).result()
+
+            sent_code = asyncio.run_coroutine_threadsafe(
+                _client.send_code(phone_number), _client.loop
+            ).result()
+
+            session["phone_code_hash"] = sent_code.phone_code_hash
+            return redirect(url_for("tg_code"))
+        except Exception as e:
+            return f"Error: {e}"
+
+    return """
+    <form method="post">
+        Phone Number (with country code): <input type="text" name="phone_number">
+        <input type="submit" value="Send Code">
+    </form>
+    """
+
+
+@_flask_app.route("/tg_code", methods=["GET", "POST"])
+@login_required
+def tg_code():
+    if request.method == "POST":
+        code = request.form.get("code")
+        phone_number = session.get("phone_number")
+        phone_code_hash = session.get("phone_code_hash")
+
+        try:
+            asyncio.run_coroutine_threadsafe(
+                _client.sign_in(phone_number, phone_code_hash, code), _client.loop
+            ).result()
+
+            # Save session
+            s = asyncio.run_coroutine_threadsafe(
+                _client.export_session_string(), _client.loop
+            ).result()
+            if db.conn:
+                db.save_setting("session", s)
+
+            return "Login Successful! Session saved. Please restart the container."
+        except errors.SessionPasswordNeeded:
+            return redirect(url_for("tg_password"))
+        except Exception as e:
+            return f"Error: {e}"
+
+    return """
+    <form method="post">
+        Code: <input type="text" name="code">
+        <input type="submit" value="Sign In">
+    </form>
+    """
+
+
+@_flask_app.route("/tg_password", methods=["GET", "POST"])
+@login_required
+def tg_password():
+    if request.method == "POST":
+        password = request.form.get("password")
+        try:
+            asyncio.run_coroutine_threadsafe(
+                _client.check_password(password), _client.loop
+            ).result()
+
+            # Save session
+            s = asyncio.run_coroutine_threadsafe(
+                _client.export_session_string(), _client.loop
+            ).result()
+            if db.conn:
+                db.save_setting("session", s)
+
+            return "Login Successful! Session saved. Please restart the container."
+        except Exception as e:
+            return f"Error: {e}"
+
+    return """
+    <form method="post">
+        Two-Step Verification Password: <input type="password" name="password">
+        <input type="submit" value="Submit Password">
+    </form>
+    """
 
 
 @_flask_app.route("/get_download_status")
@@ -206,11 +345,11 @@ def get_download_list():
                 + '", "filename":"'
                 + os.path.basename(value["file_name"])
                 + '", "total_size":"'
-                + f'{format_byte(value["total_size"])}'
+                + f"{format_byte(value['total_size'])}"
                 + '" ,"download_progress":"'
             )
             result += (
-                f'{round(value["down_byte"] / value["total_size"] * 100, 1)}'
+                f"{round(value['down_byte'] / value['total_size'] * 100, 1)}"
                 + '" ,"download_speed":"'
                 + download_speed
                 + '" ,"save_path":"'
