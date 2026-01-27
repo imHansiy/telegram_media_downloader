@@ -652,6 +652,7 @@ def main():
     """Main function of the downloader."""
     tasks = []
 
+    # Try to load session from DB, but don't force it yet
     session_string = None
     if db.conn:
         session_string = db.load_setting("session")
@@ -659,6 +660,8 @@ def main():
     in_memory = not bool(session_string)
 
     client = None
+
+    # Check if we have enough config to initialize client
     if app.api_id and app.api_hash:
         try:
             client = HookClient(
@@ -674,10 +677,27 @@ def main():
         except Exception as e:
             logger.error(f"Failed to initialize client: {e}")
 
+    # Pass a restart callback to Web UI
+    def restart_callback():
+        logger.warning("Restarting application via Web UI request...")
+        # Since we can't easily restart the python process in-place cleanly without
+        # external supervisor, we exit with status code 0 or 1.
+        # In Docker/Render, the container orchestrator will restart it.
+        # We can also try to re-run main(), but cleanup is tricky.
+        # Let's rely on container restart.
+        app.is_running = False
+        # Stop loop if running
+        try:
+            app.loop.stop()
+        except:
+            pass
+
     try:
         app.pre_run()
-        init_web(app, client)
+        # Initialize Web UI with client (which might be None or unauthenticated)
+        init_web(app, client, restart_callback)
 
+        # If we have a valid client AND a session string, we can start downloading
         if client and session_string:
             set_max_concurrent_transmissions(client, app.max_concurrent_transmissions)
 
@@ -707,8 +727,11 @@ def main():
                         app, client, add_download_task, download_chat_task
                     )
                 )
+
+            # Start loop
             _exec_loop()
         else:
+            # We are in "Web Configuration Mode"
             if not client:
                 logger.warning(
                     "No API ID/Hash found in config. Please set them via Web UI."
@@ -717,6 +740,7 @@ def main():
                 logger.warning("No session found. Please login via Web UI.")
 
             logger.info(f"Web UI running at http://{app.web_host}:{app.web_port}")
+            # Run forever to keep Web UI serving
             app.loop.run_forever()
 
     except KeyboardInterrupt:
