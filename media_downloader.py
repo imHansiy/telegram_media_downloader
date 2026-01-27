@@ -707,5 +707,12 @@ def main():
 
 
 if __name__ == "__main__":
+    # Support injecting config via environment variable (useful for Docker/PaaS)
+    config_env_content = os.getenv("CONFIG_YAML")
+    if config_env_content:
+        print("Detected CONFIG_YAML environment variable, creating config.yaml...")
+        with open(CONFIG_NAME, "w", encoding="utf-8") as f:
+            f.write(config_env_content)
+
     if _check_config():
         main()
