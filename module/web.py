@@ -83,7 +83,7 @@ def run_web_server(app: Application):
 
 
 # pylint: disable = W0603
-def init_web(app: Application, client: Client = None):
+def init_web(app: Application, client: Client = None, restart_callback=None):
     """
     Set the value of the users variable.
 
@@ -95,7 +95,9 @@ def init_web(app: Application, client: Client = None):
     """
     global web_login_users
     global _client
+    global _restart_callback
     _client = client
+    _restart_callback = restart_callback
 
     if app.web_login_secret:
         web_login_users = {"root": app.web_login_secret}
@@ -107,6 +109,17 @@ def init_web(app: Application, client: Client = None):
         threading.Thread(
             target=get_flask_app().run, daemon=True, args=(app.web_host, app.web_port)
         ).start()
+
+
+@_flask_app.route("/restart", methods=["POST"])
+@login_required
+def restart():
+    """Restart Application"""
+    if _restart_callback:
+        # Run in a separate thread to avoid blocking the response
+        threading.Thread(target=_restart_callback).start()
+        return jsonify({"status": "success", "message": "Application is restarting..."})
+    return jsonify({"status": "error", "message": "Restart capability not available"})
 
 
 @_flask_app.route("/login", methods=["GET", "POST"])
