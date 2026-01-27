@@ -1,4 +1,5 @@
 """Downloads media from telegram."""
+
 import asyncio
 import logging
 import os
@@ -649,8 +650,14 @@ async def stop_server(client: pyrogram.Client):
 def main():
     """Main function of the downloader."""
     tasks = []
+
+    # Check for session string in environment variables (for PaaS deployment)
+    session_name = os.getenv("PYROGRAM_SESSION_STRING")
+    if not session_name:
+        session_name = "media_downloader"
+
     client = HookClient(
-        "media_downloader",
+        session_name,
         api_id=app.api_id,
         api_hash=app.api_hash,
         proxy=app.proxy,
