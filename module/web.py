@@ -211,13 +211,15 @@ def tg_login():
         session["phone_number"] = phone_number
         try:
             if not _client.is_connected:
-                asyncio.run_coroutine_threadsafe(
+                future = asyncio.run_coroutine_threadsafe(
                     _client.connect(), _client.loop
-                ).result()
+                )
+                future.result()  # Wait for connection
 
-            sent_code = asyncio.run_coroutine_threadsafe(
+            future = asyncio.run_coroutine_threadsafe(
                 _client.send_code(phone_number), _client.loop
-            ).result()
+            )
+            sent_code = future.result()
 
             session["phone_code_hash"] = sent_code.phone_code_hash
             return redirect(url_for("tg_code"))
@@ -241,14 +243,17 @@ def tg_code():
         phone_code_hash = session.get("phone_code_hash")
 
         try:
-            asyncio.run_coroutine_threadsafe(
+            future = asyncio.run_coroutine_threadsafe(
                 _client.sign_in(phone_number, phone_code_hash, code), _client.loop
-            ).result()
+            )
+            future.result()
 
             # Save session
-            s = asyncio.run_coroutine_threadsafe(
+            future_s = asyncio.run_coroutine_threadsafe(
                 _client.export_session_string(), _client.loop
-            ).result()
+            )
+            s = future_s.result()
+
             if db.conn:
                 db.save_setting("session", s)
 
@@ -272,14 +277,17 @@ def tg_password():
     if request.method == "POST":
         password = request.form.get("password")
         try:
-            asyncio.run_coroutine_threadsafe(
+            future = asyncio.run_coroutine_threadsafe(
                 _client.check_password(password), _client.loop
-            ).result()
+            )
+            future.result()
 
             # Save session
-            s = asyncio.run_coroutine_threadsafe(
+            future_s = asyncio.run_coroutine_threadsafe(
                 _client.export_session_string(), _client.loop
-            ).result()
+            )
+            s = future_s.result()
+
             if db.conn:
                 db.save_setting("session", s)
 
