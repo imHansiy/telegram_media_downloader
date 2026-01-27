@@ -13,6 +13,7 @@ from loguru import logger
 from ruamel import yaml
 
 from module.cloud_drive import CloudDrive, CloudDriveConfig
+from module.db import db
 from module.filter import Filter
 from module.language import Language, set_language
 from utils.format import replace_date_time, validate_title
@@ -436,12 +437,12 @@ class Application:
         if _config.get("save_path") is not None:
             self.save_path = _config["save_path"]
 
-        self.api_id = _config["api_id"]
-        self.api_hash = _config["api_hash"]
+        self.api_id = _config.get("api_id", "")
+        self.api_hash = _config.get("api_hash", "")
         self.bot_token = _config.get("bot_token", "")
 
-        self.media_types = _config["media_types"]
-        self.file_formats = _config["file_formats"]
+        self.media_types = _config.get("media_types", [])
+        self.file_formats = _config.get("file_formats", {})
 
         self.hide_file_name = _config.get("hide_file_name", False)
 
@@ -586,9 +587,9 @@ class Application:
                     "ids_to_retry"
                 ]
                 for it in self.chat_download_config[self._chat_id].ids_to_retry:
-                    self.chat_download_config[self._chat_id].ids_to_retry_dict[
-                        it
-                    ] = True
+                    self.chat_download_config[self._chat_id].ids_to_retry_dict[it] = (
+                        True
+                    )
 
             self.chat_download_config[self._chat_id].last_read_message_id = _config[
                 "last_read_message_id"
@@ -638,9 +639,9 @@ class Application:
                     "ids_to_retry"
                 ]
                 for it in self.chat_download_config[self._chat_id].ids_to_retry:
-                    self.chat_download_config[self._chat_id].ids_to_retry_dict[
-                        it
-                    ] = True
+                    self.chat_download_config[self._chat_id].ids_to_retry_dict[it] = (
+                        True
+                    )
                 self.app_data.pop("ids_to_retry")
         else:
             if app_data.get("chat"):
@@ -655,9 +656,9 @@ class Application:
                             "ids_to_retry", []
                         )
                         for it in self.chat_download_config[chat_id].ids_to_retry:
-                            self.chat_download_config[chat_id].ids_to_retry_dict[
-                                it
-                            ] = True
+                            self.chat_download_config[chat_id].ids_to_retry_dict[it] = (
+                                True
+                            )
         return True
 
     async def upload_file(
@@ -822,13 +823,16 @@ class Application:
             unfinished_ids = set(value.ids_to_retry)
 
             for it in value.ids_to_retry:
-                if  value.node.download_status.get(
+                if value.node.download_status.get(
                     it, DownloadStatus.FailedDownload
                 ) in [DownloadStatus.SuccessDownload, DownloadStatus.SkipDownload]:
                     unfinished_ids.remove(it)
 
             for _idx, _value in value.node.download_status.items():
-                if DownloadStatus.SuccessDownload != _value and DownloadStatus.SkipDownload != _value:
+                if (
+                    DownloadStatus.SuccessDownload != _value
+                    and DownloadStatus.SkipDownload != _value
+                ):
                     unfinished_ids.add(_idx)
 
             self.chat_download_config[key].ids_to_retry = list(unfinished_ids)
@@ -867,6 +871,11 @@ class Application:
         # self.app_data["already_download_ids"] = list(self.already_download_ids_set)
 
         if immediate:
+            # Save to DB
+            if db.conn:
+                db.save_setting("config", self.config)
+                db.save_setting("data", self.app_data)
+
             with open(self.config_file, "w", encoding="utf-8") as yaml_file:
                 _yaml.dump(self.config, yaml_file)
 
@@ -881,15 +890,29 @@ class Application:
 
     def load_config(self):
         """Load user config"""
-        with open(
-            os.path.join(os.path.abspath("."), self.config_file), encoding="utf-8"
-        ) as f:
-            config = _yaml.load(f.read())
-            if config:
-                self.config = config
-                self.assign_config(self.config)
 
-        if os.path.exists(os.path.join(os.path.abspath("."), self.app_data_file)):
+        # Try load from DB first
+        db_config = db.load_setting("config")
+        if db_config:
+            self.config = db_config
+            self.assign_config(self.config)
+        else:
+            with open(
+                os.path.join(os.path.abspath("."), self.config_file), encoding="utf-8"
+            ) as f:
+                config = _yaml.load(f.read())
+                if config:
+                    self.config = config
+                    self.assign_config(self.config)
+                    # Migrate to DB if available
+                    if db.conn:
+                        db.save_setting("config", self.config)
+
+        db_app_data = db.load_setting("data")
+        if db_app_data:
+            self.app_data = db_app_data
+            self.assign_app_data(self.app_data)
+        elif os.path.exists(os.path.join(os.path.abspath("."), self.app_data_file)):
             with open(
                 os.path.join(os.path.abspath("."), self.app_data_file),
                 encoding="utf-8",
@@ -898,6 +921,9 @@ class Application:
                 if app_data:
                     self.app_data = app_data
                     self.assign_app_data(self.app_data)
+                    # Migrate to DB if available
+                    if db.conn:
+                        db.save_setting("data", self.app_data)
 
     def pre_run(self):
         """before run application do"""
