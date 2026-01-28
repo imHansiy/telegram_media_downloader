@@ -115,6 +115,28 @@ def init_web(app: Application, client: Client = None, restart_callback=None):
         ).start()
 
 
+@_flask_app.route("/")
+@login_required
+def index():
+    """index"""
+    return render_template("index.html", download_state=get_download_state())
+
+
+@_flask_app.route("/login", methods=["GET", "POST"])
+def login():
+    """login"""
+    if request.method == "POST":
+        password = request.json.get("password")
+        if password:
+            if web_login_users.get("root") == deAesCrypt.decrypt(password):
+                user = User()
+                login_user(user)
+                return jsonify({"code": "1"})
+
+        return jsonify({"code": "0"})
+    return render_template("login.html")
+
+
 @_flask_app.route("/config", methods=["GET", "POST"])
 @login_required
 def config():
