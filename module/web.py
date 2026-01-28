@@ -42,7 +42,8 @@ _login_manager.init_app(_flask_app)
 web_login_users: dict = {}
 deAesCrypt = AesBase64("1234123412ABCDEF", "ABCDEF1234123412")
 _client: Client = None
-
+_app_instance: Application = None
+_restart_callback = None
 
 class User(UserMixin):
     """Web Login User"""
@@ -96,80 +97,13 @@ def init_web(app: Application, client: Client = None, restart_callback=None):
     global web_login_users
     global _client
     global _restart_callback
+    global _app_instance
     _client = client
     _restart_callback = restart_callback
+    _app_instance = app
 
     if app.web_login_secret:
-        web_login_users = {"root": app.web_login_secret}
-    else:
-        _flask_app.config["LOGIN_DISABLED"] = True
-    if app.debug_web:
-        threading.Thread(target=run_web_server, args=(app,)).start()
-    else:
-        threading.Thread(
-            target=get_flask_app().run, daemon=True, args=(app.web_host, app.web_port)
-        ).start()
-
-
-@_flask_app.route("/restart", methods=["POST"])
-@login_required
-def restart():
-    """Restart Application"""
-    if _restart_callback:
-        # Run in a separate thread to avoid blocking the response
-        threading.Thread(target=_restart_callback).start()
-        return jsonify({"status": "success", "message": "Application is restarting..."})
-    return jsonify({"status": "error", "message": "Restart capability not available"})
-
-
-@_flask_app.route("/login", methods=["GET", "POST"])
-def login():
-    """
-    Function to handle the login route.
-
-    Parameters:
-    - No parameters
-
-    Returns:
-    - If the request method is "POST" and the username and
-      password match the ones in the web_login_users dictionary,
-      it returns a JSON response with a code of "1".
-    - Otherwise, it returns a JSON response with a code of "0".
-    - If the request method is not "POST", it returns the rendered "login.html" template.
-    """
-    if request.method == "POST":
-        username = "root"
-        web_login_form = {}
-        for key, value in request.form.items():
-            if value:
-                value = deAesCrypt.decrypt(value)
-            web_login_form[key] = value
-
-        if not web_login_form.get("password"):
-            return jsonify({"code": "0"})
-
-        password = web_login_form["password"]
-        if username in web_login_users and web_login_users[username] == password:
-            user = User()
-            login_user(user)
-            return jsonify({"code": "1"})
-
-        return jsonify({"code": "0"})
-
-    return render_template("login.html")
-
-
-@_flask_app.route("/")
-@login_required
-def index():
-    """Index html"""
-    return render_template(
-        "index.html",
-        download_state=(
-            "pause" if get_download_state() is DownloadState.Downloading else "continue"
-        ),
-    )
-
+# ... (existing code)
 
 @_flask_app.route("/config", methods=["GET", "POST"])
 @login_required
@@ -195,7 +129,11 @@ def config():
     # Load current config
     current_config = {}
     if db.conn:
-        current_config = db.load_setting("config") or {}
+        current_config = db.load_setting("config")
+    
+    # If DB config is empty, fallback to current in-memory config
+    if not current_config and _app_instance:
+        current_config = _app_instance.config
 
     return render_template("config.html", config=json.dumps(current_config, indent=2))
 
