@@ -45,6 +45,7 @@ _client: Client = None
 _app_instance: Application = None
 _restart_callback = None
 
+
 class User(UserMixin):
     """Web Login User"""
 
@@ -103,7 +104,16 @@ def init_web(app: Application, client: Client = None, restart_callback=None):
     _app_instance = app
 
     if app.web_login_secret:
-# ... (existing code)
+        web_login_users = {"root": app.web_login_secret}
+    else:
+        _flask_app.config["LOGIN_DISABLED"] = True
+    if app.debug_web:
+        threading.Thread(target=run_web_server, args=(app,)).start()
+    else:
+        threading.Thread(
+            target=get_flask_app().run, daemon=True, args=(app.web_host, app.web_port)
+        ).start()
+
 
 @_flask_app.route("/config", methods=["GET", "POST"])
 @login_required
@@ -130,7 +140,7 @@ def config():
     current_config = {}
     if db.conn:
         current_config = db.load_setting("config")
-    
+
     # If DB config is empty, fallback to current in-memory config
     if not current_config and _app_instance:
         current_config = _app_instance.config
