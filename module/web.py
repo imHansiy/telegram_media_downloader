@@ -30,6 +30,8 @@ from module.download_stat import (
     get_download_state,
     get_total_download_speed,
     set_download_state,
+    clear_download_history,
+    remove_download_task,
 )
 from module.upload_stat import get_upload_result, get_total_upload_speed
 from module.cloud_drive import CloudDrive
@@ -553,11 +555,19 @@ def tg_password():
 @login_required
 def get_download_speed():
     """Get download speed"""
+    download_speed = get_total_download_speed()
+    upload_speed = get_total_upload_speed()
+    
+    # In streaming mode: if download speed is 0 but upload speed is not,
+    # use upload speed as download speed (data flows simultaneously)
+    if download_speed == 0 and upload_speed > 0:
+        download_speed = upload_speed
+    
     return (
         '{ "download_speed" : "'
-        + format_byte(get_total_download_speed())
+        + format_byte(download_speed)
         + '/s" , "upload_speed" : "'
-        + format_byte(get_total_upload_speed())
+        + format_byte(upload_speed)
         + '/s" } '
     )
 
@@ -583,6 +593,41 @@ def web_set_download_state():
 def get_app_version():
     """Get telegram_media_downloader version"""
     return utils.__version__
+
+
+@_flask_app.route("/clear_history", methods=["POST"])
+@login_required
+def api_clear_history():
+    """Clear all completed download history"""
+    try:
+        clear_download_history()
+        return jsonify({"success": True, "message": "历史记录已清空"})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@_flask_app.route("/remove_task", methods=["POST"])
+@login_required
+def api_remove_task():
+    """Remove a specific task from history"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"success": False, "message": "请求数据无效"}), 400
+        
+        chat_id = int(data.get("chat_id", 0))
+        message_id = int(data.get("message_id", 0))
+        
+        if not chat_id or not message_id:
+            return jsonify({"success": False, "message": "缺少 chat_id 或 message_id"}), 400
+        
+        success = remove_download_task(chat_id, message_id)
+        if success:
+            return jsonify({"success": True, "message": "任务已删除"})
+        else:
+            return jsonify({"success": False, "message": "任务不存在"}), 404
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
 
 
 @_flask_app.route("/get_download_list")
@@ -672,7 +717,8 @@ def _get_formatted_list(already_down=False):
         elif u_item:
             # If no download record but uploading (Streaming), assume download matches upload
             down_byte = u_item.get("processed_bytes", 0)
-            # Streaming doesn't have a separate download speed usually, or it's same as upload
+            # Streaming mode: download speed equals upload speed (data flows simultaneously)
+            download_speed_val = u_item.get("upload_speed", 0)
         
         # --- Upload Status ---
         upload_speed_val = 0
@@ -703,22 +749,27 @@ def _get_formatted_list(already_down=False):
                 upload_progress = min(download_progress, 99.9)
 
         # --- Activity/Completion Check ---
-        is_down_finished = (down_byte >= total_size) if total_size > 0 else False
-        is_upload_finished = (upload_processed >= upload_total and upload_total > 0) if is_uploading else True
+        # A task is ONLY "Completed" if it exists in download_result AND is 100%
+        # (This confirms verify_and_save_download was called after WebDAV confirmed success)
+        is_truly_finished = False
+        if d_item:
+            if d_item.get("down_byte", 0) >= d_item.get("total_size", 1):
+                is_truly_finished = True
         
-        # Critical: A task is "Active" (not already_down) if it is NOT finished.
-        # It is finished if:
-        # 1. Download is done (100%)
-        # 2. AND (not uploading OR upload is also 100%)
-        is_truly_finished = is_down_finished and is_upload_finished
+        # If it's effectively 100% data transfer but NOT yet marked finished in history,
+        # it means it's "Finishing" (waiting for server to close the stream/confirm receipt)
+        is_finishing = False
+        raw_progress = (down_byte / total_size * 100) if total_size > 0 else 0
+        if not is_truly_finished and raw_progress >= 99.9:
+            is_finishing = True
 
         # Filter based on requested list type
         if already_down:
-            # Asking for History -> Show only truly finished
+            # Asking for History -> Show only truly physically finished
             if not is_truly_finished:
                 continue
         else:
-            # Asking for Active -> Show only NOT finished (or currently uploading)
+            # Asking for Active -> Show only NOT finished
             if is_truly_finished:
                 continue
 
@@ -731,27 +782,50 @@ def _get_formatted_list(already_down=False):
         remote_path = local_path
         if _app_instance and hasattr(_app_instance, 'cloud_drive_config'):
             cloud_cfg = _app_instance.cloud_drive_config
+            config_save_path = ""
+            if hasattr(_app_instance, "save_path"):
+                config_save_path = _app_instance.save_path.replace("\\", "/").rstrip("/")
+            
             if hasattr(cloud_cfg, 'remote_dir') and cloud_cfg.remote_dir:
-                fname = os.path.basename(local_path)
-                remote_path = f"{cloud_cfg.remote_dir.rstrip('/')}/{fname}"
+                try:
+                    # Calculate relative path to preserve folder structure (e.g. ChatName/Date/File.mp4)
+                    if config_save_path and local_path.startswith(config_save_path):
+                        rel_path = local_path[len(config_save_path):].lstrip("/")
+                    else:
+                        rel_path = os.path.basename(local_path)
+                except Exception:
+                    rel_path = os.path.basename(local_path)
+                
+                remote_path = f"{cloud_cfg.remote_dir.rstrip('/')}/{rel_path}"
 
         # Valid Time
-        ts = base_item.get("created_at") or base_item.get("start_time") or base_item.get("updated_at") or time.time()
+        created_ts = base_item.get("created_at") or base_item.get("start_time") or time.time()
+        completed_ts = base_item.get("end_time") or base_item.get("updated_at") or created_ts
+        
         beijing_tz = timezone(timedelta(hours=8))
-        created_at_fmt = datetime.fromtimestamp(ts, tz=beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
+        created_at_fmt = datetime.fromtimestamp(created_ts, tz=beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
+        completed_at_fmt = datetime.fromtimestamp(completed_ts, tz=beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
+
+        # Custom progress string for finishing state
+        display_download_progress = str(download_progress)
+        display_upload_progress = str(upload_progress)
+        if is_finishing:
+             display_download_progress = "Finishing..."
+             display_upload_progress = "Finishing..."
 
         item = {
             "chat": str(chat_id),
             "id": str(idx),
             "filename": os.path.basename(file_name),
             "total_size": format_byte(total_size),
-            "download_progress": str(download_progress),
-            "upload_progress": str(upload_progress),
-            "download_speed": download_speed_str,
-            "upload_speed": upload_speed_str,
+            "download_progress": display_download_progress,
+            "upload_progress": display_upload_progress,
+            "download_speed": download_speed_str if not is_finishing else "0.0b/s",
+            "upload_speed": upload_speed_str if not is_finishing else "0.0b/s",
             "save_path": local_path,
             "remote_path": remote_path,
-            "created_at": created_at_fmt
+            "created_at": created_at_fmt,
+            "completed_at": completed_at_fmt if is_truly_finished else None
         }
         data.append(item)
     return data

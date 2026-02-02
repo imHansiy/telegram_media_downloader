@@ -15,11 +15,29 @@ def get_upload_result() -> Dict:
     return _upload_result
 
 def get_total_upload_speed() -> int:
-    """get total upload speed. Returns 0 if no upload activity for 2+ seconds."""
+    """get total upload speed. Uses sum of active task speeds as fallback."""
     global _total_upload_speed
-    # If no upload activity for more than 2 seconds, return 0
-    if time.time() - _last_upload_time > 2.0:
+    
+    cur_time = time.time()
+    
+    # If no upload activity for more than 5 seconds, reset to 0
+    if _total_upload_speed > 0 and cur_time - _last_upload_time > 5.0:
         _total_upload_speed = 0
+    
+    # Fallback: If calculated speed is 0, but we have active uploads with speeds,
+    # use the sum of individual task speeds instead
+    if _total_upload_speed == 0 and _upload_result:
+        total_from_tasks = 0
+        for chat_msgs in _upload_result.values():
+            for task_info in chat_msgs.values():
+                task_speed = task_info.get("upload_speed", 0)
+                task_updated = task_info.get("updated_at", 0)
+                # Only count tasks updated within last 5 seconds
+                if task_speed > 0 and (cur_time - task_updated) < 5.0:
+                    total_from_tasks += task_speed
+        if total_from_tasks > 0:
+            return total_from_tasks
+    
     return _total_upload_speed
 
 def _parse_size_str(size_str: str) -> int:
@@ -139,3 +157,25 @@ def remove_upload_status(chat_id: int, message_id: int):
         # Clean up empty chat dict
         if not _upload_result[chat_id]:
             del _upload_result[chat_id]
+
+
+def clear_upload_history():
+    """Clear all completed uploads from history.
+    Keep only incomplete uploads (active tasks)."""
+    global _upload_result
+    
+    cur_time = time.time()
+    active = {}
+    for chat_id, messages in _upload_result.items():
+        active_msgs = {}
+        for msg_id, info in messages.items():
+            processed = info.get("processed_bytes", 0)
+            total = info.get("total_bytes", 1)
+            updated = info.get("updated_at", 0)
+            # Keep if not complete AND recently updated (within 30 seconds)
+            if processed < total and (cur_time - updated) < 30.0:
+                active_msgs[msg_id] = info
+        if active_msgs:
+            active[chat_id] = active_msgs
+    
+    _upload_result = active

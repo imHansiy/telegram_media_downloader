@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import platform
 from datetime import datetime
 from typing import Callable, List, Union
 
@@ -197,6 +198,7 @@ class DownloadBot:
                 ),
             ),
             types.BotCommand("set_language", _t("设置语言")),
+            types.BotCommand("status", _t("获取运行设备系统信息")),
             types.BotCommand("stop", _t("停止机器人下载或转发")),
         ]
 
@@ -355,6 +357,14 @@ class DownloadBot:
         )
 
         self.bot.add_handler(
+            MessageHandler(
+                system_status,
+                filters=pyrogram.filters.command(["status"])
+                & pyrogram.filters.user(self.allowed_user_ids),
+            )
+        )
+
+        self.bot.add_handler(
             CallbackQueryHandler(
                 on_query_handler, filters=pyrogram.filters.user(self.allowed_user_ids)
             )
@@ -455,6 +465,7 @@ async def send_help_str(client: pyrogram.Client, chat_id):
         f"/listen_forward - {_t('监听转发消息')}\n"
         f"/forward_to_comments - {_t('将特定媒体转发到评论区')}\n"
         f"/set_language - {_t('设置语言')}\n"
+        f"/status - {_t('获取运行设备系统信息')}\n"
         f"/stop - {_t('停止机器人下载或转发')}\n\n"
         f"{_t('**注意**: 1 表示整个聊天的开始')},"
         f"{_t('0 表示整个聊天的结束')}\n"
@@ -597,6 +608,109 @@ async def add_filter(client: pyrogram.Client, message: pyrogram.types.Message):
             message.from_user.id, f"{err}\n{_t('Check error, please add again!')}"
         )
     return
+
+
+async def system_status(client: pyrogram.Client, message: pyrogram.types.Message):
+    """
+    Get system status information.
+
+    Parameters:
+        client (pyrogram.Client): The pyrogram client.
+        message (pyrogram.types.Message): The message containing the command.
+
+    Returns:
+        None
+    """
+    try:
+        import psutil
+    except ImportError:
+        await client.send_message(
+            message.from_user.id,
+            _t("psutil 模块未安装，请运行: pip install psutil"),
+        )
+        return
+
+    try:
+        # System basic info
+        uname = platform.uname()
+        boot_time = datetime.fromtimestamp(psutil.boot_time())
+        uptime = datetime.now() - boot_time
+
+        # CPU info
+        cpu_percent = psutil.cpu_percent(interval=1)
+        cpu_count = psutil.cpu_count()
+        cpu_freq = psutil.cpu_freq()
+        cpu_freq_str = f"{cpu_freq.current:.0f}MHz" if cpu_freq else "N/A"
+
+        # Memory info
+        mem = psutil.virtual_memory()
+        mem_used_gb = mem.used / (1024 ** 3)
+        mem_total_gb = mem.total / (1024 ** 3)
+
+        # Disk info
+        disk = psutil.disk_usage('/')
+        disk_used_gb = disk.used / (1024 ** 3)
+        disk_total_gb = disk.total / (1024 ** 3)
+
+        # Network info
+        net_io = psutil.net_io_counters()
+        bytes_sent_gb = net_io.bytes_sent / (1024 ** 3)
+        bytes_recv_gb = net_io.bytes_recv / (1024 ** 3)
+
+        # Active tasks info
+        active_tasks = len(_bot.task_node)
+        running_tasks = sum(1 for node in _bot.task_node.values() if node.is_running)
+
+        # Python info
+        python_version = platform.python_version()
+
+        # Format uptime
+        days = uptime.days
+        hours, remainder = divmod(uptime.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        uptime_str = f"{days}d {hours}h {minutes}m {seconds}s"
+
+        msg = (
+            f"`\n"
+            f"🖥️ {_t('系统状态')}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📌 {_t('系统')}: {uname.system} {uname.release}\n"
+            f"🏷️ {_t('主机名')}: {uname.node}\n"
+            f"🐍 Python: {python_version}\n"
+            f"📦 TDL: {utils.__version__}\n"
+            f"⏱️ {_t('运行时间')}: {uptime_str}\n"
+            f"\n"
+            f"💻 CPU\n"
+            f"├─ {_t('使用率')}: {cpu_percent}%\n"
+            f"├─ {_t('核心数')}: {cpu_count}\n"
+            f"└─ {_t('频率')}: {cpu_freq_str}\n"
+            f"\n"
+            f"🧠 {_t('内存')}\n"
+            f"├─ {_t('使用')}: {mem_used_gb:.1f} GB / {mem_total_gb:.1f} GB\n"
+            f"└─ {_t('占用')}: {mem.percent}%\n"
+            f"\n"
+            f"💾 {_t('磁盘')}\n"
+            f"├─ {_t('使用')}: {disk_used_gb:.1f} GB / {disk_total_gb:.1f} GB\n"
+            f"└─ {_t('占用')}: {disk.percent}%\n"
+            f"\n"
+            f"🌐 {_t('网络 (累计)')}\n"
+            f"├─ ↑ {_t('发送')}: {bytes_sent_gb:.2f} GB\n"
+            f"└─ ↓ {_t('接收')}: {bytes_recv_gb:.2f} GB\n"
+            f"\n"
+            f"📋 {_t('任务')}\n"
+            f"├─ {_t('活动任务')}: {active_tasks}\n"
+            f"└─ {_t('运行中')}: {running_tasks}\n"
+            f"`"
+        )
+
+        await client.send_message(message.from_user.id, msg)
+
+    except Exception as e:
+        logger.error(f"Failed to get system status: {e}")
+        await client.send_message(
+            message.from_user.id,
+            f"{_t('获取系统状态失败')}: {str(e)}",
+        )
 
 
 async def direct_download(

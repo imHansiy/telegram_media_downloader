@@ -142,6 +142,17 @@
 
     <!-- History Tab -->
     <div id="tab-history" class="tab-content hidden h-full flex flex-col">
+      <!-- Header with Clear Button -->
+      <div class="flex justify-end p-2 border-b border-border/30">
+        <button id="clear-history-btn" onclick="clearHistory()"
+          class="btn btn-outline text-xs px-3 py-1.5 flex items-center gap-1.5 hover:bg-danger/10 hover:text-danger hover:border-danger transition-colors">
+          <svg class="icon" style="width:14px;height:14px;" viewBox="0 0 24 24">
+            <polyline points="3 6 5 6 21 6"></polyline>
+            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+          </svg>
+          清空历史
+        </button>
+      </div>
       <div class="table-container flex-1 overflow-auto">
         <table class="table w-full relative">
           <thead
@@ -149,10 +160,11 @@
             <tr>
               <th width="60" class="text-center">类型</th>
               <th width="80">ID</th>
-              <th width="35%">文件名</th>
+              <th width="30%">文件名</th>
               <th width="100">大小</th>
-              <th width="160">创建时间</th>
+              <th width="140">完成时间</th>
               <th>远程路径</th>
+              <th width="60" class="text-center">操作</th>
             </tr>
           </thead>
           <tbody id="downloaded-tbody">

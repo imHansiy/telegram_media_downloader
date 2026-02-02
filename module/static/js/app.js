@@ -204,11 +204,9 @@ class App {
             const downloadProgress = parseFloat(item.download_progress) || 0;
             const uploadProgress = parseFloat(item.upload_progress) || 0;
 
-            // Speed display logic
-            let speedDisplay = item.download_speed || '0 B/s';
-            if (downloadProgress >= 100 && uploadProgress < 100) {
-                speedDisplay = item.upload_speed || '上传中...';
-            }
+            // Speed values
+            const dlSpeedStr = item.download_speed || '0 B/s';
+            const ulSpeedStr = item.upload_speed || '0 B/s';
 
             return `
             <tr class="hover:bg-surface/50 transition-colors border-b border-border/50">
@@ -237,7 +235,12 @@ class App {
                         <span class="text-[10px] font-mono text-secondary text-right w-full">${uploadProgress.toFixed(1)}%</span>
                     </div>
                 </td>
-                <td class="text-right font-mono text-accent text-xs font-bold py-3">${speedDisplay}</td>
+                <td class="text-right font-mono text-xs py-3" style="min-width: 90px;">
+                    <div class="flex flex-col gap-0.5">
+                        <span class="text-accent font-bold" title="下载速度">↓ ${dlSpeedStr}</span>
+                        <span class="text-success font-bold" title="上传速度">↑ ${ulSpeedStr}</span>
+                    </div>
+                </td>
             </tr>
         `}).join('');
 
@@ -273,13 +276,23 @@ class App {
             // Use remote_path if available, otherwise fall back to save_path
             const remotePath = item.remote_path || item.save_path || '-';
             return `
-            <tr class="hover:bg-surface/50 transition-colors border-b border-border/50">
+            <tr class="hover:bg-surface/50 transition-colors border-b border-border/50" data-chat="${item.chat}" data-id="${item.id}">
                 <td class="text-center text-xl py-3">${icon}</td>
                 <td class="text-secondary text-xs font-mono">${item.id}</td>
                 <td class="py-3"><div class="truncate text-text text-sm" style="max-width: 300px;" title="${item.filename}">${item.filename}</div></td>
                 <td class="text-secondary text-xs font-mono">${item.total_size}</td>
-                <td class="text-secondary text-[10px] font-mono">${item.created_at || '-'}</td>
+                <td class="text-secondary text-[10px] font-mono">${item.completed_at || item.created_at || '-'}</td>
                 <td class="text-secondary text-xs truncate" style="max-width: 200px;" title="${remotePath}">${remotePath}</td>
+                <td class="text-center py-3">
+                    <button onclick="removeTask('${item.chat}', '${item.id}')" 
+                        class="text-secondary hover:text-danger transition-colors p-1 rounded hover:bg-danger/10" 
+                        title="删除此记录">
+                        <svg class="icon" style="width:16px;height:16px;" viewBox="0 0 24 24">
+                            <polyline points="3 6 5 6 21 6"></polyline>
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                        </svg>
+                    </button>
+                </td>
             </tr>
         `}).join('');
 
@@ -310,3 +323,74 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 });
+
+// Clear all history
+async function clearHistory() {
+    if (!confirm('确定要清空所有历史记录吗？此操作不可恢复。')) {
+        return;
+    }
+
+    try {
+        const response = await fetch('/clear_history', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+
+        const result = await response.json();
+        if (result.success) {
+            // Clear the table
+            const tbody = document.getElementById('downloaded-tbody');
+            if (tbody) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="7" class="text-center py-12">
+                            <div class="flex flex-col items-center justify-center opacity-50">
+                                <svg class="icon mb-2" style="width:48px;height:48px;" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="12" cy="12" r="10"/><path d="M8 12l2 2 4-4"/></svg>
+                                <span class="text-secondary text-sm">暂无历史记录</span>
+                            </div>
+                        </td>
+                    </tr>`;
+            }
+            // Update count
+            const countBadge = document.getElementById('history-count');
+            if (countBadge) countBadge.textContent = '0';
+
+            console.log('历史记录已清空');
+        } else {
+            alert('清空失败: ' + result.message);
+        }
+    } catch (error) {
+        console.error('清空历史失败:', error);
+        alert('清空历史失败，请查看控制台');
+    }
+}
+
+// Remove single task
+async function removeTask(chatId, messageId) {
+    try {
+        const response = await fetch('/remove_task', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: chatId, message_id: messageId })
+        });
+
+        const result = await response.json();
+        if (result.success) {
+            // Remove the row from table
+            const row = document.querySelector(`tr[data-chat="${chatId}"][data-id="${messageId}"]`);
+            if (row) {
+                row.remove();
+            }
+            // Update count
+            const countBadge = document.getElementById('history-count');
+            if (countBadge) {
+                const current = parseInt(countBadge.textContent) || 0;
+                countBadge.textContent = Math.max(0, current - 1);
+            }
+        } else {
+            console.error('删除失败:', result.message);
+        }
+    } catch (error) {
+        console.error('删除任务失败:', error);
+    }
+}

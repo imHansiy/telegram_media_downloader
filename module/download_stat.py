@@ -30,11 +30,31 @@ def get_download_result() -> dict:
 
 
 def get_total_download_speed() -> int:
-    """get total download speed. Returns 0 if no download activity for 2+ seconds."""
+    """get total download speed. Uses sum of active task speeds as fallback."""
     global _total_download_speed
-    # If no download activity for more than 2 seconds, return 0
-    if time.time() - _last_download_time > 2.0:
+    
+    cur_time = time.time()
+    
+    # If no download activity for more than 5 seconds, reset to 0
+    if _total_download_speed > 0 and cur_time - _last_download_time > 5.0:
         _total_download_speed = 0
+    
+    # Fallback: If calculated speed is 0, but we have active downloads with speeds,
+    # use the sum of individual task speeds instead
+    if _total_download_speed == 0 and _download_result:
+        total_from_tasks = 0
+        for chat_msgs in _download_result.values():
+            for task_info in chat_msgs.values():
+                task_speed = task_info.get("download_speed", 0)
+                end_time = task_info.get("end_time", 0)
+                down_byte = task_info.get("down_byte", 0)
+                total_size = task_info.get("total_size", 1)
+                # Only count incomplete tasks updated within last 5 seconds
+                if task_speed > 0 and down_byte < total_size and (cur_time - end_time) < 5.0:
+                    total_from_tasks += int(task_speed)
+        if total_from_tasks > 0:
+            return total_from_tasks
+    
     return _total_download_speed
 
 
@@ -100,7 +120,33 @@ def _load_pending_downloads():
             saved = db.load_setting("pending_downloads")
             if saved:
                 _pending_downloads = saved
-                print(f"DEBUG: [stat] Loaded {len(_pending_downloads)} pending downloads for resume")
+                loaded_count = len(_pending_downloads)
+                
+                # Clean up pending downloads that are already completed in download_history
+                to_remove = []
+                for key, item in _pending_downloads.items():
+                    chat_id = item.get("chat_id")
+                    msg_id = item.get("message_id")
+                    
+                    # Check if this task is already completed in download_history
+                    if chat_id in _download_result and msg_id in _download_result[chat_id]:
+                        d_item = _download_result[chat_id][msg_id]
+                        down_byte = d_item.get("down_byte", 0)
+                        total_size = d_item.get("total_size", 1)
+                        if down_byte >= total_size:
+                            # Already completed, mark for removal
+                            to_remove.append(key)
+                
+                # Remove completed items from pending
+                for key in to_remove:
+                    del _pending_downloads[key]
+                
+                if to_remove:
+                    print(f"DEBUG: [stat] Removed {len(to_remove)} already-completed items from pending")
+                    _save_pending_downloads()
+                
+                remaining = len(_pending_downloads)
+                print(f"DEBUG: [stat] Loaded {loaded_count} pending downloads, {remaining} remaining for resume")
         except Exception as e:
             print(f"Error loading pending downloads: {e}")
 
@@ -183,25 +229,59 @@ async def update_download_status(
         _last_download_time = cur_time
 
 
-def verify_and_save_download(chat_id: int, message_id: int):
-    """Mark download as complete and save to DB"""
+def verify_and_save_download(chat_id: int, message_id: int, file_name: str = "", total_size: int = 0):
+    """Mark download as complete and save to DB.
+    
+    For streaming uploads, the download record may not exist in _download_result,
+    so we need to create it from available info or upload_result.
+    """
+    global _download_result
+    
     try:
-        if not _download_result.get(chat_id):
-            return
+        # Import here to avoid circular import
+        from module.upload_stat import get_upload_result
+        
+        upload_result = get_upload_result()
+        
+        # Check if we have a record in download_result
+        if chat_id not in _download_result:
+            _download_result[chat_id] = {}
+        
+        if message_id not in _download_result[chat_id]:
+            # No download record - this is likely a streaming upload
+            # Try to get info from upload_result
+            u_info = None
+            if chat_id in upload_result and message_id in upload_result[chat_id]:
+                u_info = upload_result[chat_id][message_id]
             
-        if _download_result[chat_id].get(message_id):
-            # Ensure it's marked as 100%
+            # Create a new record
+            import time
+            _download_result[chat_id][message_id] = {
+                "down_byte": u_info.get("total_bytes", total_size) if u_info else total_size,
+                "total_size": u_info.get("total_bytes", total_size) if u_info else total_size,
+                "file_name": u_info.get("file_name", file_name) if u_info else file_name,
+                "download_speed": 0,
+                "start_time": time.time(),
+                "end_time": time.time(),
+            }
+            print(f"DEBUG: [stat] Created new history record for chat={chat_id}, msg={message_id}, file={file_name}, size={total_size}")
+        else:
+            # Existing record - ensure it's marked as 100%
             item = _download_result[chat_id][message_id]
             if item["down_byte"] != item["total_size"]:
                 item["down_byte"] = item["total_size"]
-                
-            if db.conn:
-                db.save_setting("download_history", _download_result)
-                # print(f"DEBUG: [stat] Saved history for message {message_id}")
+            # Update end_time
+            import time
+            item["end_time"] = time.time()
+            print(f"DEBUG: [stat] Updated existing record for chat={chat_id}, msg={message_id}")
+        
+        # Save to DB
+        if db.conn:
+            db.save_setting("download_history", _download_result)
+            print(f"DEBUG: [stat] Saved history to DB, total chats={len(_download_result)}")
+            
     except Exception as e:
         print(f"Error saving download history: {e}")
-        _total_download_size = 0
-        _last_download_time = cur_time
 
 
 def init_stat():
@@ -256,6 +336,58 @@ def init_stat():
 
     # Load pending downloads for resume
     _load_pending_downloads()
+
+
+def clear_download_history():
+    """Clear all completed downloads from history"""
+    global _download_result
+    
+    # Keep only incomplete downloads (active tasks)
+    active = {}
+    for chat_id, messages in _download_result.items():
+        active_msgs = {}
+        for msg_id, info in messages.items():
+            if info.get("down_byte", 0) < info.get("total_size", 1):
+                active_msgs[msg_id] = info
+        if active_msgs:
+            active[chat_id] = active_msgs
+    
+    _download_result = active
+    
+    if db.conn:
+        db.save_setting("download_history", _download_result)
+    
+    # Also clear upload history
+    from module.upload_stat import clear_upload_history
+    clear_upload_history()
+    
+    return True
+
+
+def remove_download_task(chat_id: int, message_id: int):
+    """Remove a specific download task from history"""
+    global _download_result
+    
+    removed = False
+    
+    # Remove from download_result
+    if chat_id in _download_result and message_id in _download_result[chat_id]:
+        del _download_result[chat_id][message_id]
+        
+        # Clean up empty chat entries
+        if not _download_result[chat_id]:
+            del _download_result[chat_id]
+        
+        if db.conn:
+            db.save_setting("download_history", _download_result)
+        
+        removed = True
+    
+    # Also remove from upload_result
+    from module.upload_stat import remove_upload_status
+    remove_upload_status(chat_id, message_id)
+    
+    return removed
 
 
 # Initialize on module load
