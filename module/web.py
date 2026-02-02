@@ -637,7 +637,19 @@ def _get_formatted_list(already_down=False):
     data = []
     for chat_id, messages in download_result.items():
         for idx, value in messages.items():
-            is_already_down = value["down_byte"] == value["total_size"]
+            # Basic completion check
+            is_bytes_done = value["down_byte"] >= value["total_size"]
+            
+            # Verify if it's truly finished by checking active nodes if available
+            is_active = False
+            if _app_instance and hasattr(_app_instance, 'chat_download_config'):
+                config = _app_instance.chat_download_config.get(chat_id)
+                if config and config.node and config.node.is_running:
+                    is_active = True
+
+            # If it's a streaming task (no local path exists yet or matched by remote_dir), 
+            # we should trust the active status more
+            is_already_down = is_bytes_done and not is_active
 
             if already_down and not is_already_down:
                 continue
@@ -650,11 +662,14 @@ def _get_formatted_list(already_down=False):
             # Calculate download progress
             download_progress = 0
             if value['total_size'] > 0:
-                download_progress = round(value['down_byte'] / value['total_size'] * 100, 1)
+                download_progress = min(round(value['down_byte'] / value['total_size'] * 100, 1), 100.0)
             
-            # For streaming mode, upload progress mirrors download progress
-            # In future, can be enhanced to show real upload progress from TaskNode
-            upload_progress = download_progress if is_already_down else min(download_progress, 99.9)
+            # Upload progress logic for Streaming/Normal
+            if is_already_down:
+                upload_progress = 100.0
+            else:
+                # Cap at 99.9% while still active to indicate "finishing up"
+                upload_progress = min(download_progress, 99.9)
             
             # Construct remote path based on cloud drive config
             local_path = value["file_name"].replace("\\", "/")
