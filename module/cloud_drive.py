@@ -339,11 +339,18 @@ class CloudDrive:
                          progress_callback(uploaded, total_size, *progress_args)
 
         # 10s for connect, 2 hours for total upload. Large videos need more time.
-        timeout = aiohttp.ClientTimeout(total=7200, connect=10)
+        # Increased connect timeout to 30s as some WebDAV servers/proxies are slow to respond
+        timeout = aiohttp.ClientTimeout(total=7200, connect=30)
 
         for attempt in range(max_retries):
             try:
+                # Use a fresh session for each retry to avoid connection reuse issues
                 async with aiohttp.ClientSession(auth=auth, timeout=timeout) as session:
+                    # Resolve the stream for this attempt
+                    # If stream_generator is a factory (callable), call it to get a fresh stream
+                    # This is CRITICAL for correct retries of streaming data
+                    current_stream = stream_generator() if callable(stream_generator) else stream_generator
+                    
                     # 1. Ensure parent directories exist (MKCOL) - use cache to avoid duplicates
                     parent_dir = os.path.dirname(full_rel_path).replace("\\", "/")
                     if parent_dir and parent_dir != ".":
@@ -387,26 +394,50 @@ class CloudDrive:
                     # Set Content-Length if size is known to help some WebDAV servers
                     if total_size > 0:
                         headers["Content-Length"] = str(total_size)
-                        
-                    async with session.put(remote_url, data=progress_stream(), headers=headers) as resp:
-                        if resp.status in [200, 201, 204]:
-                            logger.info(f"WebDAV upload success: {rel_path}")
-                            return True
-                        elif resp.status == 423:
-                            # Locked - retry after delay
-                            logger.warning(f"[WebDAV] File locked (423), retry {attempt + 1}/{max_retries}")
-                            await asyncio.sleep(2 * (attempt + 1))  # Exponential backoff
-                            continue
-                        elif resp.status in [500, 502, 503, 504]:
-                            # Server error - possible transient, retry
-                            text = await resp.text()
-                            logger.warning(f"[WebDAV] Server error ({resp.status}), retry {attempt + 1}/{max_retries}: {text[:100]}")
-                            await asyncio.sleep(2 * (attempt + 1))
-                            continue
-                        else:
-                            text = await resp.text()
-                            logger.error(f"WebDAV upload failed: {resp.status} - {text[:500]}")
+                    
+                    # Add Expect: 100-continue for large files to avoid sending body if server rejects early (e.g. 401/413)
+                    # Many Nginx/Cloudflare proxies prefer this for large PUT requests
+                    headers["Expect"] = "100-continue"
+                    
+                    # Wrap the generator to report progress
+                    async def progress_stream_wrapper(it):
+                        uploaded = 0
+                        async for chunk in it:
+                            yield chunk
+                            uploaded += len(chunk)
+                            if progress_callback:
+                                 if inspect.iscoroutinefunction(progress_callback):
+                                     await progress_callback(uploaded, total_size, *progress_args)
+                                 else:
+                                     progress_callback(uploaded, total_size, *progress_args)
+
+                    try:
+                        async with session.put(remote_url, data=progress_stream_wrapper(current_stream), headers=headers) as resp:
+                            if resp.status in [200, 201, 204]:
+                                logger.info(f"WebDAV upload success: {rel_path}")
+                                return True
+                            elif resp.status == 423:
+                                # Locked - retry after delay
+                                logger.warning(f"[WebDAV] File locked (423), retry {attempt + 1}/{max_retries}")
+                                await asyncio.sleep(2 * (attempt + 1))  # Exponential backoff
+                                continue
+                            elif resp.status in [500, 502, 503, 504]:
+                                # Server error - possible transient, retry
+                                text = await resp.text()
+                                logger.warning(f"[WebDAV] Server error ({resp.status}), retry {attempt + 1}/{max_retries}: {text[:200]}")
+                                await asyncio.sleep(5 * (attempt + 1)) # More conservative backoff for server errors
+                                continue
+                            else:
+                                text = await resp.text()
+                                logger.error(f"WebDAV upload failed: {resp.status} - {text[:500]}")
+                                return False
+                    except aiohttp.ClientPayloadError as e:
+                        # This can happen if the generator factory isn't used and we try to consume a dead generator
+                        logger.error(f"WebDAV payload error (possibly exhausted generator): {e}")
+                        if not callable(stream_generator):
+                            logger.error("WebDAV: Internal retry failed because stream_generator is not a factory. Retrying from outer loop.")
                             return False
+                        continue
             except asyncio.TimeoutError:
                 logger.error(f"WebDAV upload timeout (attempt {attempt + 1}/{max_retries}): {rel_path}")
                 if attempt < max_retries - 1:

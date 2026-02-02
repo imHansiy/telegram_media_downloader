@@ -468,7 +468,7 @@ async def download_media(
                     app.cloud_drive_config,
                     app.save_path,
                     file_name, # Relative path handled inside
-                    stream_generator,
+                    lambda: client.stream_media(message, limit=0, offset=0),
                     media_size,
                     progress_callback=update_upload_stat,
                     progress_args=(
@@ -553,12 +553,17 @@ async def download_media(
                     f"Message[{message.id}]: {_t('Timing out after 3 reties, download skipped.')}"
                 )
         except Exception as e:
-            # pylint: disable = C0301
             logger.error(
                 f"Message[{message.id}]: "
                 f"{_t('could not be downloaded due to following exception')}:\n[{e}].",
                 exc_info=True,
             )
+            if retry < 2:
+                logger.warning(
+                    f"Message[{message.id}]: {_t('Retrying after error')}... ({retry + 1}/3)"
+                )
+                await asyncio.sleep(RETRY_TIME_OUT * (retry + 1))
+                continue
             break
 
     return DownloadStatus.FailedDownload, None
