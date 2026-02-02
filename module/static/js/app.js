@@ -189,7 +189,7 @@ class App {
         if (data.length === 0) {
             tbody.innerHTML = `
                 <tr>
-                    <td colspan="7" class="text-center py-12">
+                    <td colspan="8" class="text-center py-12">
                         <div class="flex flex-col items-center justify-center opacity-50">
                             <svg class="icon mb-2" style="width:48px;height:48px;" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                             <span class="text-secondary text-sm">暂无进行中的任务</span>
@@ -220,6 +220,7 @@ class App {
                     </div>
                 </td>
                 <td class="text-secondary text-xs font-mono">${item.total_size}</td>
+                <td class="text-secondary text-[10px] font-mono">${item.created_at || '-'}</td>
                 <td style="min-width: 120px;" class="py-3">
                     <div class="flex flex-col gap-1">
                         <div class="h-1.5 w-full bg-border/30 rounded-full overflow-hidden">
@@ -257,7 +258,7 @@ class App {
         if (displayData.length === 0) {
             tbody.innerHTML = `
                 <tr>
-                    <td colspan="5" class="text-center py-12">
+                    <td colspan="6" class="text-center py-12">
                         <div class="flex flex-col items-center justify-center opacity-50">
                             <svg class="icon mb-2" style="width:48px;height:48px;" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="12" cy="12" r="10"/><path d="M8 12l2 2 4-4"/></svg>
                             <span class="text-secondary text-sm">暂无历史记录</span>
@@ -277,6 +278,7 @@ class App {
                 <td class="text-secondary text-xs font-mono">${item.id}</td>
                 <td class="py-3"><div class="truncate text-text text-sm" style="max-width: 300px;" title="${item.filename}">${item.filename}</div></td>
                 <td class="text-secondary text-xs font-mono">${item.total_size}</td>
+                <td class="text-secondary text-[10px] font-mono">${item.created_at || '-'}</td>
                 <td class="text-secondary text-xs truncate" style="max-width: 200px;" title="${remotePath}">${remotePath}</td>
             </tr>
         `}).join('');

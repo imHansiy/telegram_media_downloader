@@ -6,6 +6,7 @@ import threading
 import asyncio
 import json
 import time
+from datetime import datetime
 from flask import (
     Flask,
     jsonify,
@@ -666,6 +667,10 @@ def _get_formatted_list(already_down=False):
                     filename = os.path.basename(local_path)
                     remote_path = f"{cloud_cfg.remote_dir.rstrip('/')}/{filename}"
 
+            # Format creation time
+            created_at_ts = value.get("created_at") or value.get("start_time") or time.time()
+            created_at_fmt = datetime.fromtimestamp(created_at_ts).strftime("%Y-%m-%d %H:%M:%S")
+
             item = {
                 "chat": str(chat_id),
                 "id": str(idx),
@@ -676,7 +681,8 @@ def _get_formatted_list(already_down=False):
                 "download_speed": download_speed,
                 "upload_speed": download_speed,  # For streaming, same as download
                 "save_path": local_path,
-                "remote_path": remote_path
+                "remote_path": remote_path,
+                "created_at": created_at_fmt
             }
             data.append(item)
     return data

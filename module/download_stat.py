@@ -162,6 +162,7 @@ async def update_download_status(
             "file_name": file_name,
             "start_time": start_time,
             "end_time": cur_time,
+            "created_at": cur_time,
             "download_speed": down_byte / (cur_time - start_time),
             "each_second_total_download": each_second_total_download,
             "task_id": node.task_id,
