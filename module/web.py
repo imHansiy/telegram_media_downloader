@@ -31,6 +31,7 @@ from module.download_stat import (
     get_total_download_speed,
     set_download_state,
 )
+from module.upload_stat import get_upload_result, get_total_upload_speed
 from module.cloud_drive import CloudDrive
 from utils.crypto import AesBase64
 from utils.format import format_byte
@@ -555,7 +556,9 @@ def get_download_speed():
     return (
         '{ "download_speed" : "'
         + format_byte(get_total_download_speed())
-        + '/s" , "upload_speed" : "0.00 B/s" } '
+        + '/s" , "upload_speed" : "'
+        + format_byte(get_total_upload_speed())
+        + '/s" } '
     )
 
 
@@ -634,73 +637,121 @@ def get_download_list():
 def _get_formatted_list(already_down=False):
     """Helper to get formatted list data"""
     download_result = get_download_result()
+    upload_result = get_upload_result()
     data = []
-    for chat_id, messages in download_result.items():
-        for idx, value in messages.items():
-            # Basic completion check
-            is_bytes_done = value["down_byte"] >= value["total_size"]
+
+    # 1. Collect all unique (chat_id, message_id) pairs
+    all_tasks = set()
+    for cid, msgs in download_result.items():
+        for mid in msgs.keys():
+            all_tasks.add((cid, mid))
+    for cid, msgs in upload_result.items():
+        for mid in msgs.keys():
+            all_tasks.add((cid, mid))
+
+    # 2. Iterate and format
+    for chat_id, idx in all_tasks:
+        d_item = download_result.get(chat_id, {}).get(idx)
+        u_item = upload_result.get(chat_id, {}).get(idx)
+        
+        # Use whatever is available as base
+        base_item = d_item if d_item else u_item
+        if not base_item:
+            continue
+
+        # Extract basic info
+        file_name = base_item.get("file_name", "Unknown")
+        total_size = base_item.get("total_size") or base_item.get("total_bytes", 0)
+        
+        # --- Download Status ---
+        down_byte = 0
+        download_speed_val = 0
+        if d_item:
+            down_byte = d_item.get("down_byte", 0)
+            download_speed_val = d_item.get("download_speed", 0)
+        elif u_item:
+            # If no download record but uploading (Streaming), assume download matches upload
+            down_byte = u_item.get("processed_bytes", 0)
+            # Streaming doesn't have a separate download speed usually, or it's same as upload
+        
+        # --- Upload Status ---
+        upload_speed_val = 0
+        upload_processed = 0
+        upload_total = total_size
+        is_uploading = False
+        
+        if u_item:
+            is_uploading = True
+            upload_speed_val = u_item.get("upload_speed", 0)
+            upload_processed = u_item.get("processed_bytes", 0)
+            upload_total = u_item.get("total_bytes", total_size)
             
-            # Verify if it's truly finished by checking active nodes if available
-            is_active = False
-            if _app_instance and hasattr(_app_instance, 'chat_download_config'):
-                config = _app_instance.chat_download_config.get(chat_id)
-                if config and config.node and config.node.is_running:
-                    is_active = True
-
-            # If it's a streaming task (no local path exists yet or matched by remote_dir), 
-            # we should trust the active status more
-            is_already_down = is_bytes_done and not is_active
-
-            if already_down and not is_already_down:
-                continue
-
-            if not already_down and is_already_down:
-                continue
-
-            download_speed = format_byte(value["download_speed"]) + "/s"
+        # --- Progress Calculation ---
+        download_progress = 0
+        if total_size > 0:
+            download_progress = min(round(down_byte / total_size * 100, 1), 100.0)
             
-            # Calculate download progress
-            download_progress = 0
-            if value['total_size'] > 0:
-                download_progress = min(round(value['down_byte'] / value['total_size'] * 100, 1), 100.0)
-            
-            # Upload progress logic for Streaming/Normal
-            if is_already_down:
+        upload_progress = 0
+        if is_uploading:
+            if upload_total > 0:
+                upload_progress = min(round(upload_processed / upload_total * 100, 1), 100.0)
+        else:
+            # Fallback simulation for non-uploading tasks (old logic)
+            if download_progress >= 100:
                 upload_progress = 100.0
             else:
-                # Cap at 99.9% while still active to indicate "finishing up"
                 upload_progress = min(download_progress, 99.9)
-            
-            # Construct remote path based on cloud drive config
-            local_path = value["file_name"].replace("\\", "/")
-            remote_path = local_path  # Default to local path
-            
-            # Try to construct a cloud path if app instance is available
-            if _app_instance and hasattr(_app_instance, 'cloud_drive_config'):
-                cloud_cfg = _app_instance.cloud_drive_config
-                if hasattr(cloud_cfg, 'remote_dir') and cloud_cfg.remote_dir:
-                    filename = os.path.basename(local_path)
-                    remote_path = f"{cloud_cfg.remote_dir.rstrip('/')}/{filename}"
 
-            # Format creation time (Beijing Time UTC+8)
-            created_at_ts = value.get("created_at") or value.get("start_time") or time.time()
-            beijing_tz = timezone(timedelta(hours=8))
-            created_at_fmt = datetime.fromtimestamp(created_at_ts, tz=beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
+        # --- Activity/Completion Check ---
+        is_down_finished = (down_byte >= total_size) if total_size > 0 else False
+        
+        # Critical: A task is "Active" (not already_down) if it is NOT finished.
+        # It is finished ONLY if download is done AND it is not currently uploading.
+        # If it is uploading, it is Active.
+        is_truly_finished = is_down_finished and not is_uploading
 
-            item = {
-                "chat": str(chat_id),
-                "id": str(idx),
-                "filename": os.path.basename(value["file_name"]),
-                "total_size": format_byte(value['total_size']),
-                "download_progress": str(download_progress),
-                "upload_progress": str(upload_progress),
-                "download_speed": download_speed,
-                "upload_speed": download_speed,  # For streaming, same as download
-                "save_path": local_path,
-                "remote_path": remote_path,
-                "created_at": created_at_fmt
-            }
-            data.append(item)
+        # Filter based on requested list type
+        if already_down:
+            # Asking for History -> Show only truly finished
+            if not is_truly_finished:
+                continue
+        else:
+            # Asking for Active -> Show only NOT finished (or currently uploading)
+            if is_truly_finished:
+                continue
+
+        # --- Strings Formatting ---
+        download_speed_str = format_byte(download_speed_val) + "/s"
+        upload_speed_str = format_byte(upload_speed_val) + "/s"
+        
+        # Paths
+        local_path = file_name.replace("\\", "/")
+        remote_path = local_path
+        if _app_instance and hasattr(_app_instance, 'cloud_drive_config'):
+            cloud_cfg = _app_instance.cloud_drive_config
+            if hasattr(cloud_cfg, 'remote_dir') and cloud_cfg.remote_dir:
+                fname = os.path.basename(local_path)
+                remote_path = f"{cloud_cfg.remote_dir.rstrip('/')}/{fname}"
+
+        # Valid Time
+        ts = base_item.get("created_at") or base_item.get("start_time") or base_item.get("updated_at") or time.time()
+        beijing_tz = timezone(timedelta(hours=8))
+        created_at_fmt = datetime.fromtimestamp(ts, tz=beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
+
+        item = {
+            "chat": str(chat_id),
+            "id": str(idx),
+            "filename": os.path.basename(file_name),
+            "total_size": format_byte(total_size),
+            "download_progress": str(download_progress),
+            "upload_progress": str(upload_progress),
+            "download_speed": download_speed_str,
+            "upload_speed": upload_speed_str,
+            "save_path": local_path,
+            "remote_path": remote_path,
+            "created_at": created_at_fmt
+        }
+        data.append(item)
     return data
 
 
@@ -715,7 +766,7 @@ def stream():
                 # 1. Status (Speed)
                 speed_data = {
                     "download_speed": format_byte(get_total_download_speed()) + "/s",
-                    "upload_speed": "0.00 B/s"
+                    "upload_speed": format_byte(get_total_upload_speed()) + "/s"
                 }
 
                 # 2. Active Tasks

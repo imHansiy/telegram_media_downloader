@@ -35,6 +35,7 @@ from module.app import (
     UploadStatus,
 )
 from module.download_stat import get_download_result, get_total_download_speed
+from module.upload_stat import update_upload_status, update_upload_status_str
 from module.language import Language, _t
 from module.send_media_group_v2 import cache_media, send_media_group_v2
 from utils.format import (
@@ -1139,6 +1140,17 @@ async def update_cloud_upload_stat(
         speed=speed,
         eta=eta,
     )
+    
+    # Update global upload stat
+    update_upload_status_str(
+        chat_id=node.chat_id,
+        message_id=message_id,
+        transferred_p=f"{transferred} / {total}",
+        percentage=percentage,
+        speed=speed,
+        eta=eta,
+        file_name=file_name
+    )
 
 
 async def update_upload_stat(
@@ -1183,6 +1195,19 @@ async def update_upload_stat(
             upload_speed=upload_size / (cur_time - start_time),
         )
         node.upload_stat_dict[message_id] = upload_stat
+
+    # Update global upload stat
+    # Only if we have a valid speed calculation
+    speed_val = node.upload_stat_dict[message_id].upload_speed
+    update_upload_status(
+        chat_id=node.chat_id,
+        message_id=message_id,
+        transferred_bytes=upload_size,
+        total_bytes=total_size,
+        current_speed=int(speed_val),
+        file_name=file_name,
+        eta=""  # TODO: calculate ETA if needed
+    )
 
 
 # pylint: enable=W0201

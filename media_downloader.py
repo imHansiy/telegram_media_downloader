@@ -34,6 +34,7 @@ from module.pyrogram_extension import (
     set_max_concurrent_transmissions,
     set_meta_data,
     update_cloud_upload_stat,
+    update_upload_stat,
     upload_telegram_chat,
 )
 from module.web import init_web
@@ -469,7 +470,7 @@ async def download_media(
                     file_name, # Relative path handled inside
                     stream_generator,
                     media_size,
-                    progress_callback=update_download_status,
+                    progress_callback=update_upload_stat,
                     progress_args=(
                         message_id,
                         ui_file_name,
