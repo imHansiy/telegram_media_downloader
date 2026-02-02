@@ -15,7 +15,11 @@ def get_upload_result() -> Dict:
     return _upload_result
 
 def get_total_upload_speed() -> int:
-    """get total upload speed"""
+    """get total upload speed. Returns 0 if no upload activity for 2+ seconds."""
+    global _total_upload_speed
+    # If no upload activity for more than 2 seconds, return 0
+    if time.time() - _last_upload_time > 2.0:
+        _total_upload_speed = 0
     return _total_upload_speed
 
 def _parse_size_str(size_str: str) -> int:

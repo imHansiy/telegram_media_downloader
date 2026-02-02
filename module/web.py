@@ -704,11 +704,13 @@ def _get_formatted_list(already_down=False):
 
         # --- Activity/Completion Check ---
         is_down_finished = (down_byte >= total_size) if total_size > 0 else False
+        is_upload_finished = (upload_processed >= upload_total and upload_total > 0) if is_uploading else True
         
         # Critical: A task is "Active" (not already_down) if it is NOT finished.
-        # It is finished ONLY if download is done AND it is not currently uploading.
-        # If it is uploading, it is Active.
-        is_truly_finished = is_down_finished and not is_uploading
+        # It is finished if:
+        # 1. Download is done (100%)
+        # 2. AND (not uploading OR upload is also 100%)
+        is_truly_finished = is_down_finished and is_upload_finished
 
         # Filter based on requested list type
         if already_down:

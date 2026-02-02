@@ -30,7 +30,11 @@ def get_download_result() -> dict:
 
 
 def get_total_download_speed() -> int:
-    """get total download speed"""
+    """get total download speed. Returns 0 if no download activity for 2+ seconds."""
+    global _total_download_speed
+    # If no download activity for more than 2 seconds, return 0
+    if time.time() - _last_download_time > 2.0:
+        _total_download_speed = 0
     return _total_download_speed
 
 
