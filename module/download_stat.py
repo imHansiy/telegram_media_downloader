@@ -160,15 +160,29 @@ def init_stat():
                 # Keys in JSON are strings, but we need int keys for chat_id and message_id
                 # to match the rest of the application logic.
                 restored = {}
+                incomplete_count = 0
                 for chat_id_str, messages in saved.items():
                     chat_id = int(chat_id_str)
                     restored[chat_id] = {}
                     for msg_id_str, info in messages.items():
                         msg_id = int(msg_id_str)
-                        restored[chat_id][msg_id] = info
+                        # Only keep completed downloads (100%)
+                        # Incomplete downloads are cleared since they can't be resumed after restart
+                        if info.get("down_byte", 0) >= info.get("total_size", 1):
+                            restored[chat_id][msg_id] = info
+                        else:
+                            incomplete_count += 1
+                
+                # Remove empty chat entries
+                restored = {k: v for k, v in restored.items() if v}
                 
                 _download_result = restored
-                print(f"DEBUG: [stat] Loaded {sum(len(v) for v in restored.values())} history items from DB")
+                completed_count = sum(len(v) for v in restored.values())
+                print(f"DEBUG: [stat] Loaded {completed_count} completed items from DB")
+                if incomplete_count > 0:
+                    print(f"DEBUG: [stat] Cleaned {incomplete_count} incomplete/stale download records")
+                    # Save the cleaned history back to DB
+                    db.save_setting("download_history", _download_result)
             else:
                 _download_result = {}
     except Exception as e:
@@ -189,3 +203,4 @@ def init_stat():
 
 # Initialize on module load
 init_stat()
+
