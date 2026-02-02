@@ -338,9 +338,12 @@ class CloudDrive:
                      else:
                          progress_callback(uploaded, total_size, *progress_args)
 
+        # 10s for connect, 2 hours for total upload. Large videos need more time.
+        timeout = aiohttp.ClientTimeout(total=7200, connect=10)
+
         for attempt in range(max_retries):
             try:
-                async with aiohttp.ClientSession(auth=auth) as session:
+                async with aiohttp.ClientSession(auth=auth, timeout=timeout) as session:
                     # 1. Ensure parent directories exist (MKCOL) - use cache to avoid duplicates
                     parent_dir = os.path.dirname(full_rel_path).replace("\\", "/")
                     if parent_dir and parent_dir != ".":
@@ -381,6 +384,10 @@ class CloudDrive:
                                 drive_config.dir_cache[encoded_current_path] = True
                     
                     # 2. PUT stream
+                    # Set Content-Length if size is known to help some WebDAV servers
+                    if total_size > 0:
+                        headers["Content-Length"] = str(total_size)
+                        
                     async with session.put(remote_url, data=progress_stream(), headers=headers) as resp:
                         if resp.status in [200, 201, 204]:
                             logger.info(f"WebDAV upload success: {rel_path}")
@@ -394,14 +401,22 @@ class CloudDrive:
                             text = await resp.text()
                             logger.error(f"WebDAV upload failed: {resp.status} - {text[:500]}")
                             return False
+            except asyncio.TimeoutError:
+                logger.error(f"WebDAV upload timeout (attempt {attempt + 1}/{max_retries}): {rel_path}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 * (attempt + 1))
+                    continue
+                return False
             except aiohttp.ClientError as e:
-                logger.error(f"WebDAV connection error (attempt {attempt + 1}): {e}")
+                logger.error(f"WebDAV connection error (attempt {attempt + 1}/{max_retries}): {type(e).__name__}: {e}")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2 * (attempt + 1))
                     continue
                 return False
             except Exception as e:
-                logger.error(f"WebDAV unexpected error: {e}")
+                logger.error(f"WebDAV unexpected error: {type(e).__name__}: {e}")
+                import traceback
+                logger.debug(traceback.format_exc())
                 return False
         
         logger.error(f"WebDAV upload failed after {max_retries} retries: {rel_path}")
