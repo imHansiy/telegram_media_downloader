@@ -175,6 +175,47 @@ class TaskNode:
         self.reply_to_message = None
         self.cloud_drive_upload_stat_dict: dict = {}
 
+    def to_dict(self) -> dict:
+        """Serialize TaskNode to dict"""
+        return {
+            "chat_id": self.chat_id,
+            "from_user_id": self.from_user_id,
+            "reply_message_id": self.reply_message_id,
+            "replay_message": self.reply_message,
+            "upload_telegram_chat_id": self.upload_telegram_chat_id,
+            "has_protected_content": self.has_protected_content,
+            "download_filter": self.download_filter,
+            "limit": self.limit,
+            "start_offset_id": self.start_offset_id,
+            "end_offset_id": self.end_offset_id,
+            "task_id": self.task_id,
+            "task_type": self.task_type.value,
+            "topic_id": self.topic_id,
+            # We don't save runtime state like total_task etc. as we want to restart fresh or
+            # we rely on download history to skip items.
+        }
+
+    @staticmethod
+    def from_dict(data: dict, bot=None) -> 'TaskNode':
+        """Deserialize TaskNode from dict"""
+        node = TaskNode(
+            chat_id=data.get("chat_id"),
+            from_user_id=data.get("from_user_id"),
+            reply_message_id=data.get("reply_message_id", 0),
+            replay_message=data.get("replay_message"),
+            upload_telegram_chat_id=data.get("upload_telegram_chat_id"),
+            has_protected_content=data.get("has_protected_content", False),
+            download_filter=data.get("download_filter"),
+            limit=data.get("limit", 0),
+            start_offset_id=data.get("start_offset_id", 0),
+            end_offset_id=data.get("end_offset_id", 0),
+            bot=bot,
+            task_id=data.get("task_id", 0),
+            task_type=TaskType(data.get("task_type", 1)),
+            topic_id=data.get("topic_id", 0),
+        )
+        return node
+
     def skip_msg_id(self, msg_id: int):
         """Skip if message id out of range"""
         if self.start_offset_id and msg_id < self.start_offset_id:
@@ -483,6 +524,16 @@ class Application:
                 self.cloud_drive_config.upload_adapter = upload_drive_config[
                     "upload_adapter"
                 ]
+
+            if upload_drive_config.get("webdav_url"):
+                self.cloud_drive_config.webdav_url = upload_drive_config["webdav_url"]
+            
+            if upload_drive_config.get("webdav_username"):
+                self.cloud_drive_config.webdav_username = upload_drive_config["webdav_username"]
+                
+            if upload_drive_config.get("webdav_password"):
+                self.cloud_drive_config.webdav_password = upload_drive_config["webdav_password"]
+
 
         self.file_name_prefix_split = _config.get(
             "file_name_prefix_split", self.file_name_prefix_split
@@ -876,12 +927,18 @@ class Application:
                 db.save_setting("config", self.config)
                 db.save_setting("data", self.app_data)
 
-            with open(self.config_file, "w", encoding="utf-8") as yaml_file:
-                _yaml.dump(self.config, yaml_file)
+            try:
+                with open(self.config_file, "w", encoding="utf-8") as yaml_file:
+                    _yaml.dump(self.config, yaml_file)
+            except Exception as e:
+                logger.warning(f"Failed to write local config file (non-critical if DB is active): {e}")
 
         if immediate:
-            with open(self.app_data_file, "w", encoding="utf-8") as yaml_file:
-                _yaml.dump(self.app_data, yaml_file)
+            try:
+                with open(self.app_data_file, "w", encoding="utf-8") as yaml_file:
+                    _yaml.dump(self.app_data, yaml_file)
+            except Exception as e:
+                logger.warning(f"Failed to write local data file (non-critical if DB is active): {e}")
 
     def set_language(self, language: Language):
         """Set Language"""
@@ -897,16 +954,22 @@ class Application:
             self.config = db_config
             self.assign_config(self.config)
         else:
-            with open(
-                os.path.join(os.path.abspath("."), self.config_file), encoding="utf-8"
-            ) as f:
-                config = _yaml.load(f.read())
-                if config:
-                    self.config = config
-                    self.assign_config(self.config)
-                    # Migrate to DB if available
-                    if db.conn:
-                        db.save_setting("config", self.config)
+            try:
+                if os.path.exists(os.path.join(os.path.abspath("."), self.config_file)):
+                    with open(
+                        os.path.join(os.path.abspath("."), self.config_file), encoding="utf-8"
+                    ) as f:
+                        config = _yaml.load(f.read())
+                        if config:
+                            self.config = config
+                            self.assign_config(self.config)
+                            # Migrate to DB if available
+                            if db.conn:
+                                db.save_setting("config", self.config)
+                else:
+                    logger.warning(f"Local config file {self.config_file} not found.")
+            except Exception as e:
+                logger.error(f"Error loading local config file: {e}")
 
         db_app_data = db.load_setting("data")
         if db_app_data:

@@ -34,7 +34,7 @@ from module.app import (
     UploadProgressStat,
     UploadStatus,
 )
-from module.download_stat import get_download_result
+from module.download_stat import get_download_result, get_total_download_speed
 from module.language import Language, _t
 from module.send_media_group_v2 import cache_media, send_media_group_v2
 from utils.format import (
@@ -869,7 +869,7 @@ async def _report_bot_status(
                 f" │   ├─ 📏 : {value.total}\n"
                 f" │   ├─ ⏫ : {value.speed}\n"
                 f" │   └─ 📊 : ["
-                f'{create_progress_bar(int(value.percentage.split("%")[0]))}]'
+                f"{create_progress_bar(int(value.percentage.split('%')[0]))}]"
                 f" ({value.percentage})%\n"
             )
 
@@ -919,9 +919,14 @@ async def _report_bot_status(
         if upload_result_str:
             upload_result_str = f"\n📤 {_t('Upload Progresses')}:\n" + upload_result_str
 
+        # Get current download speed
+        current_speed = get_total_download_speed()
+        speed_str = f"⚡ {_t('Speed')}: {format_byte(current_speed)}/s\n" if current_speed > 0 else ""
+
         new_msg_str = (
             f"`\n"
             f"🆔 task id: {node.task_id}\n"
+            f"{speed_str}"
             f"📥 {_t('Downloading')}: {format_byte(node.total_download_byte)}\n"
             f"├─ 📁 {_t('Total')}: {node.total_download_task}\n"
             f"├─ ✅ {_t('Success')}: {node.success_download_task}\n"
@@ -1204,31 +1209,46 @@ class HookClient(pyrogram.Client):
     # pylint: disable=R0901
     START_TIME_OUT = 60
 
-    def __init__(self, name: str, **kwargs):
+    def __init__(self, name: str, loop=None, **kwargs):
         if "start_timeout" in kwargs:
             value = kwargs.get("start_timeout")
             if value:
                 self.START_TIME_OUT = value
             kwargs.pop("start_timeout")
 
+        # Force use the provided loop
+        # to avoid mismatch between threads
+        if loop:
+            self.loop = loop
+
         super().__init__(name, **kwargs)
+
+        # Force correct loop if provided, even if super() set it differently
+        if loop and getattr(self, "loop", None) != loop:
+            print(
+                f"DEBUG: HookClient loop mismatch. Forcing to provided loop: {id(loop)}"
+            )
+            self.loop = loop
+
+        # Ensure loop is set if not provided
+        if not getattr(self, "loop", None):
+            try:
+                self.loop = asyncio.get_running_loop()
+            except RuntimeError:
+                try:
+                    self.loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    self.loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(self.loop)
 
     async def connect(
         self,
     ) -> bool:
         """
         Connects the client to the server.
-
-        Returns:
-            bool: True if the client successfully
-                connects to the server, False otherwise.
-
-        Raises:
-            ConnectionError: If the client is already connected.
-
         """
         if self.is_connected:  # type: ignore
-            raise ConnectionError("Client is already connected")
+            return True
 
         await self.load_session()
 
@@ -1337,3 +1357,26 @@ async def forward_messages(
         )
 
     return types.List(forwarded_messages) if is_iterable else forwarded_messages[0]
+
+# --- Monkey Patch to fix CHANNEL_INVALID error in Message._parse ---
+# This error occurs when Pyrogram tries to fetch a replied message from a channel
+# that the user has not joined or doesn't have access to.
+
+_original_message_parse = pyrogram.types.Message._parse
+
+async def _patched_message_parse(*args, **kwargs):
+    try:
+        return await _original_message_parse(*args, **kwargs)
+    except (pyrogram.errors.exceptions.bad_request_400.ChannelInvalid, KeyError) as e:
+        # Ignore CHANNEL_INVALID or "ID not found" errors during parsing
+        # This usually happens when parsing a reply to a message in an inaccessible channel
+        # Log a warning instead of a full stack trace
+        # logger.warning(f"Ignored error in Message._parse: {e}")
+        return None
+    except Exception as e:
+        # For other errors, we re-raise to let Pyrogram handle them or just log here.
+        raise e
+
+# Apply the patch
+# Note: We need to patch it on the class
+pyrogram.types.Message._parse = _patched_message_parse

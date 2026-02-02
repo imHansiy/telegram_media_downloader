@@ -57,15 +57,20 @@ class DB:
             return
         try:
             with self.conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO settings (key, value)
-                    VALUES (%s, %s)
-                    ON CONFLICT (key) DO UPDATE
-                    SET value = EXCLUDED.value
-                """,
-                    (key, Json(value)),
-                )
+                if value is None:
+                    # Delete the setting when value is None
+                    cur.execute("DELETE FROM settings WHERE key = %s", (key,))
+                    print(f"DEBUG: [db] Deleted setting: {key}")
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO settings (key, value)
+                        VALUES (%s, %s)
+                        ON CONFLICT (key) DO UPDATE
+                        SET value = EXCLUDED.value
+                    """,
+                        (key, Json(value)),
+                    )
             self.conn.commit()
         except Exception as e:
             logger.error(f"Failed to save setting {key}: {e}")

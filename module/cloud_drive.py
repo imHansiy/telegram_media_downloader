@@ -9,10 +9,13 @@ from asyncio import subprocess
 from subprocess import Popen
 from typing import Callable
 from zipfile import ZipFile
+import urllib.parse
 
 from loguru import logger
 
 from utils import platform
+import aiohttp
+
 
 
 # pylint: disable = R0902
@@ -29,8 +32,19 @@ class CloudDriveConfig:
         ),
         remote_dir: str = "",
         upload_adapter: str = "rclone",
+        webdav_url: str = "",
+        webdav_username: str = "",
+        webdav_password: str = "",
     ):
         self.enable_upload_file = enable_upload_file
+        self.before_upload_file_zip = before_upload_file_zip
+        self.after_upload_file_delete = after_upload_file_delete
+        self.rclone_path = rclone_path
+        self.remote_dir = remote_dir
+        self.upload_adapter = upload_adapter
+        self.webdav_url = webdav_url
+        self.webdav_username = webdav_username
+        self.webdav_password = webdav_password
         self.before_upload_file_zip = before_upload_file_zip
         self.after_upload_file_delete = after_upload_file_delete
         self.rclone_path = rclone_path
@@ -252,3 +266,171 @@ class CloudDrive:
             ret = CloudDrive.aligo_upload_file(drive_config, save_path, local_file_path)
 
         return ret
+
+    @staticmethod
+    async def webdav_upload_stream(
+        drive_config: CloudDriveConfig,
+        save_path: str,
+        file_name: str,
+        stream_generator,
+        total_size: int,
+        progress_callback: Callable = None,
+        progress_args: tuple = (),
+    ) -> bool:
+        """Stream upload to WebDAV"""
+        if not drive_config.webdav_url:
+            logger.error("WebDAV URL is not configured")
+            return False
+
+        # Construct full remote path
+        # save_path is local base path, file_name is full local path (which we are mocking)
+        # We need to construct remote path relative to remote_dir
+        
+        # In streaming mode, file_name passed here might be just the intended relative path or name
+        # Let's assume file_name is the "intended" filename (e.g. "Channel/2023_01/video.mp4")
+        
+        # Ensure remote_dir ends with /
+        base_url = drive_config.webdav_url.rstrip("/")
+        remote_path = f"{base_url}/{drive_config.remote_dir}/{file_name}".replace("//", "/")
+        
+        # Create directories - this is tricky with WebDAV as we might need to MKCOL recursively
+        # For simplicity, we assume directories exist or flat structure, 
+        # OR we try to create parent folders.
+        # Check logic to create folders recursively? 
+        # Let's simple check just the parent folder creation for now or skip if lazy.
+        
+        # Streaming Upload
+        auth = None
+        if drive_config.webdav_username:
+            auth = aiohttp.BasicAuth(drive_config.webdav_username, drive_config.webdav_password)
+
+        headers = {
+            "Content-Type": "application/octet-stream",
+        }
+
+        # Calculate relative path to preserve folder structure (e.g. ChatName/File.mp4)
+        try:
+            # handle cases where file_name might be absolute or relative
+            if os.path.isabs(file_name) and save_path:
+                rel_path = os.path.relpath(file_name, save_path)
+            else:
+                 # fallback if it's already relative or save_path mismatch
+                rel_path = os.path.basename(file_name)
+        except Exception:
+            rel_path = os.path.basename(file_name)
+            
+        # Normalize to forward slashes for WebDAV
+        rel_path = rel_path.replace("\\", "/")
+        
+        # Construct base remote URL
+        base_url = drive_config.webdav_url.rstrip("/")
+        remote_root = drive_config.remote_dir.strip("/")
+        
+        # Full path to the file on WebDAV (without protocol) -> used for splitting directories
+        # e.g. Crypt/OneDrive/Telegram/ChannelName/Video.mp4
+        full_rel_path = f"{remote_root}/{rel_path}".strip("/")
+        
+        # Final URL
+        # Explicitly encode path segments to handle special chars/Chinese correctly
+        # Split by / to preserve directory structure, then quote each component
+        parts = full_rel_path.split("/")
+        # quote each part but keep / separators
+        encoded_path = "/".join(urllib.parse.quote(p) for p in parts)
+        remote_url = f"{base_url}/{encoded_path}"
+        
+        logger.info(f"[WebDAV] Uploading to (Encoded): {remote_url}")
+        if remote_url != f"{base_url}/{full_rel_path}":
+             logger.info(f"[WebDAV] Original Path was: {full_rel_path}")
+
+        # Wrap the generator to report progress
+        async def progress_stream():
+            uploaded = 0
+            async for chunk in stream_generator:
+                yield chunk
+                uploaded += len(chunk)
+                if progress_callback:
+                     if inspect.iscoroutinefunction(progress_callback):
+                         await progress_callback(uploaded, total_size, *progress_args)
+                     else:
+                         progress_callback(uploaded, total_size, *progress_args)
+
+        try:
+            async with aiohttp.ClientSession(auth=auth) as session:
+                # 1. Ensure parent directories exist (MKCOL)
+                parent_dir = os.path.dirname(full_rel_path).replace("\\", "/")
+                if parent_dir and parent_dir != ".":
+                    dirs = parent_dir.split("/")
+                    current_path_parts = []
+                    for d in dirs:
+                        if not d: continue
+                        current_path_parts.append(urllib.parse.quote(d))
+                        # Join quoted parts
+                        encoded_current_path = "/".join(current_path_parts)
+                        mkcol_url = f"{base_url}/{encoded_current_path}"
+                        try:
+                            logger.info(f"[WebDAV] Creating directory: {mkcol_url}")
+                            async with session.request("MKCOL", mkcol_url) as resp:
+                                if resp.status not in [201, 405]:
+                                    logger.warning(f"[WebDAV] MKCOL {mkcol_url} returned {resp.status}")
+                        except Exception as e:
+                            logger.warning(f"[WebDAV] MKCOL error: {e}")
+                
+                # 2. PUT stream
+                async with session.put(remote_url, data=progress_stream(), headers=headers) as resp:
+                    if resp.status in [200, 201, 204]:
+                        logger.info(f"WebDAV upload success: {rel_path}")
+                        return True
+                    else:
+                        text = await resp.text()
+                        logger.error(f"WebDAV upload failed: {resp.status} - {text[:500]}")
+                        return False
+        except Exception as e:
+            logger.error(f"WebDAV connection error: {e}")
+            return False
+
+    @staticmethod
+    async def test_webdav_connection(url: str, username: str, password: str) -> tuple[bool, str]:
+        """Test WebDAV connectivity"""
+        if not url:
+            return False, "URL is empty"
+        
+        try:
+            auth = None
+            if username:
+                auth = aiohttp.BasicAuth(username, password)
+            
+            async with aiohttp.ClientSession(auth=auth) as session:
+                # 1. Try PROPFIND
+                headers = {"Depth": "0", "Content-Type": "text/xml"} 
+                
+                check_urls = [url]
+                if not url.endswith("/"):
+                    check_urls.append(url + "/")
+                
+                for check_url in check_urls:
+                    try:
+                        async with session.request("PROPFIND", check_url, headers=headers) as resp:
+                            if resp.status in [200, 207]:
+                                return True, "Connection successful"
+                            elif resp.status == 401:
+                                return False, "Authentication failed (401)"
+                            
+                            # If 405 Method Not Allowed, try OPTIONS on this URL
+                            if resp.status == 405:
+                                async with session.request("OPTIONS", check_url) as opt_resp:
+                                    if opt_resp.status in [200, 204]:
+                                        dav = opt_resp.headers.get("DAV", "")
+                                        if dav:
+                                            return True, f"Connection successful (DAV: {dav})"
+                                        return True, "Connection successful (OPTIONS)"
+                                    elif opt_resp.status == 401:
+                                        return False, "Authentication failed (401)"
+
+                    except Exception as e:
+                        logger.warning(f"PROPFIND failed for {check_url}: {e}")
+                        continue
+
+                return False, f"Connection failed (HTTP {resp.status if 'resp' in locals() else 'Unknown'})"
+
+        except Exception as e:
+            return False, f"Connection Failed: {str(e)}"

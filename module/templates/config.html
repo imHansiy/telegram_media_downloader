@@ -1,52 +1,463 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Configuration</title>
-    <style>
-        body { font-family: sans-serif; margin: 20px; }
-        textarea { width: 100%; height: 600px; font-family: monospace; }
-        button { padding: 10px 20px; font-size: 16px; cursor: pointer; }
-    </style>
-</head>
-<body>
-    <h1>Configuration Editor</h1>
-    <p>Edit the configuration JSON below and click Save. You will need to restart the application for changes to take effect.</p>
-    <form id="configForm">
-        <textarea name="config" id="configArea">{{ config }}</textarea>
-        <br><br>
-        <button type="button" onclick="saveConfig()">Save Config</button>
-        <button type="button" onclick="restartApp()" style="background-color: #f44336; color: white;">Restart App</button>
-        <a href="/">Back to Home</a>
-    </form>
+{% extends "base.html" %}
 
-    <script>
-        function restartApp() {
-            if(!confirm("Are you sure you want to restart the application?")) return;
-            
-            fetch('/restart', { method: 'POST' })
+{% block content %}
+<div class="max-w-4xl mx-auto">
+    <div class="flex justify-between items-center mb-6">
+        <div>
+            <h1>设置</h1>
+            <p>配置机器人行为。更改需要重启应用。</p>
+        </div>
+        <div class="flex gap-2">
+            <button onclick="restartApp()" class="btn btn-danger">
+                <svg class="icon" viewBox="0 0 24 24">
+                    <path d="M23 4v6h-6"></path>
+                    <path d="M1 20v-6h6"></path>
+                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                </svg>
+                重启应用
+            </button>
+            <form action="/clear_config_cache" method="post" onsubmit="return confirm('确定重置所有设置到默认/本地？')">
+                <button type="submit" class="btn btn-outline">清除缓存</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- View Toggles -->
+    <div class="flex gap-1 mb-4 border-b border-border">
+        <button class="nav-link active" id="tab-basic" onclick="switchTab('basic')">基础设置</button>
+        <button class="nav-link" id="tab-chats" onclick="switchTab('chats')">监控会话</button>
+        <button class="nav-link" id="tab-advanced" onclick="switchTab('advanced')">高级 / JSON</button>
+    </div>
+
+    <div class="card relative">
+        <form id="configForm">
+            <!-- Hidden JSON Source for Syncing -->
+            <textarea name="config" id="configArea" class="hidden">{{ config }}</textarea>
+
+            <!-- Basic Tab -->
+            <div id="view-basic" class="tab-content">
+                <div class="grid grid-cols-2 gap-4">
+                    <!-- Telegram API -->
+                    <div class="col-span-2">
+                        <h3 class="mb-3 border-b border-border pb-2 text-accent">Telegram API</h3>
+                    </div>
+
+                    <div>
+                        <label class="block text-sm text-secondary mb-1">API ID</label>
+                        <input type="text" data-path="api_id" class="input">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-secondary mb-1">API Hash</label>
+                        <input type="password" data-path="api_hash" class="input toggle-pw">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-secondary mb-1">Bot Token</label>
+                        <input type="password" data-path="bot_token" class="input toggle-pw">
+                    </div>
+
+                    <!-- App Settings -->
+                    <div class="col-span-2 mt-4">
+                        <h3 class="mb-3 border-b border-border pb-2 text-accent">应用设置</h3>
+                    </div>
+
+                    <div class="col-span-2">
+                        <label class="block text-sm text-secondary mb-1">下载保存路径</label>
+                        <input type="text" data-path="save_path" class="input">
+                    </div>
+
+                    <div>
+                        <label class="block text-sm text-secondary mb-1">最大并发下载数</label>
+                        <input type="number" data-path="max_concurrent_transmissions" class="input">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-secondary mb-1">语言</label>
+                        <select data-path="language" class="input">
+                            <option value="EN">English</option>
+                            <option value="CN">Chinese (简体中文)</option>
+                        </select>
+                    </div>
+
+                    <!-- Cloud Drive -->
+                    <div class="col-span-2 mt-4">
+                        <label class="flex justify-between items-center mb-3 border-b border-border pb-2">
+                            <h3 class="text-accent inline-block m-0">云盘上传</h3>
+                            <div class="flex items-center gap-2">
+                                <label class="text-sm cursor-pointer">
+                                    <input type="checkbox" id="enable_upload_file" class="mr-1"> 启用上传
+                                </label>
+                            </div>
+                        </label>
+
+                        <div id="cloud-drive-settings" class="grid grid-cols-2 gap-4 hidden">
+                            <div>
+                                <label class="block text-sm text-secondary mb-1">上传适配器</label>
+                                <select id="upload_adapter" class="input">
+                                    <option value="rclone">Rclone (通用/本地)</option>
+                                    <option value="aligo">Aligo (阿里云盘)</option>
+                                    <option value="webdav">WebDAV (流式传输)</option>
+                                </select>
+                            </div>
+
+                            <!-- Rclone / Common Settings -->
+                            <div class="col-span-2" data-adapter="rclone aligo webdav">
+                                <label class="block text-sm text-secondary mb-1">远程保存目录</label>
+                                <input type="text" id="remote_dir" class="input" placeholder="例如: TelegramDownloads">
+                            </div>
+
+                            <!-- WebDAV Specific -->
+                            <div class="col-span-2" data-adapter="webdav">
+                                <label class="block text-sm text-secondary mb-1">WebDAV 地址</label>
+                                <input type="text" id="webdav_url" class="input"
+                                    placeholder="https://dav.example.com/path">
+                            </div>
+                            <div data-adapter="webdav">
+                                <label class="block text-sm text-secondary mb-1">WebDAV 用户名</label>
+                                <input type="text" id="webdav_username" class="input">
+                            </div>
+                            <div data-adapter="webdav">
+                                <label class="block text-sm text-secondary mb-1">WebDAV 密码</label>
+                                <input type="password" id="webdav_password" class="input toggle-pw">
+                            </div>
+
+                            <div data-adapter="webdav" class="col-span-2 mt-1 flex items-center">
+                                <button type="button" onclick="testWebDAV()" class="btn btn-sm btn-outline">
+                                    测试 WebDAV 连接
+                                </button>
+                                <span id="webdav-test-result" class="ml-3 text-sm font-medium"></span>
+                            </div>
+
+                            <div class="col-span-2 flex gap-4 mt-2">
+                                <label class="text-sm cursor-pointer flex items-center">
+                                    <input type="checkbox" id="before_upload_file_zip" class="mr-1"> 上传前压缩 (Zip)
+                                </label>
+                                <label class="text-sm cursor-pointer flex items-center">
+                                    <input type="checkbox" id="after_upload_file_delete" class="mr-1"> 上传后删除本地文件
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Media Types -->
+                    <div class="col-span-2 mt-4">
+                        <h3 class="mb-3 border-b border-border pb-2 text-accent">下载媒体类型</h3>
+                        <div class="flex flex-wrap gap-4" id="media-types-container">
+                            <!-- Populated by JS -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Chats Tab -->
+            <div id="view-chats" class="tab-content hidden">
+                <div class="flex justify-between items-center mb-4">
+                    <h3>监控会话</h3>
+                    <button type="button" onclick="addChat()" class="btn btn-outline btn-sm">+ 添加会话</button>
+                </div>
+                <div class="table-container">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>会话 ID</th>
+                                <th>最后读取消息 ID</th>
+                                <th style="width: 50px;"></th>
+                            </tr>
+                        </thead>
+                        <tbody id="chats-tbody">
+                            <!-- Populated by JS -->
+                        </tbody>
+                    </table>
+                </div>
+                <p class="text-xs text-secondary mt-2">注意: 频道 ID 通常以 -100 开头。</p>
+            </div>
+
+            <!-- Advanced Tab -->
+            <div id="view-advanced" class="tab-content hidden">
+                <div class="mb-2 flex justify-between">
+                    <p class="text-sm">直接编辑原始 JSON 配置。</p>
+                    <button type="button" onclick="syncFormToJSON()" class="btn btn-sm btn-outline">从表单同步</button>
+                </div>
+                <div id="json-editor" class="code-editor"
+                    style="height: 500px; width: 100%; border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem; overflow: auto; white-space: pre;"
+                    contenteditable="true"></div>
+            </div>
+
+            <!-- Actions -->
+            <div class="flex justify-end mt-6 pt-4 border-t border-border sticky bottom-0 bg-card z-10">
+                <button type="button" onclick="saveConfig()" class="btn btn-primary">
+                    <svg class="icon" viewBox="0 0 24 24">
+                        <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+                        <polyline points="17 21 17 13 7 13 7 21"></polyline>
+                        <polyline points="7 3 7 8 15 8"></polyline>
+                    </svg>
+                    保存更改
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+    let configData = {};
+    const mediaTypesFull = ['audio', 'photo', 'video', 'document', 'voice', 'video_note'];
+
+    document.addEventListener('DOMContentLoaded', () => {
+        try {
+            const raw = document.getElementById('configArea').value;
+            configData = JSON.parse(raw);
+
+            // Initial Render
+            renderBasicForm();
+            renderChats();
+            renderJSONEditor();
+
+        } catch (e) {
+            console.error("Failed to parse config", e);
+            alert("Error parsing configuration JSON. Please check Advanced tab.");
+        }
+
+        // Setup live sync for inputs
+        document.querySelectorAll('input[data-path], select[data-path]').forEach(input => {
+            input.addEventListener('change', (e) => {
+                configData[e.target.dataset.path] = e.target.value;
+                renderJSONEditor();
+            });
+        });
+
+        // Cloud Drive Listeners
+        setupCloudDriveListeners();
+    });
+
+    function setupCloudDriveListeners() {
+        const driveInputs = ['enable_upload_file', 'upload_adapter', 'remote_dir', 'webdav_url', 'webdav_username', 'webdav_password', 'before_upload_file_zip', 'after_upload_file_delete'];
+
+        driveInputs.forEach(id => {
+            const el = document.getElementById(id);
+            if (!el) return;
+
+            el.addEventListener('change', () => {
+                updateCloudJson();
+                updateCloudVisibility();
+            });
+            // Also input event for text fields for smoother feeling? keeping change for performance
+        });
+    }
+
+    function updateCloudJson() {
+        if (!configData.upload_drive) configData.upload_drive = {};
+        const cd = configData.upload_drive;
+
+        cd.enable_upload_file = document.getElementById('enable_upload_file').checked;
+        cd.upload_adapter = document.getElementById('upload_adapter').value;
+        cd.remote_dir = document.getElementById('remote_dir').value;
+        cd.webdav_url = document.getElementById('webdav_url').value;
+        cd.webdav_username = document.getElementById('webdav_username').value;
+        cd.webdav_password = document.getElementById('webdav_password').value;
+        cd.before_upload_file_zip = document.getElementById('before_upload_file_zip').checked;
+        cd.after_upload_file_delete = document.getElementById('after_upload_file_delete').checked;
+
+        renderJSONEditor();
+    }
+
+    function updateCloudVisibility() {
+        const enabled = document.getElementById('enable_upload_file').checked;
+        const container = document.getElementById('cloud-drive-settings');
+
+        if (enabled) {
+            container.classList.remove('hidden');
+        } else {
+            container.classList.add('hidden');
+            return;
+        }
+
+        const adapter = document.getElementById('upload_adapter').value;
+
+        // Hide all specifics first
+        document.querySelectorAll('[data-adapter]').forEach(el => el.classList.add('hidden'));
+
+        // Show matching
+        document.querySelectorAll('[data-adapter]').forEach(el => {
+            if (el.dataset.adapter.includes(adapter)) {
+                el.classList.remove('hidden');
+            }
+        });
+    }
+
+    function switchTab(tab) {
+        // Update Nav
+        document.querySelectorAll('.nav-link').forEach(el => el.classList.remove('active'));
+        document.getElementById(`tab-${tab}`).classList.add('active');
+
+        // Update Content
+        document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+        document.getElementById(`view-${tab}`).classList.remove('hidden');
+
+        // Sync if switching to advanced
+        if (tab === 'advanced') {
+            renderJSONEditor();
+        } else {
+            // If coming from advanced, try to re-parse
+            try {
+                const text = document.getElementById('json-editor').innerText;
+                configData = JSON.parse(text);
+                renderBasicForm();
+                renderChats();
+            } catch (e) {
+                // Ignore parse error here, user might be editing
+            }
+        }
+    }
+
+    function renderBasicForm() {
+        // Simple Fields
+        document.querySelectorAll('input[data-path], select[data-path]').forEach(input => {
+            const key = input.dataset.path;
+            if (configData[key] !== undefined) {
+                input.value = configData[key];
+            }
+        });
+
+        // Media Types Checkboxes
+        const container = document.getElementById('media-types-container');
+        container.innerHTML = '';
+        const currentTypes = configData.media_types || [];
+
+        mediaTypesFull.forEach(type => {
+            const label = document.createElement('label');
+            label.className = 'flex items-center gap-2 cursor-pointer bg-bg-secondary px-3 py-2 rounded border border-border hover:border-accent transition-colors';
+
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.checked = currentTypes.includes(type);
+            checkbox.onchange = () => updateMediaTypes(type, checkbox.checked);
+
+            const span = document.createElement('span');
+            span.textContent = type.charAt(0).toUpperCase() + type.slice(1);
+
+            label.appendChild(checkbox);
+            label.appendChild(span);
+            container.appendChild(label);
+        });
+        // Cloud Drive Form Sync
+        if (configData.upload_drive) {
+            const cd = configData.upload_drive;
+            document.getElementById('enable_upload_file').checked = cd.enable_upload_file || false;
+            document.getElementById('upload_adapter').value = cd.upload_adapter || 'rclone';
+            document.getElementById('remote_dir').value = cd.remote_dir || '';
+            document.getElementById('webdav_url').value = cd.webdav_url || '';
+            document.getElementById('webdav_username').value = cd.webdav_username || '';
+            document.getElementById('webdav_password').value = cd.webdav_password || '';
+            document.getElementById('before_upload_file_zip').checked = cd.before_upload_file_zip || false;
+            document.getElementById('after_upload_file_delete').checked = cd.after_upload_file_delete || false;
+        } else {
+            document.getElementById('enable_upload_file').checked = false;
+        }
+        updateCloudVisibility();
+    }
+
+    function updateMediaTypes(type, checked) {
+        if (!configData.media_types) configData.media_types = [];
+        if (checked) {
+            if (!configData.media_types.includes(type)) configData.media_types.push(type);
+        } else {
+            configData.media_types = configData.media_types.filter(t => t !== type);
+        }
+        renderJSONEditor();
+    }
+
+    function renderChats() {
+        const tbody = document.getElementById('chats-tbody');
+        tbody.innerHTML = '';
+        const chats = configData.chat || [];
+
+        chats.forEach((chat, index) => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td>
+                    <input type="text" class="input text-sm" value="${chat.chat_id || ''}" 
+                           onchange="updateChat(${index}, 'chat_id', this.value)">
+                </td>
+                <td>
+                    <input type="number" class="input text-sm" value="${chat.last_read_message_id || 0}"
+                           onchange="updateChat(${index}, 'last_read_message_id', this.value)">
+                </td>
+                <td>
+                    <button type="button" onclick="removeChat(${index})" class="text-danger hover:text-white p-2">
+                        <svg class="icon" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                    </button>
+                </td>
+            `;
+            tbody.appendChild(tr);
+        });
+    }
+
+    function updateChat(index, key, value) {
+        if (!configData.chat) configData.chat = [];
+        if (!configData.chat[index]) configData.chat[index] = {};
+
+        if (key === 'last_read_message_id') value = parseInt(value, 10);
+
+        configData.chat[index][key] = value;
+        renderJSONEditor();
+    }
+
+    function addChat() {
+        if (!configData.chat) configData.chat = [];
+        configData.chat.push({ chat_id: "", last_read_message_id: 0 });
+        renderChats();
+        renderJSONEditor();
+    }
+
+    function removeChat(index) {
+        if (!configData.chat) return;
+        if (confirm('确定删除此会话?')) {
+            configData.chat.splice(index, 1);
+            renderChats();
+            renderJSONEditor();
+        }
+    }
+
+    function renderJSONEditor() {
+        document.getElementById('json-editor').innerText = JSON.stringify(configData, null, 2);
+        document.getElementById('configArea').value = JSON.stringify(configData);
+    }
+
+    function syncFormToJSON() {
+        // For switching back from Advanced
+        renderBasicForm();
+        renderChats();
+    }
+
+    function restartApp() {
+        if (!confirm("确定要重启应用吗？")) return;
+
+        fetch('/restart', { method: 'POST' })
             .then(response => response.json())
             .then(data => alert(data.message))
             .catch(error => alert("Error: " + error));
-        }
+    }
 
-        function saveConfig() {
-            const config = document.getElementById('configArea').value;
+    function saveConfig() {
+        // Ensure data is synced from advanced tab if it was active
+        const tabAdvanced = document.getElementById('view-advanced');
+        if (!tabAdvanced.classList.contains('hidden')) {
             try {
-                JSON.parse(config); // Validate JSON
+                const text = document.getElementById('json-editor').innerText;
+                configData = JSON.parse(text);
             } catch (e) {
-                alert("Invalid JSON: " + e.message);
+                alert('高级模式中的 JSON 格式无效');
                 return;
             }
+        }
 
-            const formData = new FormData();
-            formData.append('config', config);
+        const configStr = JSON.stringify(configData);
 
-            fetch('/config', {
-                method: 'POST',
-                body: formData
-            })
+        const formData = new FormData();
+        formData.append('config', configStr);
+
+        fetch('/config', {
+            method: 'POST',
+            body: formData
+        })
             .then(response => response.json())
             .then(data => {
                 alert(data.message);
@@ -54,7 +465,46 @@
             .catch(error => {
                 alert("Error: " + error);
             });
+    }
+    function testWebDAV() {
+        const url = document.getElementById('webdav_url').value;
+        const username = document.getElementById('webdav_username').value;
+        const password = document.getElementById('webdav_password').value;
+        const resultSpan = document.getElementById('webdav-test-result');
+
+        if (!url) {
+            alert("请输入 WebDAV 地址");
+            return;
         }
-    </script>
-</body>
-</html>
+
+        resultSpan.className = "ml-3 text-sm font-medium text-secondary";
+        resultSpan.textContent = "正在连接...";
+
+        fetch('/test_webdav', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                url: url,
+                username: username,
+                password: password
+            })
+        })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    resultSpan.className = "ml-3 text-sm font-medium text-success";
+                    resultSpan.textContent = "✔ 连接成功";
+                } else {
+                    resultSpan.className = "ml-3 text-sm font-medium text-danger";
+                    resultSpan.textContent = "✘ " + data.message;
+                }
+            })
+            .catch(error => {
+                resultSpan.className = "ml-3 text-sm font-medium text-danger";
+                resultSpan.textContent = "✘ 请求失败: " + error;
+            });
+    }
+</script>
+{% endblock %}

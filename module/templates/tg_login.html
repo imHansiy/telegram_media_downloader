@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="max-w-4xl mx-auto flex justify-center mt-4">
+    <div class="card" style="width: 100%; max-width: 500px; padding: 2rem;">
+
+        <div class="text-center mb-4">
+            <h1>Telegram 账号</h1>
+
+            {% if flash_message %}
+            <div class="badge badge-info mb-4" style="padding: 10px; display: block;">
+                {{ flash_message }}
+            </div>
+            {% endif %}
+
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+            {% for category, message in messages %}
+            <div class="badge badge-{{ 'success' if category == 'success' else 'danger' }} mb-4"
+                style="padding: 10px; display: block;">
+                {{ message }}
+            </div>
+            {% endfor %}
+            {% endif %}
+            {% endwith %}
+        </div>
+
+        {% if logged_in and user_info %}
+        <!-- Logged In State -->
+        <div class="text-center">
+            <div class="badge badge-success mb-4">✓ 已连接</div>
+
+            <div
+                style="background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); border-radius: 15px; padding: 20px; color: white; margin-bottom: 20px;">
+                <div
+                    style="width: 70px; height: 70px; background: rgba(255,255,255,0.2); border-radius: 50%; margin: 0 auto 15px; display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: bold;">
+                    {{ user_info.initials }}
+                </div>
+                <div style="font-size: 20px; font-weight: 600; margin-bottom: 5px;">
+                    {{ user_info.full_name }}
+                    {% if user_info.is_premium %}
+                    <span class="badge badge-warning" style="margin-left: 5px; color: #333;">Premium</span>
+                    {% endif %}
+                </div>
+                <div style="opacity: 0.8; margin-bottom: 15px;">@{{ user_info.username }}</div>
+
+                <div class="flex justify-between"
+                    style="border-top: 1px solid rgba(255,255,255,0.2); padding-top: 10px; font-size: 14px;">
+                    <span>ID</span>
+                    <span>{{ user_info.id }}</span>
+                </div>
+                <div class="flex justify-between" style="padding-top: 5px; font-size: 14px;">
+                    <span>手机号</span>
+                    <span>{{ user_info.phone_number }}</span>
+                </div>
+            </div>
+
+            <form method="post">
+                <input type="hidden" name="action" value="logout">
+                <button type="submit" class="btn btn-danger" style="width: 100%;">🚪 退出并切换账号</button>
+            </form>
+        </div>
+
+        {% elif session_exists %}
+        <!-- Session Pending State -->
+        <div class="text-center">
+            <div class="badge badge-warning mb-4">⚠ 会话已保存 (需要重启)</div>
+
+            <p class="mb-4">
+                会话已保存。请重新应用以连接，或者退出以使用其他账号。
+            </p>
+
+            <form method="post">
+                <input type="hidden" name="action" value="logout">
+                <button type="submit" class="btn btn-danger" style="width: 100%;">🚪 退出并切换账号</button>
+            </form>
+        </div>
+
+        {% else %}
+        <!-- Login State -->
+        <div class="text-center">
+            <div class="badge badge-danger mb-4">✗ 未连接</div>
+            <p class="mb-4">输入您的手机号以接收 Telegram 验证码。</p>
+
+            <form method="post">
+                <div class="mb-4">
+                    <input type="tel" name="phone_number" class="input" placeholder="+86 138 0000 0000" required
+                        style="text-align: center; font-size: 1.1rem;">
+                </div>
+                <button type="submit" class="btn btn-primary" style="width: 100%;">📤 发送验证码</button>
+            </form>
+        </div>
+        {% endif %}
+
+    </div>
+</div>
+{% endblock %}

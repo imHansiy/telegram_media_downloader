@@ -6,6 +6,7 @@ from enum import Enum
 from pyrogram import Client
 
 from module.app import TaskNode
+from module.db import db
 
 
 class DownloadState(Enum):
@@ -42,6 +43,12 @@ def set_download_state(state: DownloadState):
     """set download state"""
     global _download_state
     _download_state = state
+    if db.conn:
+        try:
+            db.save_setting("download_state", state.value)
+            print(f"DEBUG: [stat] Saved download state: {state.name}")
+        except Exception as e:
+            print(f"Error saving download state: {e}")
 
 
 async def update_download_status(
@@ -120,3 +127,65 @@ async def update_download_status(
         _total_download_speed = max(_total_download_speed, 0)
         _total_download_size = 0
         _last_download_time = cur_time
+
+
+def verify_and_save_download(chat_id: int, message_id: int):
+    """Mark download as complete and save to DB"""
+    try:
+        if not _download_result.get(chat_id):
+            return
+            
+        if _download_result[chat_id].get(message_id):
+            # Ensure it's marked as 100%
+            item = _download_result[chat_id][message_id]
+            if item["down_byte"] != item["total_size"]:
+                item["down_byte"] = item["total_size"]
+                
+            if db.conn:
+                db.save_setting("download_history", _download_result)
+                # print(f"DEBUG: [stat] Saved history for message {message_id}")
+    except Exception as e:
+        print(f"Error saving download history: {e}")
+        _total_download_size = 0
+        _last_download_time = cur_time
+
+
+def init_stat():
+    """Initialize statistics from database"""
+    global _download_result
+    try:
+        if db.conn:
+            saved = db.load_setting("download_history")
+            if saved:
+                # Keys in JSON are strings, but we need int keys for chat_id and message_id
+                # to match the rest of the application logic.
+                restored = {}
+                for chat_id_str, messages in saved.items():
+                    chat_id = int(chat_id_str)
+                    restored[chat_id] = {}
+                    for msg_id_str, info in messages.items():
+                        msg_id = int(msg_id_str)
+                        restored[chat_id][msg_id] = info
+                
+                _download_result = restored
+                print(f"DEBUG: [stat] Loaded {sum(len(v) for v in restored.values())} history items from DB")
+            else:
+                _download_result = {}
+    except Exception as e:
+        print(f"Error loading download history: {e}")
+        _download_result = {}
+
+    # Load download state
+    global _download_state
+    try:
+        if db.conn:
+            state_val = db.load_setting("download_state")
+            if state_val is not None:
+                _download_state = DownloadState(int(state_val))
+                print(f"DEBUG: [stat] Restored download state: {_download_state.name}")
+    except Exception as e:
+        print(f"Error loading download state: {e}")
+
+
+# Initialize on module load
+init_stat()

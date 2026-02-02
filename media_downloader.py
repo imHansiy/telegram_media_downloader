@@ -14,8 +14,9 @@ from rich.logging import RichHandler
 
 from module.app import Application, ChatDownloadConfig, DownloadStatus, TaskNode
 from module.bot import start_download_bot, stop_download_bot
+from module.cloud_drive import CloudDrive
 from module.db import db
-from module.download_stat import update_download_status
+from module.download_stat import update_download_status, verify_and_save_download
 from module.get_chat_history_v2 import get_chat_history_v2
 from module.language import _t
 from module.pyrogram_extension import (
@@ -314,7 +315,11 @@ async def download_task(
 
     node.download_status[message.id] = download_status
 
-    file_size = os.path.getsize(file_name) if file_name else 0
+    # Skip file size check for WebDAV streaming (file doesn't exist locally)
+    if app.cloud_drive_config.upload_adapter == "webdav" and download_status == DownloadStatus.SuccessDownload:
+        file_size = 0  # File was streamed directly, not saved locally
+    else:
+        file_size = os.path.getsize(file_name) if file_name and os.path.exists(file_name) else 0
 
     await upload_telegram_chat(
         client,
@@ -421,7 +426,8 @@ async def download_media(
                             f"{_t('already download,download skipped')}.\n"
                         )
 
-                        return DownloadStatus.SkipDownload, None
+                        # Return Success so that upload logic can proceed if needed
+                        return DownloadStatus.SuccessDownload, file_name
             else:
                 return DownloadStatus.SkipDownload, None
 
@@ -439,26 +445,72 @@ async def download_media(
     message_id = message.id
 
     for retry in range(3):
-        try:
-            temp_download_path = await client.download_media(
-                message,
-                file_name=temp_file_name,
-                progress=update_download_status,
-                progress_args=(
-                    message_id,
-                    ui_file_name,
-                    task_start_time,
-                    node,
-                    client,
-                ),
-            )
 
-            if temp_download_path and isinstance(temp_download_path, str):
-                _check_download_finish(media_size, temp_download_path, ui_file_name)
-                await asyncio.sleep(0.5)
-                _move_to_download_path(temp_download_path, file_name)
-                # TODO: if not exist file size or media
+        try:
+            # Check if using WebDAV for streaming
+            if app.cloud_drive_config.upload_adapter == "webdav":
+                logger.info(f"Starting streaming upload to WebDAV: {ui_file_name}")
+                
+                # Use pyrogram's stream_media which returns an async generator
+                stream_generator = client.stream_media(message, limit=0, offset=0)
+                
+                success = await CloudDrive.webdav_upload_stream(
+                    app.cloud_drive_config,
+                    app.save_path,
+                    file_name, # Relative path handled inside
+                    stream_generator,
+                    media_size,
+                    progress_callback=update_download_status,
+                    progress_args=(
+                        message_id,
+                        ui_file_name,
+                        task_start_time,
+                        node,
+                        client,
+                    )
+                )
+                
+                if success:
+                    # Mock successful download path to satisfy later logic, though file doesn't exist locally
+                    # We might need to adjust logic later if it checks for file existence
+                    # For now, we trick it by returning a dummy path if successful
+                    temp_download_path = "STREAMED_TO_WEBDAV"
+                    # Mark as success
+                    verify_and_save_download(node.chat_id, message.id)
+                    return DownloadStatus.SuccessDownload, file_name
+                else:
+                    raise Exception("WebDAV stream upload failed")
+            else:
+                # Standard Download
+                temp_download_path = await client.download_media(
+                    message,
+                    file_name=temp_file_name,
+                    progress=update_download_status,
+                    progress_args=(
+                        message_id,
+                        ui_file_name,
+                        task_start_time,
+                        node,
+                        client,
+                    ),
+                )
+            
+            # Success handling for standard download (outside try block but inside for loop)
+            if temp_download_path:
+                if temp_download_path != "STREAMED_TO_WEBDAV":
+                    if isinstance(temp_download_path, str):
+                        _check_download_finish(media_size, temp_download_path, ui_file_name)
+                        
+                        # Verify and persist completion to DB
+                        verify_and_save_download(node.chat_id, message.id)
+                        
+                        await asyncio.sleep(0.5)
+                        _move_to_download_path(temp_download_path, file_name)
+                else:
+                    # Logic for streamed content - already handled above
+                    pass
                 return DownloadStatus.SuccessDownload, file_name
+                
         except pyrogram.errors.exceptions.bad_request_400.BadRequest:
             logger.warning(
                 f"Message[{message.id}]: {_t('file reference expired, refetching')}..."
@@ -604,6 +656,19 @@ async def download_chat_task(
 
 async def download_all_chat(client: pyrogram.Client):
     """Download All chat"""
+    
+    # Pre-load dialogs to cache Access Hashes for peers
+    # This fixes PEER_ID_INVALID errors for newly added chat_ids
+    logger.info("Refreshing dialogs/peers cache to fix PEER_ID_INVALID...")
+    try:
+        dialog_count = 0
+        # Fetch recent dialogs (limit 200 to be fast but cover active chats)
+        async for dialog in client.get_dialogs(limit=200):
+            dialog_count += 1
+        logger.success(f"Successfully cached {dialog_count} dialogs.")
+    except Exception as e:
+        logger.warning(f"Failed to refresh dialogs cache: {e}")
+
     for key, value in app.chat_download_config.items():
         value.node = TaskNode(chat_id=key)
         try:
@@ -616,6 +681,7 @@ async def download_all_chat(client: pyrogram.Client):
 
 async def run_until_all_task_finish():
     """Normal download"""
+    tick = 0
     while True:
         finish: bool = True
         for _, value in app.chat_download_config.items():
@@ -626,6 +692,11 @@ async def run_until_all_task_finish():
             break
 
         await asyncio.sleep(1)
+        
+        # Periodic auto-save every 10 seconds
+        tick += 1
+        if tick % 10 == 0:
+            app.update_config()
 
 
 def _exec_loop():
@@ -654,19 +725,29 @@ def main():
 
     # Try to load session from DB, but don't force it yet
     session_string = None
+    print(f"DEBUG: [main] db.conn is: {db.conn}")
+    print(f"DEBUG: [main] db.dsn is: {db.dsn[:20] + '...' if db.dsn and len(db.dsn) > 20 else db.dsn}")
     if db.conn:
         session_string = db.load_setting("session")
+        print(f"DEBUG: [main] Loaded session from DB: {bool(session_string)}, length: {len(session_string) if session_string else 0}")
+    else:
+        print("DEBUG: [main] No database connection, cannot load session.")
 
     in_memory = not bool(session_string)
+    print(f"DEBUG: [main] in_memory mode: {in_memory}")
 
     client = None
 
     # Check if we have enough config to initialize client
     if app.api_id and app.api_hash:
         try:
+            # Pyrogram 2.0+ removed 'loop' parameter from Client.__init__
+            # We set the event loop for the current thread to ensure proper binding
+            asyncio.set_event_loop(app.loop)
+
             client = HookClient(
                 "media_downloader",
-                api_id=app.api_id,
+                api_id=int(app.api_id),
                 api_hash=app.api_hash,
                 proxy=app.proxy,
                 workdir=app.session_file_path,
@@ -674,6 +755,7 @@ def main():
                 session_string=session_string,
                 in_memory=in_memory,
             )
+            client.loop = app.loop
         except Exception as e:
             logger.error(f"Failed to initialize client: {e}")
 
@@ -701,18 +783,43 @@ def main():
         if client and session_string:
             set_max_concurrent_transmissions(client, app.max_concurrent_transmissions)
 
-            app.loop.run_until_complete(start_server(client))
+            try:
+                app.loop.run_until_complete(start_server(client))
+            except pyrogram.errors.exceptions.unauthorized_401.AuthKeyUnregistered:
+                # Session is invalid/expired - clear it and enter Web UI mode
+                logger.warning(
+                    "Session is invalid or expired (AUTH_KEY_UNREGISTERED). "
+                    "Clearing session and entering Web UI mode for re-login."
+                )
+                if db.conn:
+                    db.save_setting("session", None)
+                    logger.info("Invalid session cleared from database.")
+                
+                # Reset client
+                client = None
+                session_string = None
+                
+                # Enter Web UI mode
+                logger.info(f"Web UI running at http://{app.web_host}:{app.web_port}")
+                logger.warning("Please login again via Web UI at /tg_login")
+                app.loop.run_forever()
+                return  # Exit main after web UI mode ends
+            except Exception as start_error:
+                # Re-raise other errors
+                raise start_error
 
             # Auto-save session if changed (rare but possible)
-            async def save_session_to_db():
+            def save_session_to_db_sync():
                 if db.conn:
                     try:
-                        s = await client.export_session_string()
+                        # NOTE: export_session_string() is NOT a coroutine, it's a sync method!
+                        s = client.export_session_string()
                         db.save_setting("session", s)
+                        print(f"DEBUG: [main] Session saved to DB, length: {len(s) if s else 0}")
                     except Exception as e:
                         logger.warning(f"Failed to export/save session string: {e}")
 
-            app.loop.run_until_complete(save_session_to_db())
+            save_session_to_db_sync()
 
             logger.success(_t("Successfully started (Press Ctrl+C to stop)"))
 

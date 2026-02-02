@@ -23,6 +23,7 @@ from module.app import (
     TaskType,
     UploadStatus,
 )
+from module.db import db
 from module.filter import Filter
 from module.get_chat_history_v2 import get_chat_history_v2
 from module.language import Language, _t
@@ -77,10 +78,22 @@ class DownloadBot:
     def add_task_node(self, node: TaskNode):
         """Add task node"""
         self.task_node[node.task_id] = node
+        self.save_tasks()
+
+    def save_tasks(self):
+        """Save current tasks to DB"""
+        if db.conn:
+            try:
+                tasks_data = [node.to_dict() for node in self.task_node.values()]
+                db.save_setting("active_tasks", tasks_data)
+            except Exception as e:
+                logger.error(f"Failed to save tasks to DB: {e}")
 
     def remove_task_node(self, task_id: int):
         """Remove task node"""
-        self.task_node.pop(task_id)
+        if task_id in self.task_node:
+            self.task_node.pop(task_id)
+            self.save_tasks()
 
     def stop_task(self, task_id: str):
         """Stop task"""
@@ -125,11 +138,17 @@ class DownloadBot:
         return True
 
     def update_config(self):
-        """Update config from str."""
+        """Update config to database."""
         self.config["download_filter"] = self.download_filter
-
-        with open("d", "w", encoding="utf-8") as yaml_file:
-            self._yaml.dump(self.config, yaml_file)
+        if db.conn:
+            db.save_setting("bot_setting", self.config)
+        else:
+            # Fallback to file if DB is not available (though user said it is PG now)
+            try:
+                with open(self.config_path, "w", encoding="utf-8") as yaml_file:
+                    self._yaml.dump(self.config, yaml_file)
+            except Exception as e:
+                logger.error(f"Failed to save config to file: {e}")
 
     async def start(
         self,
@@ -146,38 +165,39 @@ class DownloadBot:
             bot_token=app.bot_token,
             workdir=app.session_file_path,
             proxy=app.proxy,
+            in_memory=True,
         )
 
         # 命令列表
         commands = [
-            types.BotCommand("help", _t("Help")),
+            types.BotCommand("help", _t("帮助")),
             types.BotCommand(
-                "get_info", _t("Get group and user info from message link")
+                "get_info", _t("从消息链接获取群组和用户信息")
             ),
             types.BotCommand(
                 "download",
                 _t(
-                    "To download the video, use the method to directly enter /download to view"
+                    "下载视频，使用方法：直接输入 /download 查看"
                 ),
             ),
             types.BotCommand(
                 "forward",
-                _t("Forward video, use the method to directly enter /forward to view"),
+                _t("转发视频，使用方法：直接输入 /forward 查看"),
             ),
             types.BotCommand(
                 "listen_forward",
                 _t(
-                    "Listen forward, use the method to directly enter /listen_forward to view"
+                    "监听转发，使用方法：直接输入 /listen_forward 查看"
                 ),
             ),
             types.BotCommand(
                 "add_filter",
                 _t(
-                    "Add download filter, use the method to directly enter /add_filter to view"
+                    "添加下载过滤器，使用方法：直接输入 /add_filter 查看"
                 ),
             ),
-            types.BotCommand("set_language", _t("Set language")),
-            types.BotCommand("stop", _t("Stop bot download or forward")),
+            types.BotCommand("set_language", _t("设置语言")),
+            types.BotCommand("stop", _t("停止机器人下载或转发")),
         ]
 
         self.app = app
@@ -186,7 +206,14 @@ class DownloadBot:
         self.download_chat_task = download_chat_task
 
         # load config
-        if os.path.exists(self.config_path):
+        if db.conn:
+            config = db.load_setting("bot_setting")
+            if config:
+                self.config = config
+                self.assign_config(self.config)
+        
+        # Fallback to file if config not loaded from DB
+        if not self.config and os.path.exists(self.config_path):
             with open(self.config_path, encoding="utf-8") as f:
                 config = self._yaml.load(f.read())
                 if config:
@@ -194,18 +221,57 @@ class DownloadBot:
                     self.assign_config(self.config)
 
         await self.bot.start()
+        
+        # Restore tasks from DB
+        if db.conn:
+            try:
+                saved_tasks = db.load_setting("active_tasks")
+                if saved_tasks and isinstance(saved_tasks, list):
+                    logger.info(f"Restoring {len(saved_tasks)} active tasks from DB...")
+                    for task_data in saved_tasks:
+                        try:
+                            # Recreate TaskNode
+                            node = TaskNode.from_dict(task_data, bot=self.bot)
+                            
+                            # Re-add to local dict (without saving again to avoid recursion/redundancy)
+                            self.task_node[node.task_id] = node
+                            
+                            # Important: Update max task_id to avoid collision
+                            if node.task_id >= self.task_id:
+                                self.task_id = node.task_id + 1
+                                
+                            # Re-trigger download logic
+                            # We need to recreate ChatDownloadConfig and start the task
+                            chat_download_config = ChatDownloadConfig()
+                            chat_download_config.last_read_message_id = node.start_offset_id
+                            chat_download_config.download_filter = node.download_filter
+                            
+                            # Start background task
+                            self.app.loop.create_task(
+                                self.download_chat_task(self.client, chat_download_config, node)
+                            )
+                            node.is_running = True
+                            logger.info(f"Restored task {node.task_id} for chat {node.chat_id}")
+                        except Exception as e:
+                            logger.error(f"Failed to restore task {task_data}: {e}")
+            except Exception as e:
+                logger.error(f"Failed to load active tasks: {e}")
 
         self.bot_info = await self.bot.get_me()
+        logger.info(f"Bot started: @{self.bot_info.username} (ID: {self.bot_info.id})")
 
         for allowed_user_id in self.app.allowed_user_ids:
             try:
                 chat = await self.client.get_chat(allowed_user_id)
                 self.allowed_user_ids.append(chat.id)
+                logger.info(f"Added allowed user: {chat.id}")
             except Exception as e:
                 logger.warning(f"set allowed_user_ids error: {e}")
 
         admin = await self.client.get_me()
         self.allowed_user_ids.append(admin.id)
+        logger.info(f"Admin user added: {admin.first_name} (ID: {admin.id})")
+        logger.info(f"Total allowed user IDs: {self.allowed_user_ids}")
 
         await self.bot.set_bot_commands(commands)
 
@@ -378,21 +444,21 @@ async def send_help_str(client: pyrogram.Client, chat_id):
     #     latest_release_str = ""
 
     msg = (
-        f"`\n🤖 {_t('Telegram Media Downloader')}\n"
-        f"🌐 {_t('Version')}: {utils.__version__}`\n"
+        f"`\n🤖 {_t('Telegram 媒体下载器')}\n"
+        f"🌐 {_t('版本')}: {utils.__version__}`\n"
         f"{latest_release_str}\n"
-        f"{_t('Available commands:')}\n"
-        f"/help - {_t('Show available commands')}\n"
-        f"/get_info - {_t('Get group and user info from message link')}\n"
-        f"/download - {_t('Download messages')}\n"
-        f"/forward - {_t('Forward messages')}\n"
-        f"/listen_forward - {_t('Listen for forwarded messages')}\n"
-        f"/forward_to_comments - {_t('Forward a specific media to a comment section')}\n"
-        f"/set_language - {_t('Set language')}\n"
-        f"/stop - {_t('Stop bot download or forward')}\n\n"
-        f"{_t('**Note**: 1 means the start of the entire chat')},"
-        f"{_t('0 means the end of the entire chat')}\n"
-        f"`[` `]` {_t('means optional, not required')}\n"
+        f"{_t('可用命令:')}\n"
+        f"/help - {_t('显示可用命令')}\n"
+        f"/get_info - {_t('从消息链接获取群组和用户信息')}\n"
+        f"/download - {_t('下载消息')}\n"
+        f"/forward - {_t('转发消息')}\n"
+        f"/listen_forward - {_t('监听转发消息')}\n"
+        f"/forward_to_comments - {_t('将特定媒体转发到评论区')}\n"
+        f"/set_language - {_t('设置语言')}\n"
+        f"/stop - {_t('停止机器人下载或转发')}\n\n"
+        f"{_t('**注意**: 1 表示整个聊天的开始')},"
+        f"{_t('0 表示整个聊天的结束')}\n"
+        f"`[` `]` {_t('表示可选，非必须')}\n"
     )
 
     await client.send_message(chat_id, msg, reply_markup=update_keyboard)
@@ -520,7 +586,9 @@ async def add_filter(client: pyrogram.Client, message: pyrogram.types.Message):
     filter_str = replace_date_time(args[1])
     res, err = _bot.filter.check_filter(filter_str)
     if res:
-        _bot.app.down = args[1]
+        # _bot.app.down = args[1]
+        _bot.download_filter.append(args[1])
+        _bot.update_config()
         await client.send_message(
             message.from_user.id, f"{_t('Add download filter')} : {args[1]}"
         )
@@ -594,7 +662,7 @@ async def download_forward_media(
 
 async def download_from_link(client: pyrogram.Client, message: pyrogram.types.Message):
     """
-    Downloads a single message from a Telegram link.
+    Downloads a single message or media group from a Telegram link.
 
     Parameters:
         client (pyrogram.Client): The pyrogram client.
@@ -603,8 +671,10 @@ async def download_from_link(client: pyrogram.Client, message: pyrogram.types.Me
     Returns:
         None
     """
+    logger.info(f"[download_from_link] Received message from user {message.from_user.id}: {message.text}")
 
     if not message.text or not message.text.startswith("https://t.me"):
+        logger.warning(f"[download_from_link] Invalid link format: {message.text}")
         return
 
     msg = (
@@ -629,7 +699,24 @@ async def download_from_link(client: pyrogram.Client, message: pyrogram.types.Me
                 _bot.client.get_messages, args=(chat_id, message_id)
             )
             if download_message:
-                await direct_download(_bot, entity.id, message, download_message)
+                # Check if this message belongs to a media group
+                if download_message.media_group_id:
+                    logger.info(f"[download_from_link] Detected media group: {download_message.media_group_id}")
+                    # Get all messages in the media group
+                    try:
+                        media_group_messages = await _bot.client.get_media_group(chat_id, message_id)
+                        logger.info(f"[download_from_link] Found {len(media_group_messages)} messages in media group")
+                        
+                        # Download each message in the group
+                        for idx, group_msg in enumerate(media_group_messages):
+                            logger.info(f"[download_from_link] Downloading {idx+1}/{len(media_group_messages)}: msg_id={group_msg.id}")
+                            await direct_download(_bot, entity.id, message, group_msg)
+                    except Exception as e:
+                        logger.warning(f"[download_from_link] Failed to get media group: {e}, downloading single message")
+                        await direct_download(_bot, entity.id, message, download_message)
+                else:
+                    # Single message, download directly
+                    await direct_download(_bot, entity.id, message, download_message)
             else:
                 client.send_message(
                     message.from_user.id,
