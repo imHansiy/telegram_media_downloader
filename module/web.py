@@ -646,19 +646,37 @@ def _get_formatted_list(already_down=False):
 
             download_speed = format_byte(value["download_speed"]) + "/s"
             
-            # Calculate progress
-            progress = 0
+            # Calculate download progress
+            download_progress = 0
             if value['total_size'] > 0:
-                progress = round(value['down_byte'] / value['total_size'] * 100, 1)
+                download_progress = round(value['down_byte'] / value['total_size'] * 100, 1)
+            
+            # For streaming mode, upload progress mirrors download progress
+            # In future, can be enhanced to show real upload progress from TaskNode
+            upload_progress = download_progress if is_already_down else min(download_progress, 99.9)
+            
+            # Construct remote path based on cloud drive config
+            local_path = value["file_name"].replace("\\", "/")
+            remote_path = local_path  # Default to local path
+            
+            # Try to construct a cloud path if app instance is available
+            if _app_instance and hasattr(_app_instance, 'cloud_drive_config'):
+                cloud_cfg = _app_instance.cloud_drive_config
+                if hasattr(cloud_cfg, 'remote_dir') and cloud_cfg.remote_dir:
+                    filename = os.path.basename(local_path)
+                    remote_path = f"{cloud_cfg.remote_dir.rstrip('/')}/{filename}"
 
             item = {
                 "chat": str(chat_id),
                 "id": str(idx),
                 "filename": os.path.basename(value["file_name"]),
                 "total_size": format_byte(value['total_size']),
-                "download_progress": str(progress),
+                "download_progress": str(download_progress),
+                "upload_progress": str(upload_progress),
                 "download_speed": download_speed,
-                "save_path": value["file_name"].replace("\\", "/")
+                "upload_speed": download_speed,  # For streaming, same as download
+                "save_path": local_path,
+                "remote_path": remote_path
             }
             data.append(item)
     return data

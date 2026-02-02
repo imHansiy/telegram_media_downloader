@@ -70,19 +70,8 @@
         <div class="tab-btn-border"></div>
         <span
           class="relative z-10 flex items-center gap-2 group-[.active]:text-accent text-secondary group-hover:text-text transition-colors">
-          下载中
+          进行中
           <span id="active-count" class="badge-soft badge-accent-soft">0</span>
-        </span>
-      </button>
-
-      <button class="tab-btn px-6 py-2.5 rounded-lg text-sm font-medium" data-theme="success"
-        onclick="switchTab('upload')">
-        <div class="tab-btn-bg"></div>
-        <div class="tab-btn-border"></div>
-        <span
-          class="relative z-10 flex items-center gap-2 group-[.active]:text-success text-secondary group-hover:text-text transition-colors">
-          上传中
-          <span id="upload-count" class="badge-soft badge-success-soft">0</span>
         </span>
       </button>
 
@@ -111,7 +100,7 @@
       </button>
       <button class="filter-chip px-3 py-1.5 rounded-md" onclick="filterType('image')">
         <div class="active-bg rounded-md"></div>
-        <span class="relative z-10">�️ 图片</span>
+        <span class="relative z-10">🖼️ 图片</span>
       </button>
       <button class="filter-chip px-3 py-1.5 rounded-md" onclick="filterType('audio')">
         <div class="active-bg rounded-md"></div>
@@ -127,7 +116,7 @@
   <!-- Task Lists Container -->
   <div class="flex-1 overflow-hidden relative rounded-xl border border-border shadow-lg bg-card/50 backdrop-blur-sm">
 
-    <!-- Active Tasks Tab (Downloading) -->
+    <!-- Active Tasks Tab (Downloading + Uploading merged) -->
     <div id="tab-active" class="tab-content h-full flex flex-col">
       <div class="table-container flex-1 overflow-auto">
         <table class="table w-full relative">
@@ -136,37 +125,14 @@
             <tr>
               <th width="60" class="text-center">类型</th>
               <th width="80">来源ID</th>
-              <th width="40%">文件名</th>
-              <th width="120">上传状态</th>
+              <th width="30%">文件名</th>
               <th width="100">大小</th>
               <th>下载进度</th>
-              <th width="120" class="text-right">当前速度</th>
-            </tr>
-          </thead>
-          <tbody id="downloading-tbody">
-            <!-- JS Populated -->
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- Uploading Tasks Tab -->
-    <div id="tab-upload" class="tab-content hidden h-full flex flex-col">
-      <div class="table-container flex-1 overflow-auto">
-        <table class="table w-full relative">
-          <thead
-            class="sticky top-0 bg-surface z-10 shadow-sm text-xs uppercase tracking-wider text-secondary font-semibold">
-            <tr>
-              <th width="60" class="text-center">类型</th>
-              <th width="80">来源ID</th>
-              <th width="40%">文件名</th>
-              <th width="120">状态</th>
-              <th width="100">大小</th>
               <th>上传进度</th>
-              <th width="120" class="text-right">当前速度</th>
+              <th width="120" class="text-right">速度</th>
             </tr>
           </thead>
-          <tbody id="uploading-tbody">
+          <tbody id="active-tbody">
             <!-- JS Populated -->
           </tbody>
         </table>
@@ -182,9 +148,9 @@
             <tr>
               <th width="60" class="text-center">类型</th>
               <th width="80">ID</th>
-              <th width="40%">文件名</th>
+              <th width="35%">文件名</th>
               <th width="100">大小</th>
-              <th>保存路径</th>
+              <th>远程路径</th>
             </tr>
           </thead>
           <tbody id="downloaded-tbody">
