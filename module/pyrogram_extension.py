@@ -879,7 +879,7 @@ async def _report_bot_status(
         if node.chat_id in download_result:
             messages = download_result[node.chat_id]
             for idx, value in messages.items():
-                task_id = value["task_id"]
+                task_id = value.get("task_id", 0)
                 if task_id != node.task_id or value["down_byte"] == value["total_size"]:
                     continue
 

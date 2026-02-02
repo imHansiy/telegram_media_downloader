@@ -397,6 +397,12 @@ class CloudDrive:
                             logger.warning(f"[WebDAV] File locked (423), retry {attempt + 1}/{max_retries}")
                             await asyncio.sleep(2 * (attempt + 1))  # Exponential backoff
                             continue
+                        elif resp.status in [500, 502, 503, 504]:
+                            # Server error - possible transient, retry
+                            text = await resp.text()
+                            logger.warning(f"[WebDAV] Server error ({resp.status}), retry {attempt + 1}/{max_retries}: {text[:100]}")
+                            await asyncio.sleep(2 * (attempt + 1))
+                            continue
                         else:
                             text = await resp.text()
                             logger.error(f"WebDAV upload failed: {resp.status} - {text[:500]}")

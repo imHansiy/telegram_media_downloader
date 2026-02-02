@@ -476,7 +476,13 @@ class Application:
         # pylint: disable = R0912
         # TODO: judge the storage if enough,and provide more path
         if _config.get("save_path") is not None:
-            self.save_path = _config["save_path"]
+            save_path = _config["save_path"]
+            # Fix Windows path on Linux
+            if os.name != "nt" and ":" in save_path and "\\" in save_path:
+                print(f"DEBUG: [app] Detected Windows path on Linux: {save_path}, converting to relative.")
+                # Try to take the part after the last backslash or just use a default relative path
+                save_path = "./downloads"
+            self.save_path = save_path
 
         self.api_id = _config.get("api_id", "")
         self.api_hash = _config.get("api_hash", "")

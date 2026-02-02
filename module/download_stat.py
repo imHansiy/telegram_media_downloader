@@ -123,6 +123,18 @@ def _load_pending_downloads():
                 _pending_downloads = saved
                 loaded_count = len(_pending_downloads)
                 
+                # Path conversion for cross-OS resumes (e.g., Windows to Linux)
+                is_linux = os.name != "nt"
+                for key, item in _pending_downloads.items():
+                    fname = item.get("file_name", "")
+                    if is_linux and "\\" in fname and ":" in fname:
+                        # Converting potential Windows absolute path to something safer on Linux
+                        # We'll try to find the filename part or treat the whole thing as a string
+                        # Better yet, if it contains the current save_path, make it match.
+                        # For now, just fix the slashes so it doesn't look like a single weird file
+                        item["file_name"] = fname.replace("\\", "/")
+                        print(f"DEBUG: [stat] Converted Windows path to Linux-style: {item['file_name']}")
+                
                 # Clean up pending downloads that are already completed in download_history
                 to_remove = []
                 for key, item in _pending_downloads.items():
@@ -245,7 +257,7 @@ async def update_download_status(
         _last_download_time = cur_time
 
 
-def verify_and_save_download(chat_id: int, message_id: int, file_name: str = "", total_size: int = 0):
+def verify_and_save_download(chat_id: int, message_id: int, file_name: str = "", total_size: int = 0, task_id: int = 0):
     """Mark download as complete and save to DB.
     
     For streaming uploads, the download record may not exist in _download_result,
@@ -279,6 +291,7 @@ def verify_and_save_download(chat_id: int, message_id: int, file_name: str = "",
                 "download_speed": 0,
                 "start_time": time.time(),
                 "end_time": time.time(),
+                "task_id": task_id,
             }
             print(f"DEBUG: [stat] Created new history record for chat={chat_id}, msg={message_id}, file={file_name}, size={total_size}")
         else:
@@ -289,6 +302,8 @@ def verify_and_save_download(chat_id: int, message_id: int, file_name: str = "",
             # Update end_time
             import time
             item["end_time"] = time.time()
+            if "task_id" not in item:
+                item["task_id"] = task_id
             print(f"DEBUG: [stat] Updated existing record for chat={chat_id}, msg={message_id}")
         
         # Save to DB

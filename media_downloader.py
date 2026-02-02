@@ -485,7 +485,7 @@ async def download_media(
                     # For now, we trick it by returning a dummy path if successful
                     temp_download_path = "STREAMED_TO_WEBDAV"
                     # Mark as success - pass file info for streaming uploads that don't have download records
-                    verify_and_save_download(node.chat_id, message.id, ui_file_name, media_size)
+                    verify_and_save_download(node.chat_id, message.id, ui_file_name, media_size, node.task_id)
                     # Remove from pending downloads (completed successfully)
                     remove_pending_download(node.chat_id, message.id)
                     return DownloadStatus.SuccessDownload, file_name
