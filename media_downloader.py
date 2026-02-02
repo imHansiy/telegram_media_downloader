@@ -16,7 +16,13 @@ from module.app import Application, ChatDownloadConfig, DownloadStatus, TaskNode
 from module.bot import start_download_bot, stop_download_bot
 from module.cloud_drive import CloudDrive
 from module.db import db
-from module.download_stat import update_download_status, verify_and_save_download
+from module.download_stat import (
+    update_download_status,
+    verify_and_save_download,
+    add_pending_download,
+    remove_pending_download,
+    get_pending_downloads,
+)
 from module.get_chat_history_v2 import get_chat_history_v2
 from module.language import _t
 from module.pyrogram_extension import (
@@ -443,6 +449,9 @@ async def download_media(
         return DownloadStatus.SkipDownload, None
 
     message_id = message.id
+    
+    # Register as pending download for resume on restart
+    add_pending_download(node.chat_id, message_id, ui_file_name)
 
     for retry in range(3):
 
@@ -509,6 +518,9 @@ async def download_media(
                 else:
                     # Logic for streamed content - already handled above
                     pass
+                
+                # Remove from pending downloads (completed successfully)
+                remove_pending_download(node.chat_id, message.id)
                 return DownloadStatus.SuccessDownload, file_name
                 
         except pyrogram.errors.exceptions.bad_request_400.BadRequest:
@@ -668,6 +680,32 @@ async def download_all_chat(client: pyrogram.Client):
         logger.success(f"Successfully cached {dialog_count} dialogs.")
     except Exception as e:
         logger.warning(f"Failed to refresh dialogs cache: {e}")
+
+    # Resume pending downloads from previous session
+    pending = get_pending_downloads()
+    if pending:
+        logger.info(f"Resuming {len(pending)} pending downloads from previous session...")
+        for item in pending:
+            chat_id = item.get("chat_id")
+            message_id = item.get("message_id")
+            file_name = item.get("file_name", "unknown")
+            if chat_id and message_id:
+                try:
+                    logger.info(f"Resuming download: chat={chat_id}, msg={message_id}, file={file_name}")
+                    # Fetch the message
+                    message = await client.get_messages(chat_id, message_id)
+                    if message and not message.empty:
+                        # Create a task node for this download
+                        node = TaskNode(chat_id=chat_id)
+                        await queue.put((message, node))
+                        logger.success(f"Queued for resume: msg={message_id}")
+                    else:
+                        logger.warning(f"Message {message_id} no longer exists, removing from pending")
+                        remove_pending_download(chat_id, message_id)
+                except Exception as e:
+                    logger.error(f"Failed to resume download {message_id}: {e}")
+                    # Remove failed items to avoid infinite retry
+                    remove_pending_download(chat_id, message_id)
 
     for key, value in app.chat_download_config.items():
         value.node = TaskNode(chat_id=key)

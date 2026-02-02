@@ -21,6 +21,7 @@ _total_download_speed: int = 0
 _total_download_size: int = 0
 _last_download_time: float = time.time()
 _download_state: DownloadState = DownloadState.Downloading
+_pending_downloads: dict = {}  # {(chat_id, message_id): {"chat_id": x, "message_id": y, "file_name": z}}
 
 
 def get_download_result() -> dict:
@@ -50,6 +51,54 @@ def set_download_state(state: DownloadState):
         except Exception as e:
             print(f"Error saving download state: {e}")
 
+
+def add_pending_download(chat_id: int, message_id: int, file_name: str = ""):
+    """Register a download as pending (for resume on restart)"""
+    global _pending_downloads
+    key = f"{chat_id}_{message_id}"
+    _pending_downloads[key] = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "file_name": file_name,
+        "started_at": time.time()
+    }
+    _save_pending_downloads()
+
+
+def remove_pending_download(chat_id: int, message_id: int):
+    """Remove a download from pending list (after completion)"""
+    global _pending_downloads
+    key = f"{chat_id}_{message_id}"
+    if key in _pending_downloads:
+        del _pending_downloads[key]
+        _save_pending_downloads()
+
+
+def get_pending_downloads() -> list:
+    """Get list of pending downloads for resume"""
+    return list(_pending_downloads.values())
+
+
+def _save_pending_downloads():
+    """Save pending downloads to database"""
+    if db.conn:
+        try:
+            db.save_setting("pending_downloads", _pending_downloads)
+        except Exception as e:
+            print(f"Error saving pending downloads: {e}")
+
+
+def _load_pending_downloads():
+    """Load pending downloads from database"""
+    global _pending_downloads
+    if db.conn:
+        try:
+            saved = db.load_setting("pending_downloads")
+            if saved:
+                _pending_downloads = saved
+                print(f"DEBUG: [stat] Loaded {len(_pending_downloads)} pending downloads for resume")
+        except Exception as e:
+            print(f"Error loading pending downloads: {e}")
 
 async def update_download_status(
     down_byte: int,
@@ -200,7 +249,9 @@ def init_stat():
     except Exception as e:
         print(f"Error loading download state: {e}")
 
+    # Load pending downloads for resume
+    _load_pending_downloads()
+
 
 # Initialize on module load
 init_stat()
-
