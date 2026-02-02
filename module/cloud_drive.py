@@ -276,29 +276,13 @@ class CloudDrive:
         total_size: int,
         progress_callback: Callable = None,
         progress_args: tuple = (),
+        max_retries: int = 3,
     ) -> bool:
-        """Stream upload to WebDAV"""
+        """Stream upload to WebDAV with retry support"""
         if not drive_config.webdav_url:
             logger.error("WebDAV URL is not configured")
             return False
 
-        # Construct full remote path
-        # save_path is local base path, file_name is full local path (which we are mocking)
-        # We need to construct remote path relative to remote_dir
-        
-        # In streaming mode, file_name passed here might be just the intended relative path or name
-        # Let's assume file_name is the "intended" filename (e.g. "Channel/2023_01/video.mp4")
-        
-        # Ensure remote_dir ends with /
-        base_url = drive_config.webdav_url.rstrip("/")
-        remote_path = f"{base_url}/{drive_config.remote_dir}/{file_name}".replace("//", "/")
-        
-        # Create directories - this is tricky with WebDAV as we might need to MKCOL recursively
-        # For simplicity, we assume directories exist or flat structure, 
-        # OR we try to create parent folders.
-        # Check logic to create folders recursively? 
-        # Let's simple check just the parent folder creation for now or skip if lazy.
-        
         # Streaming Upload
         auth = None
         if drive_config.webdav_username:
@@ -354,39 +338,74 @@ class CloudDrive:
                      else:
                          progress_callback(uploaded, total_size, *progress_args)
 
-        try:
-            async with aiohttp.ClientSession(auth=auth) as session:
-                # 1. Ensure parent directories exist (MKCOL)
-                parent_dir = os.path.dirname(full_rel_path).replace("\\", "/")
-                if parent_dir and parent_dir != ".":
-                    dirs = parent_dir.split("/")
-                    current_path_parts = []
-                    for d in dirs:
-                        if not d: continue
-                        current_path_parts.append(urllib.parse.quote(d))
-                        # Join quoted parts
-                        encoded_current_path = "/".join(current_path_parts)
-                        mkcol_url = f"{base_url}/{encoded_current_path}"
-                        try:
-                            logger.info(f"[WebDAV] Creating directory: {mkcol_url}")
-                            async with session.request("MKCOL", mkcol_url) as resp:
-                                if resp.status not in [201, 405]:
-                                    logger.warning(f"[WebDAV] MKCOL {mkcol_url} returned {resp.status}")
-                        except Exception as e:
-                            logger.warning(f"[WebDAV] MKCOL error: {e}")
-                
-                # 2. PUT stream
-                async with session.put(remote_url, data=progress_stream(), headers=headers) as resp:
-                    if resp.status in [200, 201, 204]:
-                        logger.info(f"WebDAV upload success: {rel_path}")
-                        return True
-                    else:
-                        text = await resp.text()
-                        logger.error(f"WebDAV upload failed: {resp.status} - {text[:500]}")
-                        return False
-        except Exception as e:
-            logger.error(f"WebDAV connection error: {e}")
-            return False
+        for attempt in range(max_retries):
+            try:
+                async with aiohttp.ClientSession(auth=auth) as session:
+                    # 1. Ensure parent directories exist (MKCOL) - use cache to avoid duplicates
+                    parent_dir = os.path.dirname(full_rel_path).replace("\\", "/")
+                    if parent_dir and parent_dir != ".":
+                        dirs = parent_dir.split("/")
+                        current_path_parts = []
+                        for d in dirs:
+                            if not d: continue
+                            current_path_parts.append(urllib.parse.quote(d))
+                            # Join quoted parts
+                            encoded_current_path = "/".join(current_path_parts)
+                            mkcol_url = f"{base_url}/{encoded_current_path}"
+                            
+                            # Check cache to avoid duplicate MKCOL requests
+                            if drive_config.dir_cache.get(encoded_current_path):
+                                continue
+                                
+                            try:
+                                async with session.request("MKCOL", mkcol_url) as resp:
+                                    if resp.status == 201:
+                                        # Successfully created
+                                        drive_config.dir_cache[encoded_current_path] = True
+                                        logger.info(f"[WebDAV] Created directory: {mkcol_url}")
+                                    elif resp.status == 405:
+                                        # Already exists (Method Not Allowed for existing dir)
+                                        drive_config.dir_cache[encoded_current_path] = True
+                                    elif resp.status == 423:
+                                        # Locked - wait and continue, another process is creating it
+                                        logger.warning(f"[WebDAV] Directory locked, waiting: {mkcol_url}")
+                                        await asyncio.sleep(1)
+                                        drive_config.dir_cache[encoded_current_path] = True
+                                    else:
+                                        logger.warning(f"[WebDAV] MKCOL {mkcol_url} returned {resp.status}")
+                                        # Still mark as attempted to avoid infinite loops
+                                        drive_config.dir_cache[encoded_current_path] = True
+                            except Exception as e:
+                                logger.warning(f"[WebDAV] MKCOL error: {e}")
+                                # Mark as attempted anyway
+                                drive_config.dir_cache[encoded_current_path] = True
+                    
+                    # 2. PUT stream
+                    async with session.put(remote_url, data=progress_stream(), headers=headers) as resp:
+                        if resp.status in [200, 201, 204]:
+                            logger.info(f"WebDAV upload success: {rel_path}")
+                            return True
+                        elif resp.status == 423:
+                            # Locked - retry after delay
+                            logger.warning(f"[WebDAV] File locked (423), retry {attempt + 1}/{max_retries}")
+                            await asyncio.sleep(2 * (attempt + 1))  # Exponential backoff
+                            continue
+                        else:
+                            text = await resp.text()
+                            logger.error(f"WebDAV upload failed: {resp.status} - {text[:500]}")
+                            return False
+            except aiohttp.ClientError as e:
+                logger.error(f"WebDAV connection error (attempt {attempt + 1}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 * (attempt + 1))
+                    continue
+                return False
+            except Exception as e:
+                logger.error(f"WebDAV unexpected error: {e}")
+                return False
+        
+        logger.error(f"WebDAV upload failed after {max_retries} retries: {rel_path}")
+        return False
 
     @staticmethod
     async def test_webdav_connection(url: str, username: str, password: str) -> tuple[bool, str]:
