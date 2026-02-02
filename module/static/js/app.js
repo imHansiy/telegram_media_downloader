@@ -52,10 +52,8 @@ class App {
                 const payload = JSON.parse(event.data);
 
                 if (payload.type === 'update') {
-                    // Update Status
-                    if (payload.status) {
-                        this.updateStatus(payload.status);
-                    }
+                    // Wait, no global speed update needed anymore
+
 
                     // Update Active Tasks
                     if (payload.tasks) {
@@ -122,15 +120,7 @@ class App {
         }
     }
 
-    updateStatus(data) {
-        if (!data) return;
 
-        const el = document.getElementById('global-speed');
-        if (el) el.textContent = data.download_speed;
-
-        const upEl = document.getElementById('global-upload-speed');
-        if (upEl) upEl.textContent = data.upload_speed || data.download_speed;
-    }
 
     async toggleDownloadState() {
         const btn = document.getElementById('state-toggle-btn');
@@ -239,6 +229,21 @@ class App {
                     <div class="flex flex-col gap-0.5">
                         <span class="text-accent font-bold" title="下载速度">↓ ${dlSpeedStr}</span>
                         <span class="text-success font-bold" title="上传速度">↑ ${ulSpeedStr}</span>
+                    </div>
+                </td>
+                <td class="text-right py-3 px-4">
+                    <div class="flex justify-end gap-1">
+                        ${item.state === 'paused' ?
+                    `<button onclick="taskAction('resume', '${item.chat}', '${item.id}')" class="p-1.5 text-success hover:bg-success/10 rounded transition-colors" title="继续">
+                                <svg class="icon w-4 h-4" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                             </button>` :
+                    `<button onclick="taskAction('pause', '${item.chat}', '${item.id}')" class="p-1.5 text-warning hover:bg-warning/10 rounded transition-colors" title="暂停">
+                                <svg class="icon w-4 h-4" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
+                             </button>`
+                }
+                        <button onclick="taskAction('delete', '${item.chat}', '${item.id}')" class="p-1.5 text-danger hover:bg-danger/10 rounded transition-colors" title="取消任务">
+                            <svg class="icon w-4 h-4" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                        </button>
                     </div>
                 </td>
             </tr>
@@ -392,5 +397,30 @@ async function removeTask(chatId, messageId) {
         }
     } catch (error) {
         console.error('删除任务失败:', error);
+    }
+}
+
+// Global task action (pause/resume/delete)
+async function taskAction(action, chatId, messageId) {
+    if (action === 'delete' && !confirm('确定要取消并删除此任务吗？')) {
+        return;
+    }
+
+    try {
+        const response = await fetch('/task_control', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: action, chat_id: chatId, message_id: messageId })
+        });
+
+        const result = await response.json();
+        if (result.success) {
+            console.log(`任务 ${messageId} 已 ${action}`);
+            // The UI will update automatically via SSE on the next tick
+        } else {
+            alert('操作失败: ' + result.message);
+        }
+    } catch (error) {
+        console.error('任务操作错误:', error);
     }
 }

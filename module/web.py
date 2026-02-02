@@ -32,6 +32,8 @@ from module.download_stat import (
     set_download_state,
     clear_download_history,
     remove_download_task,
+    set_task_state,
+    get_task_state,
 )
 from module.upload_stat import get_upload_result, get_total_upload_speed
 from module.cloud_drive import CloudDrive
@@ -825,10 +827,43 @@ def _get_formatted_list(already_down=False):
             "save_path": local_path,
             "remote_path": remote_path,
             "created_at": created_at_fmt,
-            "completed_at": completed_at_fmt if is_truly_finished else None
+            "completed_at": completed_at_fmt if is_truly_finished else None,
+            "state": get_task_state(chat_id, idx) if not already_down else 'finished'
         }
         data.append(item)
     return data
+
+
+@_flask_app.route("/task_control", methods=["POST"])
+@login_required
+def api_task_control():
+    """Control an individual task (pause, resume, delete)"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"success": False, "message": "请求数据无效"}), 400
+        
+        chat_id = int(data.get("chat_id", 0))
+        message_id = int(data.get("message_id", 0))
+        action = data.get("action") # 'pause', 'resume', 'delete'
+        
+        if not chat_id or not message_id or not action:
+            return jsonify({"success": False, "message": "参数不齐全"}), 400
+        
+        state_map = {
+            'pause': 'paused',
+            'resume': 'running',
+            'delete': 'deleted'
+        }
+        
+        target_state = state_map.get(action)
+        if not target_state:
+            return jsonify({"success": False, "message": "无效的操作"}), 400
+            
+        success = set_task_state(chat_id, message_id, target_state)
+        return jsonify({"success": True, "message": f"任务已{action}"})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
 
 
 @_flask_app.route("/stream")

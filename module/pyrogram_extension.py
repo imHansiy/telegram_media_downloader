@@ -1165,10 +1165,27 @@ async def update_upload_stat(
     """update_upload_status"""
     cur_time = time.time()
 
-    if node.is_stop_transmission:
+    # --- Per-task Control ---
+    from module.download_stat import get_task_state, DownloadState, get_download_state
+    
+    chat_id = node.chat_id
+    state = get_task_state(chat_id, message_id)
+    
+    if state == 'deleted':
         client.stop_transmission()
+        return
 
-    # TODO(tyh): web control upload stop
+    # Global or local pause check
+    while state == 'paused' or get_download_state() == DownloadState.StopDownload:
+        if node.is_stop_transmission:
+            client.stop_transmission()
+        await asyncio.sleep(1)
+        # Re-check state
+        state = get_task_state(chat_id, message_id)
+        if state == 'deleted':
+            client.stop_transmission()
+            return
+    # -----------------------
 
     if node.upload_stat_dict.get(message_id):
         upload_stat = node.upload_stat_dict[message_id]

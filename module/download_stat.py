@@ -21,6 +21,7 @@ _total_download_speed: int = 0
 _total_download_size: int = 0
 _last_download_time: float = time.time()
 _download_state: DownloadState = DownloadState.Downloading
+_task_states: dict = {} # { (chat_id, message_id): 'running' | 'paused' | 'deleted' }
 _pending_downloads: dict = {}  # {(chat_id, message_id): {"chat_id": x, "message_id": y, "file_name": z}}
 
 
@@ -170,11 +171,26 @@ async def update_download_status(
         client.stop_transmission()
 
     chat_id = node.chat_id
+    
+    # --- Per-task Control ---
+    key = (chat_id, message_id)
+    state = _task_states.get(key, 'running')
+    
+    if state == 'deleted':
+        client.stop_transmission()
+        return
 
-    while get_download_state() == DownloadState.StopDownload:
+    # Global or local pause check
+    while state == 'paused' or get_download_state() == DownloadState.StopDownload:
         if node.is_stop_transmission:
             client.stop_transmission()
         await asyncio.sleep(1)
+        # Re-check state
+        state = _task_states.get(key, 'running')
+        if state == 'deleted':
+            client.stop_transmission()
+            return
+    # -----------------------
 
     if not _download_result.get(chat_id):
         _download_result[chat_id] = {}
@@ -280,6 +296,14 @@ def verify_and_save_download(chat_id: int, message_id: int, file_name: str = "",
             db.save_setting("download_history", _download_result)
             print(f"DEBUG: [stat] Saved history to DB, total chats={len(_download_result)}")
             
+        # Clean up task state (no longer needed once completed)
+        global _task_states
+        if (chat_id, message_id) in _task_states:
+            del _task_states[(chat_id, message_id)]
+            if db.conn:
+                to_save = {f"{c}:{m}": s for (c, m), s in _task_states.items()}
+                db.save_setting("task_states", to_save)
+            
     except Exception as e:
         print(f"Error saving download history: {e}")
 
@@ -337,6 +361,25 @@ def init_stat():
     # Load pending downloads for resume
     _load_pending_downloads()
 
+    # Load individual task states (paused/running)
+    global _task_states
+    try:
+        if db.conn:
+            saved_states = db.load_setting("task_states")
+            if saved_states:
+                # Convert "chat_id:msg_id" back to (chat_id, msg_id) tuple
+                restored_states = {}
+                for key_str, state in saved_states.items():
+                    try:
+                        c_id, m_id = map(int, key_str.split(":"))
+                        restored_states[(c_id, m_id)] = state
+                    except:
+                        continue
+                _task_states = restored_states
+                print(f"DEBUG: [stat] Loaded {len(_task_states)} task states from DB")
+    except Exception as e:
+        print(f"Error loading task states: {e}")
+
 
 def clear_download_history():
     """Clear all completed downloads from history"""
@@ -388,6 +431,38 @@ def remove_download_task(chat_id: int, message_id: int):
     remove_upload_status(chat_id, message_id)
     
     return removed
+
+
+def set_task_state(chat_id: int, message_id: int, state: str):
+    """Set the control state for an individual task.
+    
+    state: 'running' | 'paused' | 'deleted'
+    """
+    global _task_states
+    
+    if state == 'running':
+        # Remove if it was explicitly set to something else, default is running
+        if (chat_id, message_id) in _task_states:
+            del _task_states[(chat_id, message_id)]
+    else:
+        _task_states[(chat_id, message_id)] = state
+        
+    # If state is deleted, also remove from pending downloads
+    if state == 'deleted':
+        remove_pending_download(chat_id, message_id)
+
+    # Save to DB
+    if db.conn:
+        # Convert tuple keys to strings for JSON
+        to_save = {f"{c}:{m}": s for (c, m), s in _task_states.items()}
+        db.save_setting("task_states", to_save)
+        
+    return True
+
+
+def get_task_state(chat_id: int, message_id: int):
+    """Get the current state of a task"""
+    return _task_states.get((chat_id, message_id), 'running')
 
 
 # Initialize on module load

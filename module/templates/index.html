@@ -10,37 +10,6 @@
     </div>
 
     <div class="flex flex-wrap gap-4 items-center">
-      <!-- Speed Cards -->
-      <div class="flex gap-4">
-        <div class="stat-card">
-          <div class="stat-icon-wrapper accent">
-            <svg class="icon" viewBox="0 0 24 24">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-              <polyline points="7 10 12 15 17 10" />
-              <line x1="12" y1="15" x2="12" y2="3" />
-            </svg>
-          </div>
-          <div class="flex flex-col">
-            <span class="text-xs text-secondary uppercase tracking-wider font-bold">下载速度</span>
-            <span class="font-mono text-xl text-text font-bold" id="global-speed">0.00 B/s</span>
-          </div>
-        </div>
-
-        <div class="stat-card">
-          <div class="stat-icon-wrapper success">
-            <svg class="icon" viewBox="0 0 24 24">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-              <polyline points="17 8 12 3 7 8" />
-              <line x1="12" y1="3" x2="12" y2="15" />
-            </svg>
-          </div>
-          <div class="flex flex-col">
-            <span class="text-xs text-secondary uppercase tracking-wider font-bold">上传速度</span>
-            <span class="font-mono text-xl text-text font-bold" id="global-upload-speed">0.00 B/s</span>
-          </div>
-        </div>
-      </div>
-
       <!-- Global Control -->
       {% set state_str = download_state|string %}
       {% set is_running = 'Downloading' in state_str %}
@@ -130,7 +99,8 @@
               <th width="160">创建时间</th>
               <th>下载进度</th>
               <th>上传进度</th>
-              <th width="120" class="text-right">速度</th>
+              <th width="100">速度</th>
+              <th width="120" class="text-right px-4">操作</th>
             </tr>
           </thead>
           <tbody id="active-tbody">
