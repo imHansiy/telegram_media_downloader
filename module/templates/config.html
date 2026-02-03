@@ -77,6 +77,12 @@
                         </select>
                     </div>
 
+                    <div>
+                        <label class="block text-sm text-secondary mb-1">Web 登录密码</label>
+                        <input type="password" data-path="web_login_secret" id="web_login_secret_input"
+                            class="input toggle-pw" placeholder="留空则不启用登录验证">
+                    </div>
+
                     <!-- Cloud Drive -->
                     <div class="col-span-2 mt-4">
                         <label class="flex justify-between items-center mb-3 border-b border-border pb-2">
@@ -228,7 +234,7 @@
     });
 
     function setupCloudDriveListeners() {
-        const driveInputs = ['enable_upload_file', 'upload_adapter', 'remote_dir', 'webdav_url', 'webdav_username', 'webdav_password', 'before_upload_file_zip', 'after_upload_file_delete'];
+        const driveInputs = ['web_login_secret_input', 'enable_upload_file', 'upload_adapter', 'remote_dir', 'webdav_url', 'webdav_username', 'webdav_password', 'before_upload_file_zip', 'after_upload_file_delete'];
 
         driveInputs.forEach(id => {
             const el = document.getElementById(id);
@@ -254,6 +260,8 @@
         cd.webdav_password = document.getElementById('webdav_password').value;
         cd.before_upload_file_zip = document.getElementById('before_upload_file_zip').checked;
         cd.after_upload_file_delete = document.getElementById('after_upload_file_delete').checked;
+
+        configData.web_login_secret = document.getElementById('web_login_secret_input').value;
 
         renderJSONEditor();
     }
@@ -351,6 +359,9 @@
         } else {
             document.getElementById('enable_upload_file').checked = false;
         }
+
+        document.getElementById('web_login_secret_input').value = configData.web_login_secret || '';
+
         updateCloudVisibility();
     }
 
