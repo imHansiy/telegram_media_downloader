@@ -10,6 +10,36 @@ _total_upload_speed: int = 0
 _last_upload_time: float = time.time()
 _total_uploaded_diff: int = 0
 
+def register_upload_task(chat_id: int, message_id: int, file_name: str, total_bytes: int):
+    """
+    Pre-register an upload task so it shows in UI immediately.
+    Call this BEFORE starting upload to ensure visibility even if upload fails fast.
+    """
+    global _upload_result
+    if chat_id not in _upload_result:
+        _upload_result[chat_id] = {}
+    
+    # Only register if not already present (don't overwrite progress)
+    if message_id not in _upload_result[chat_id]:
+        _upload_result[chat_id][message_id] = {
+            "processed_bytes": 0,
+            "total_bytes": total_bytes,
+            "upload_speed": 0,
+            "file_name": file_name,
+            "eta": "计算中...",
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "updated_at": time.time(),
+            "state": "waiting"  # waiting, uploading, retrying, failed, success
+        }
+
+def update_task_state(chat_id: int, message_id: int, state: str):
+    """Update task state (waiting, uploading, retrying, failed, success)"""
+    global _upload_result
+    if chat_id in _upload_result and message_id in _upload_result[chat_id]:
+        _upload_result[chat_id][message_id]["state"] = state
+        _upload_result[chat_id][message_id]["updated_at"] = time.time()
+
 def get_upload_result() -> Dict:
     """get global upload result"""
     return _upload_result

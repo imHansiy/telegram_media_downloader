@@ -1161,6 +1161,7 @@ async def update_upload_stat(
     start_time: float,
     node: TaskNode,
     client: pyrogram.Client,
+    is_stream: bool = False,
 ):
     """update_upload_status"""
     cur_time = time.time()
@@ -1172,19 +1173,24 @@ async def update_upload_stat(
     state = get_task_state(chat_id, message_id)
     
     if state == 'deleted':
-        client.stop_transmission()
+        if client:
+            client.stop_transmission()
         return
 
     # Global or local pause check
-    while state == 'paused' or get_download_state() == DownloadState.StopDownload:
-        if node.is_stop_transmission:
-            client.stop_transmission()
-        await asyncio.sleep(1)
-        # Re-check state
-        state = get_task_state(chat_id, message_id)
-        if state == 'deleted':
-            client.stop_transmission()
-            return
+    # Skip pause for streams to avoid 502/timeouts
+    if not is_stream:
+        while state == 'paused' or get_download_state() == DownloadState.StopDownload:
+            if node.is_stop_transmission:
+                if client:
+                    client.stop_transmission()
+            await asyncio.sleep(1)
+            # Re-check state
+            state = get_task_state(chat_id, message_id)
+            if state == 'deleted':
+                if client:
+                    client.stop_transmission()
+                return
     # -----------------------
 
     if node.upload_stat_dict.get(message_id):

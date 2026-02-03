@@ -168,6 +168,23 @@ class App {
         return '📄';
     }
 
+    getStatusBadgeClass(status) {
+        switch (status) {
+            case '上传中':
+                return 'bg-success/20 text-success border border-success/30';
+            case '下载中':
+                return 'bg-accent/20 text-accent border border-accent/30';
+            case '准备上传':
+                return 'bg-warning/20 text-warning border border-warning/30';
+            case '正在完成...':
+                return 'bg-purple-500/20 text-purple-400 border border-purple-500/30';
+            case '已完成':
+                return 'bg-success/20 text-success border border-success/30';
+            default:
+                return 'bg-secondary/20 text-secondary border border-secondary/30';
+        }
+    }
+
     renderActiveTable(data) {
         // Update count badge
         const countBadge = document.getElementById('active-count');
@@ -206,6 +223,9 @@ class App {
                     <div class="truncate font-medium text-text text-sm" style="max-width: 280px;" title="${item.filename}">
                         ${item.filename}
                     </div>
+                    <span class="inline-flex items-center px-2 py-0.5 mt-1 rounded-full text-[10px] font-medium ${this.getStatusBadgeClass(item.status)}">
+                        ${item.status || '等待中'}
+                    </span>
                 </td>
                 <td class="text-secondary text-xs font-mono">${item.total_size}</td>
                 <td class="text-secondary text-[10px] font-mono">${item.created_at || '-'}</td>

@@ -815,6 +815,22 @@ def _get_formatted_list(already_down=False):
              display_download_progress = "Finishing..."
              display_upload_progress = "Finishing..."
 
+        # Determine status text
+        status_text = ""
+        if is_truly_finished:
+            status_text = "已完成"
+        elif is_finishing:
+            status_text = "正在完成..."
+        elif is_uploading:
+            if upload_progress > 0:
+                status_text = "上传中"
+            else:
+                status_text = "准备上传"
+        elif download_progress > 0:
+            status_text = "下载中"
+        else:
+            status_text = "等待中"
+
         item = {
             "chat": str(chat_id),
             "id": str(idx),
@@ -828,7 +844,8 @@ def _get_formatted_list(already_down=False):
             "remote_path": remote_path,
             "created_at": created_at_fmt,
             "completed_at": completed_at_fmt if is_truly_finished else None,
-            "state": get_task_state(chat_id, idx) if not already_down else 'finished'
+            "state": get_task_state(chat_id, idx) if not already_down else 'finished',
+            "status": status_text
         }
         data.append(item)
     return data

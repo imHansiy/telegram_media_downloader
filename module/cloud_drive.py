@@ -10,17 +10,11 @@ from subprocess import Popen
 from typing import Callable
 from zipfile import ZipFile
 import urllib.parse
-import random
-import time
 
 from loguru import logger
 
 from utils import platform
 import aiohttp
-
-# Global locks and semaphores for WebDAV to avoid overwhelming server and 502 errors
-_webdav_semaphore = asyncio.Semaphore(3) # Limit concurrent WebDAV uploads
-_webdav_mkcol_lock = asyncio.Lock()      # Lock for directory creation
 
 
 
@@ -296,6 +290,8 @@ class CloudDrive:
 
         headers = {
             "Content-Type": "application/octet-stream",
+            "User-Agent": "TelegramMediaDownloader/1.0",
+            "Expect": "",  # Disable Expect: 100-continue to avoid hangs with some WebDAV servers
         }
 
         # Calculate relative path to preserve folder structure (e.g. ChatName/File.mp4)
@@ -344,115 +340,86 @@ class CloudDrive:
                      else:
                          progress_callback(uploaded, total_size, *progress_args)
 
-        # Use a global semaphore to limit concurrent WebDAV uploads to avoid 502/overload
-        async with _webdav_semaphore:
-            # 10s for connect, 2 hours for total upload. Large videos need more time.
-            # Increased connect timeout to 30s as some WebDAV servers/proxies are slow to respond
-            timeout = aiohttp.ClientTimeout(total=7200, connect=30)
+        # 10s for connect, 2 hours for total upload. Large videos need more time.
+        timeout = aiohttp.ClientTimeout(total=7200, connect=10)
 
-            for attempt in range(max_retries):
-                try:
-                    # Use a fresh session for each retry to avoid connection reuse issues
-                    async with aiohttp.ClientSession(auth=auth, timeout=timeout) as session:
-                        # Resolve the stream for this attempt
-                        current_stream = stream_generator() if callable(stream_generator) else stream_generator
-                        
-                        # 1. Ensure parent directories exist (MKCOL) - use cache and LOCK to avoid duplicates
-                        parent_dir = os.path.dirname(full_rel_path).replace("\\", "/")
-                        if parent_dir and parent_dir != ".":
-                            dirs = parent_dir.split("/")
-                            current_path_parts = []
-                            for d in dirs:
-                                if not d: continue
-                                current_path_parts.append(urllib.parse.quote(d))
-                                encoded_current_path = "/".join(current_path_parts)
-                                mkcol_url = f"{base_url}/{encoded_current_path}"
+        for attempt in range(max_retries):
+            try:
+                async with aiohttp.ClientSession(auth=auth, timeout=timeout) as session:
+                    # 1. Ensure parent directories exist (MKCOL) - use cache to avoid duplicates
+                    parent_dir = os.path.dirname(full_rel_path).replace("\\", "/")
+                    if parent_dir and parent_dir != ".":
+                        dirs = parent_dir.split("/")
+                        current_path_parts = []
+                        for d in dirs:
+                            if not d: continue
+                            current_path_parts.append(urllib.parse.quote(d))
+                            # Join quoted parts
+                            encoded_current_path = "/".join(current_path_parts)
+                            mkcol_url = f"{base_url}/{encoded_current_path}"
+                            
+                            # Check cache to avoid duplicate MKCOL requests
+                            if drive_config.dir_cache.get(encoded_current_path):
+                                continue
                                 
-                                # Check cache FIRST (fast path)
-                                if drive_config.dir_cache.get(encoded_current_path):
-                                    continue
-                                    
-                                # Use lock for MKCOL to avoid race conditions causing 502/423
-                                async with _webdav_mkcol_lock:
-                                    # Double-check cache after acquiring lock
-                                    if drive_config.dir_cache.get(encoded_current_path):
-                                        continue
-                                        
-                                    try:
-                                        async with session.request("MKCOL", mkcol_url) as resp:
-                                            if resp.status == 201:
-                                                drive_config.dir_cache[encoded_current_path] = True
-                                                logger.info(f"[WebDAV] Created directory: {mkcol_url}")
-                                            elif resp.status == 405:
-                                                drive_config.dir_cache[encoded_current_path] = True
-                                            elif resp.status == 423:
-                                                logger.warning(f"[WebDAV] Directory locked, waiting: {mkcol_url}")
-                                                await asyncio.sleep(1 + random.random())
-                                                drive_config.dir_cache[encoded_current_path] = True
-                                            else:
-                                                logger.warning(f"[WebDAV] MKCOL {mkcol_url} returned {resp.status}")
-                                                drive_config.dir_cache[encoded_current_path] = True
-                                    except Exception as e:
-                                        logger.warning(f"[WebDAV] MKCOL error: {e}")
+                            try:
+                                async with session.request("MKCOL", mkcol_url) as resp:
+                                    if resp.status == 201:
+                                        # Successfully created
                                         drive_config.dir_cache[encoded_current_path] = True
+                                        logger.info(f"[WebDAV] Created directory: {mkcol_url}")
+                                    elif resp.status == 405:
+                                        # Already exists (Method Not Allowed for existing dir)
+                                        drive_config.dir_cache[encoded_current_path] = True
+                                    elif resp.status == 423:
+                                        # Locked - wait and continue, another process is creating it
+                                        logger.warning(f"[WebDAV] Directory locked, waiting: {mkcol_url}")
+                                        await asyncio.sleep(1)
+                                        drive_config.dir_cache[encoded_current_path] = True
+                                    else:
+                                        logger.warning(f"[WebDAV] MKCOL {mkcol_url} returned {resp.status}")
+                                        # Still mark as attempted to avoid infinite loops
+                                        drive_config.dir_cache[encoded_current_path] = True
+                            except Exception as e:
+                                logger.warning(f"[WebDAV] MKCOL error: {e}")
+                                # Mark as attempted anyway
+                                drive_config.dir_cache[encoded_current_path] = True
+                    
+                    # 2. PUT stream
+                    # Set Content-Length if size is known to help some WebDAV servers
+                    if total_size > 0:
+                        headers["Content-Length"] = str(total_size)
                         
-                        # 2. PUT stream
-                        if total_size > 0:
-                            headers["Content-Length"] = str(total_size)
-                        headers["Expect"] = "100-continue"
-                        
-                        async def progress_stream_wrapper(it):
-                            uploaded = 0
-                            async for chunk in it:
-                                yield chunk
-                                uploaded += len(chunk)
-                                if progress_callback:
-                                     if inspect.iscoroutinefunction(progress_callback):
-                                         await progress_callback(uploaded, total_size, *progress_args)
-                                     else:
-                                         progress_callback(uploaded, total_size, *progress_args)
-
-                        try:
-                            async with session.put(remote_url, data=progress_stream_wrapper(current_stream), headers=headers) as resp:
-                                if resp.status in [200, 201, 204]:
-                                    logger.info(f"WebDAV upload success: {rel_path}")
-                                    return True
-                                elif resp.status == 423:
-                                    logger.warning(f"[WebDAV] File locked (423), retry {attempt + 1}/{max_retries}")
-                                    await asyncio.sleep(2 * (attempt + 1) + random.random() * 2)
-                                    continue
-                                elif resp.status in [500, 502, 503, 504]:
-                                    text = await resp.text()
-                                    logger.warning(f"[WebDAV] Server error ({resp.status}), retry {attempt + 1}/{max_retries}: {text[:200]}")
-                                    # Longer backoff for 502/Server errors with jitter
-                                    await asyncio.sleep(5 * (attempt + 1) + random.random() * 5)
-                                    continue
-                                else:
-                                    text = await resp.text()
-                                    logger.error(f"WebDAV upload failed: {resp.status} - {text[:500]}")
-                                    return False
-                        except aiohttp.ClientPayloadError as e:
-                            logger.error(f"WebDAV payload error (possibly exhausted generator): {e}")
-                            if not callable(stream_generator):
-                                return False
+                    async with session.put(remote_url, data=progress_stream(), headers=headers) as resp:
+                        if resp.status in [200, 201, 204]:
+                            logger.info(f"WebDAV upload success: {rel_path}")
+                            return True
+                        elif resp.status == 423:
+                            # Locked - retry after delay
+                            logger.warning(f"[WebDAV] File locked (423), retry {attempt + 1}/{max_retries}")
+                            await asyncio.sleep(2 * (attempt + 1))  # Exponential backoff
                             continue
-                except asyncio.TimeoutError:
-                    logger.error(f"WebDAV upload timeout (attempt {attempt + 1}/{max_retries}): {rel_path}")
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(3 * (attempt + 1) + random.random() * 3)
-                        continue
-                    return False
-                except aiohttp.ClientError as e:
-                    logger.error(f"WebDAV connection error (attempt {attempt + 1}/{max_retries}): {type(e).__name__}: {e}")
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(3 * (attempt + 1) + random.random() * 3)
-                        continue
-                    return False
-                except Exception as e:
-                    logger.error(f"WebDAV unexpected error: {type(e).__name__}: {e}")
-                    import traceback
-                    logger.debug(traceback.format_exc())
-                    return False
+                        else:
+                            text = await resp.text()
+                            logger.error(f"WebDAV upload failed: {resp.status} - {text[:500]}")
+                            return False
+            except asyncio.TimeoutError:
+                logger.error(f"WebDAV upload timeout (attempt {attempt + 1}/{max_retries}): {rel_path}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 * (attempt + 1))
+                    continue
+                return False
+            except aiohttp.ClientError as e:
+                logger.error(f"WebDAV connection error (attempt {attempt + 1}/{max_retries}): {type(e).__name__}: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 * (attempt + 1))
+                    continue
+                return False
+            except Exception as e:
+                logger.error(f"WebDAV unexpected error: {type(e).__name__}: {e}")
+                import traceback
+                logger.debug(traceback.format_exc())
+                return False
         
         logger.error(f"WebDAV upload failed after {max_retries} retries: {rel_path}")
         return False

@@ -468,7 +468,7 @@ async def download_media(
                     app.cloud_drive_config,
                     app.save_path,
                     file_name, # Relative path handled inside
-                    lambda: client.stream_media(message, limit=0, offset=0),
+                    stream_generator,
                     media_size,
                     progress_callback=update_upload_stat,
                     progress_args=(
@@ -477,16 +477,18 @@ async def download_media(
                         task_start_time,
                         node,
                         client,
+                        True,
                     )
                 )
                 
                 if success:
                     # Mock successful download path to satisfy later logic, though file doesn't exist locally
+                    # We might need to adjust logic later if it checks for file existence
                     # For now, we trick it by returning a dummy path if successful
                     temp_download_path = "STREAMED_TO_WEBDAV"
-                    # Mark as success - pass file info for streaming uploads that don't have download records
+                    # Mark as success with proper file info
                     verify_and_save_download(node.chat_id, message.id, ui_file_name, media_size, node.task_id)
-                    # Remove from pending downloads (completed successfully)
+                    # CRITICAL: Remove from pending downloads to prevent re-download on restart
                     remove_pending_download(node.chat_id, message.id)
                     return DownloadStatus.SuccessDownload, file_name
                 else:
@@ -513,7 +515,7 @@ async def download_media(
                         _check_download_finish(media_size, temp_download_path, ui_file_name)
                         
                         # Verify and persist completion to DB
-                        verify_and_save_download(node.chat_id, message.id)
+                        verify_and_save_download(node.chat_id, message.id, ui_file_name, media_size, node.task_id)
                         
                         await asyncio.sleep(0.5)
                         _move_to_download_path(temp_download_path, file_name)
@@ -553,17 +555,12 @@ async def download_media(
                     f"Message[{message.id}]: {_t('Timing out after 3 reties, download skipped.')}"
                 )
         except Exception as e:
+            # pylint: disable = C0301
             logger.error(
                 f"Message[{message.id}]: "
                 f"{_t('could not be downloaded due to following exception')}:\n[{e}].",
                 exc_info=True,
             )
-            if retry < 2:
-                logger.warning(
-                    f"Message[{message.id}]: {_t('Retrying after error')}... ({retry + 1}/3)"
-                )
-                await asyncio.sleep(RETRY_TIME_OUT * (retry + 1))
-                continue
             break
 
     return DownloadStatus.FailedDownload, None

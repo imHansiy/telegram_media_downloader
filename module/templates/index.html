@@ -8,26 +8,6 @@
       <h1 class="text-2xl font-bold mb-1">仪表盘</h1>
       <p class="text-secondary opacity-70">系统运行状态与任务监控</p>
     </div>
-
-    <div class="flex flex-wrap gap-4 items-center">
-      <!-- Global Control -->
-      {% set state_str = download_state|string %}
-      {% set is_running = 'Downloading' in state_str %}
-      <button id="state-toggle-btn"
-        class="btn {{ 'btn-danger' if is_running else 'btn-primary' }} px-6 py-3 h-auto font-medium shadow-lg hover:shadow-xl transition-all">
-        <span class="flex items-center gap-2">
-          <svg class="icon" viewBox="0 0 24 24" style="width:18px;height:18px;">
-            {% if is_running %}
-            <rect x="6" y="4" width="4" height="16"></rect>
-            <rect x="14" y="4" width="4" height="16"></rect>
-            {% else %}
-            <polygon points="5 3 19 12 5 21 5 3"></polygon>
-            {% endif %}
-          </svg>
-          {{ '暂停所有' if is_running else '开始所有' }}
-        </span>
-      </button>
-    </div>
   </div>
 
   <!-- Tabs Navigation & Filters -->
