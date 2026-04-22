@@ -88,9 +88,9 @@ def run_web_server(app: Application):
     """
     Runs a web server using the Flask framework.
     """
-
+    _flask_app.config["TEMPLATES_AUTO_RELOAD"] = True
     get_flask_app().run(
-        app.web_host, app.web_port, debug=app.debug_web, use_reloader=False
+        app.web_host, app.web_port, debug=True, use_reloader=True
     )
 
 
@@ -117,6 +117,7 @@ def init_web(app: Application, client: Client = None, restart_callback=None):
         web_login_users = {"root": app.web_login_secret}
     else:
         _flask_app.config["LOGIN_DISABLED"] = True
+    _flask_app.config["TEMPLATES_AUTO_RELOAD"] = True
     if app.debug_web:
         threading.Thread(target=run_web_server, args=(app,)).start()
     else:
@@ -595,6 +596,13 @@ def web_set_download_state():
 def get_app_version():
     """Get telegram_media_downloader version"""
     return utils.__version__
+
+
+@_flask_app.route("/get_db_status")
+@login_required
+def get_db_status():
+    """Get database heartbeat status"""
+    return jsonify(db.get_heartbeat_status())
 
 
 @_flask_app.route("/clear_history", methods=["POST"])

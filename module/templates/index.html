@@ -8,6 +8,10 @@
       <h1 class="text-2xl font-bold mb-1">仪表盘</h1>
       <p class="text-secondary opacity-70">系统运行状态与任务监控</p>
     </div>
+    <div id="db-status" class="flex items-center gap-2 px-4 py-2 rounded-lg glass-container text-sm">
+      <span id="db-status-dot" class="w-2 h-2 rounded-full bg-secondary"></span>
+      <span>数据库: <span id="db-status-text">检查中...</span></span>
+    </div>
   </div>
 
   <!-- Tabs Navigation & Filters -->
@@ -126,4 +130,38 @@
 
   </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // Database heartbeat status check
+  async function checkDbStatus() {
+    try {
+      const res = await fetch('/get_db_status');
+      const data = await res.json();
+      const dot = document.getElementById('db-status-dot');
+      const text = document.getElementById('db-status-text');
+      
+      if (data.status === 'ok') {
+        dot.className = 'w-2 h-2 rounded-full bg-success animate-pulse';
+        text.textContent = '正常';
+        text.className = 'text-success';
+      } else {
+        dot.className = 'w-2 h-2 rounded-full bg-danger';
+        text.textContent = '异常';
+        text.className = 'text-danger';
+      }
+    } catch (e) {
+      const dot = document.getElementById('db-status-dot');
+      const text = document.getElementById('db-status-text');
+      dot.className = 'w-2 h-2 rounded-full bg-danger';
+      text.textContent = '离线';
+      text.className = 'text-danger';
+    }
+  }
+
+  // Check immediately and every 30 seconds
+  checkDbStatus();
+  setInterval(checkDbStatus, 30000);
+</script>
 {% endblock %}

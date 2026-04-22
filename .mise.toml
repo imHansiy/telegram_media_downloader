@@ -1,0 +1,54 @@
+[tools]
+python = "3.12"
+
+[env]
+_.file = ".env"
+
+[tasks.setup]
+description = "Install production dependencies"
+run = "pip install -r requirements.txt"
+
+[tasks.dev-setup]
+description = "Install development dependencies"
+run = """
+pip install -r requirements.txt
+pip install -r dev-requirements.txt
+"""
+
+[tasks.start]
+description = "Run the application"
+run = "python3 media_downloader.py"
+
+[tasks.test]
+description = "Run tests with coverage"
+run = "pytest --cov media_downloader --cov utils --cov-report term-missing tests/"
+
+[tasks.lint]
+description = "Run pylint"
+run = "pylint media_downloader.py utils module -r y"
+
+[tasks.typecheck]
+description = "Run mypy type checking"
+run = "mypy media_downloader.py utils module --ignore-missing-imports"
+
+[tasks.format]
+description = "Format code with black and isort"
+run = """
+isort --profile black media_downloader.py utils module tests
+black media_downloader.py utils module tests
+"""
+
+[tasks.format-check]
+description = "Check code formatting without changes"
+run = """
+isort --check-only --profile black media_downloader.py utils module tests
+black --check media_downloader.py utils module tests
+"""
+
+[tasks.check]
+description = "Run all checks (type check, lint, format check)"
+run = """
+mise run typecheck
+mise run lint
+mise run format-check
+"""
