@@ -73,3 +73,6 @@ data.yaml
 .ace-tool/
 
 run_db.bat
+
+# Logs
+*.log
