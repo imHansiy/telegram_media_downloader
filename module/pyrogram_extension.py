@@ -35,9 +35,9 @@ from module.app import (
     UploadStatus,
 )
 from module.download_stat import get_download_result, get_total_download_speed
-from module.upload_stat import update_upload_status, update_upload_status_str
 from module.language import Language, _t
 from module.send_media_group_v2 import cache_media, send_media_group_v2
+from module.upload_stat import update_upload_status, update_upload_status_str
 from utils.format import (
     create_progress_bar,
     extract_info_from_link,
@@ -922,7 +922,11 @@ async def _report_bot_status(
 
         # Get current download speed
         current_speed = get_total_download_speed()
-        speed_str = f"⚡ {_t('Speed')}: {format_byte(current_speed)}/s\n" if current_speed > 0 else ""
+        speed_str = (
+            f"⚡ {_t('Speed')}: {format_byte(current_speed)}/s\n"
+            if current_speed > 0
+            else ""
+        )
 
         new_msg_str = (
             f"`\n"
@@ -1140,7 +1144,7 @@ async def update_cloud_upload_stat(
         speed=speed,
         eta=eta,
     )
-    
+
     # Update global upload stat
     update_upload_status_str(
         chat_id=node.chat_id,
@@ -1149,7 +1153,7 @@ async def update_cloud_upload_stat(
         percentage=percentage,
         speed=speed,
         eta=eta,
-        file_name=file_name
+        file_name=file_name,
     )
 
 
@@ -1167,12 +1171,12 @@ async def update_upload_stat(
     cur_time = time.time()
 
     # --- Per-task Control ---
-    from module.download_stat import get_task_state, DownloadState, get_download_state
-    
+    from module.download_stat import DownloadState, get_download_state, get_task_state
+
     chat_id = node.chat_id
     state = get_task_state(chat_id, message_id)
-    
-    if state == 'deleted':
+
+    if state == "deleted":
         if client:
             client.stop_transmission()
         return
@@ -1180,14 +1184,14 @@ async def update_upload_stat(
     # Global or local pause check
     # Skip pause for streams to avoid 502/timeouts
     if not is_stream:
-        while state == 'paused' or get_download_state() == DownloadState.StopDownload:
+        while state == "paused" or get_download_state() == DownloadState.StopDownload:
             if node.is_stop_transmission:
                 if client:
                     client.stop_transmission()
             await asyncio.sleep(1)
             # Re-check state
             state = get_task_state(chat_id, message_id)
-            if state == 'deleted':
+            if state == "deleted":
                 if client:
                     client.stop_transmission()
                 return
@@ -1229,7 +1233,7 @@ async def update_upload_stat(
         total_bytes=total_size,
         current_speed=int(speed_val),
         file_name=file_name,
-        eta=""  # TODO: calculate ETA if needed
+        eta="",  # TODO: calculate ETA if needed
     )
 
 
@@ -1406,11 +1410,13 @@ async def forward_messages(
 
     return types.List(forwarded_messages) if is_iterable else forwarded_messages[0]
 
+
 # --- Monkey Patch to fix CHANNEL_INVALID error in Message._parse ---
 # This error occurs when Pyrogram tries to fetch a replied message from a channel
 # that the user has not joined or doesn't have access to.
 
 _original_message_parse = pyrogram.types.Message._parse
+
 
 async def _patched_message_parse(*args, **kwargs):
     try:
@@ -1424,6 +1430,7 @@ async def _patched_message_parse(*args, **kwargs):
     except Exception as e:
         # For other errors, we re-raise to let Pyrogram handle them or just log here.
         raise e
+
 
 # Apply the patch
 # Note: We need to patch it on the class

@@ -1,0 +1,23 @@
+[local] $ python3 media_downloader.py
+DEBUG: [stat] Loaded 2 completed items from DB
+DEBUG: [stat] Restored download state: Downloading
+[04:00:10] Telegram Media Downloader v2.2.5,                          meta.py:18
+           Copyright (C) 2025 tangyoha <https://github.com/tangyoha>            
+           Licensed under the terms of the MIT License                meta.py:21
+                                                                                
+2026-04-19 04:00:10.759 | INFO     | utils.meta:print_meta:22 - Device: CPython 3.12.13 - Telegram Media Downloader 2.2.5
+2026-04-19 04:00:10.760 | INFO     | utils.meta:print_meta:23 - System: Linux 6.6.123+ (EN)
+DEBUG: [main] db.conn is: <connection object at 0x78d845e69d00; dsn: 'user=avnadmin password=xxx dbname=defaultdb host=pg-1b8693c0-gg-7e75.h.aivencloud.com port=12284 sslmode=require', closed: 0>
+DEBUG: [main] db.dsn is: postgres://avnadmin:...
+DEBUG: [main] Loaded session from DB: True, length: 362
+DEBUG: [main] in_memory mode: False
+ * Serving Flask app 'module.web'
+ * Debug mode: off
+2026-04-19 04:00:12.347 | SUCCESS  | __main__:main:866 - Successfully started (Press Ctrl+C to stop)
+2026-04-19 04:00:12.351 | INFO     | __main__:download_all_chat:678 - Refreshing dialogs/peers cache to fix PEER_ID_INVALID...
+2026-04-19 04:00:14.557 | SUCCESS  | __main__:download_all_chat:684 - Successfully cached 88 dialogs.
+2026-04-19 04:00:17.621 | INFO     | module.bot:start:263 - Bot started: @Hansiy_Download_bot (ID: 8432836442)
+2026-04-19 04:00:17.688 | INFO     | module.bot:start:275 - Admin user added: yi (ID: 7085115681)
+2026-04-19 04:00:17.690 | INFO     | module.bot:start:276 - Total allowed user IDs: [7085115681]
+[local] ERROR sh exited with non-zero status: no exit status
+[local] ERROR task failed

@@ -5,17 +5,16 @@ import importlib
 import inspect
 import os
 import re
+import urllib.parse
 from asyncio import subprocess
 from subprocess import Popen
 from typing import Callable
 from zipfile import ZipFile
-import urllib.parse
 
+import aiohttp
 from loguru import logger
 
 from utils import platform
-import aiohttp
-
 
 
 # pylint: disable = R0902
@@ -286,7 +285,9 @@ class CloudDrive:
         # Streaming Upload
         auth = None
         if drive_config.webdav_username:
-            auth = aiohttp.BasicAuth(drive_config.webdav_username, drive_config.webdav_password)
+            auth = aiohttp.BasicAuth(
+                drive_config.webdav_username, drive_config.webdav_password
+            )
 
         headers = {
             "Content-Type": "application/octet-stream",
@@ -300,22 +301,22 @@ class CloudDrive:
             if os.path.isabs(file_name) and save_path:
                 rel_path = os.path.relpath(file_name, save_path)
             else:
-                 # fallback if it's already relative or save_path mismatch
+                # fallback if it's already relative or save_path mismatch
                 rel_path = os.path.basename(file_name)
         except Exception:
             rel_path = os.path.basename(file_name)
-            
+
         # Normalize to forward slashes for WebDAV
         rel_path = rel_path.replace("\\", "/")
-        
+
         # Construct base remote URL
         base_url = drive_config.webdav_url.rstrip("/")
         remote_root = drive_config.remote_dir.strip("/")
-        
+
         # Full path to the file on WebDAV (without protocol) -> used for splitting directories
         # e.g. Crypt/OneDrive/Telegram/ChannelName/Video.mp4
         full_rel_path = f"{remote_root}/{rel_path}".strip("/")
-        
+
         # Final URL
         # Explicitly encode path segments to handle special chars/Chinese correctly
         # Split by / to preserve directory structure, then quote each component
@@ -323,10 +324,10 @@ class CloudDrive:
         # quote each part but keep / separators
         encoded_path = "/".join(urllib.parse.quote(p) for p in parts)
         remote_url = f"{base_url}/{encoded_path}"
-        
+
         logger.info(f"[WebDAV] Uploading to (Encoded): {remote_url}")
         if remote_url != f"{base_url}/{full_rel_path}":
-             logger.info(f"[WebDAV] Original Path was: {full_rel_path}")
+            logger.info(f"[WebDAV] Original Path was: {full_rel_path}")
 
         # Wrap the generator to report progress
         async def progress_stream():
@@ -335,10 +336,10 @@ class CloudDrive:
                 yield chunk
                 uploaded += len(chunk)
                 if progress_callback:
-                     if inspect.iscoroutinefunction(progress_callback):
-                         await progress_callback(uploaded, total_size, *progress_args)
-                     else:
-                         progress_callback(uploaded, total_size, *progress_args)
+                    if inspect.iscoroutinefunction(progress_callback):
+                        await progress_callback(uploaded, total_size, *progress_args)
+                    else:
+                        progress_callback(uploaded, total_size, *progress_args)
 
         # 10s for connect, 2 hours for total upload. Large videos need more time.
         timeout = aiohttp.ClientTimeout(total=7200, connect=10)
@@ -352,65 +353,92 @@ class CloudDrive:
                         dirs = parent_dir.split("/")
                         current_path_parts = []
                         for d in dirs:
-                            if not d: continue
+                            if not d:
+                                continue
                             current_path_parts.append(urllib.parse.quote(d))
                             # Join quoted parts
                             encoded_current_path = "/".join(current_path_parts)
                             mkcol_url = f"{base_url}/{encoded_current_path}"
-                            
+
                             # Check cache to avoid duplicate MKCOL requests
                             if drive_config.dir_cache.get(encoded_current_path):
                                 continue
-                                
+
                             try:
                                 async with session.request("MKCOL", mkcol_url) as resp:
                                     if resp.status == 201:
                                         # Successfully created
-                                        drive_config.dir_cache[encoded_current_path] = True
-                                        logger.info(f"[WebDAV] Created directory: {mkcol_url}")
+                                        drive_config.dir_cache[
+                                            encoded_current_path
+                                        ] = True
+                                        logger.info(
+                                            f"[WebDAV] Created directory: {mkcol_url}"
+                                        )
                                     elif resp.status == 405:
                                         # Already exists (Method Not Allowed for existing dir)
-                                        drive_config.dir_cache[encoded_current_path] = True
+                                        drive_config.dir_cache[
+                                            encoded_current_path
+                                        ] = True
                                     elif resp.status == 423:
                                         # Locked - wait and continue, another process is creating it
-                                        logger.warning(f"[WebDAV] Directory locked, waiting: {mkcol_url}")
+                                        logger.warning(
+                                            f"[WebDAV] Directory locked, waiting: {mkcol_url}"
+                                        )
                                         await asyncio.sleep(1)
-                                        drive_config.dir_cache[encoded_current_path] = True
+                                        drive_config.dir_cache[
+                                            encoded_current_path
+                                        ] = True
                                     else:
-                                        logger.warning(f"[WebDAV] MKCOL {mkcol_url} returned {resp.status}")
+                                        logger.warning(
+                                            f"[WebDAV] MKCOL {mkcol_url} returned {resp.status}"
+                                        )
                                         # Still mark as attempted to avoid infinite loops
-                                        drive_config.dir_cache[encoded_current_path] = True
+                                        drive_config.dir_cache[
+                                            encoded_current_path
+                                        ] = True
                             except Exception as e:
                                 logger.warning(f"[WebDAV] MKCOL error: {e}")
                                 # Mark as attempted anyway
                                 drive_config.dir_cache[encoded_current_path] = True
-                    
+
                     # 2. PUT stream
                     # Set Content-Length if size is known to help some WebDAV servers
                     if total_size > 0:
                         headers["Content-Length"] = str(total_size)
-                        
-                    async with session.put(remote_url, data=progress_stream(), headers=headers) as resp:
+
+                    async with session.put(
+                        remote_url, data=progress_stream(), headers=headers
+                    ) as resp:
                         if resp.status in [200, 201, 204]:
                             logger.info(f"WebDAV upload success: {rel_path}")
                             return True
                         elif resp.status == 423:
                             # Locked - retry after delay
-                            logger.warning(f"[WebDAV] File locked (423), retry {attempt + 1}/{max_retries}")
-                            await asyncio.sleep(2 * (attempt + 1))  # Exponential backoff
+                            logger.warning(
+                                f"[WebDAV] File locked (423), retry {attempt + 1}/{max_retries}"
+                            )
+                            await asyncio.sleep(
+                                2 * (attempt + 1)
+                            )  # Exponential backoff
                             continue
                         else:
                             text = await resp.text()
-                            logger.error(f"WebDAV upload failed: {resp.status} - {text[:500]}")
+                            logger.error(
+                                f"WebDAV upload failed: {resp.status} - {text[:500]}"
+                            )
                             return False
             except asyncio.TimeoutError:
-                logger.error(f"WebDAV upload timeout (attempt {attempt + 1}/{max_retries}): {rel_path}")
+                logger.error(
+                    f"WebDAV upload timeout (attempt {attempt + 1}/{max_retries}): {rel_path}"
+                )
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2 * (attempt + 1))
                     continue
                 return False
             except aiohttp.ClientError as e:
-                logger.error(f"WebDAV connection error (attempt {attempt + 1}/{max_retries}): {type(e).__name__}: {e}")
+                logger.error(
+                    f"WebDAV connection error (attempt {attempt + 1}/{max_retries}): {type(e).__name__}: {e}"
+                )
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2 * (attempt + 1))
                     continue
@@ -418,46 +446,56 @@ class CloudDrive:
             except Exception as e:
                 logger.error(f"WebDAV unexpected error: {type(e).__name__}: {e}")
                 import traceback
+
                 logger.debug(traceback.format_exc())
                 return False
-        
+
         logger.error(f"WebDAV upload failed after {max_retries} retries: {rel_path}")
         return False
 
     @staticmethod
-    async def test_webdav_connection(url: str, username: str, password: str) -> tuple[bool, str]:
+    async def test_webdav_connection(
+        url: str, username: str, password: str
+    ) -> tuple[bool, str]:
         """Test WebDAV connectivity"""
         if not url:
             return False, "URL is empty"
-        
+
         try:
             auth = None
             if username:
                 auth = aiohttp.BasicAuth(username, password)
-            
+
             async with aiohttp.ClientSession(auth=auth) as session:
                 # 1. Try PROPFIND
-                headers = {"Depth": "0", "Content-Type": "text/xml"} 
-                
+                headers = {"Depth": "0", "Content-Type": "text/xml"}
+
                 check_urls = [url]
                 if not url.endswith("/"):
                     check_urls.append(url + "/")
-                
+
                 for check_url in check_urls:
                     try:
-                        async with session.request("PROPFIND", check_url, headers=headers) as resp:
+                        async with session.request(
+                            "PROPFIND", check_url, headers=headers
+                        ) as resp:
                             if resp.status in [200, 207]:
                                 return True, "Connection successful"
                             elif resp.status == 401:
                                 return False, "Authentication failed (401)"
-                            
+
                             # If 405 Method Not Allowed, try OPTIONS on this URL
                             if resp.status == 405:
-                                async with session.request("OPTIONS", check_url) as opt_resp:
+                                async with session.request(
+                                    "OPTIONS", check_url
+                                ) as opt_resp:
                                     if opt_resp.status in [200, 204]:
                                         dav = opt_resp.headers.get("DAV", "")
                                         if dav:
-                                            return True, f"Connection successful (DAV: {dav})"
+                                            return (
+                                                True,
+                                                f"Connection successful (DAV: {dav})",
+                                            )
                                         return True, "Connection successful (OPTIONS)"
                                     elif opt_resp.status == 401:
                                         return False, "Authentication failed (401)"
@@ -466,7 +504,10 @@ class CloudDrive:
                         logger.warning(f"PROPFIND failed for {check_url}: {e}")
                         continue
 
-                return False, f"Connection failed (HTTP {resp.status if 'resp' in locals() else 'Unknown'})"
+                return (
+                    False,
+                    f"Connection failed (HTTP {resp.status if 'resp' in locals() else 'Unknown'})",
+                )
 
         except Exception as e:
             return False, f"Connection Failed: {str(e)}"

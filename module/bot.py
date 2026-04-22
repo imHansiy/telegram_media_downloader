@@ -172,14 +172,10 @@ class DownloadBot:
         # 命令列表
         commands = [
             types.BotCommand("help", _t("帮助")),
-            types.BotCommand(
-                "get_info", _t("从消息链接获取群组和用户信息")
-            ),
+            types.BotCommand("get_info", _t("从消息链接获取群组和用户信息")),
             types.BotCommand(
                 "download",
-                _t(
-                    "下载视频，使用方法：直接输入 /download 查看"
-                ),
+                _t("下载视频，使用方法：直接输入 /download 查看"),
             ),
             types.BotCommand(
                 "forward",
@@ -187,15 +183,11 @@ class DownloadBot:
             ),
             types.BotCommand(
                 "listen_forward",
-                _t(
-                    "监听转发，使用方法：直接输入 /listen_forward 查看"
-                ),
+                _t("监听转发，使用方法：直接输入 /listen_forward 查看"),
             ),
             types.BotCommand(
                 "add_filter",
-                _t(
-                    "添加下载过滤器，使用方法：直接输入 /add_filter 查看"
-                ),
+                _t("添加下载过滤器，使用方法：直接输入 /add_filter 查看"),
             ),
             types.BotCommand("set_language", _t("设置语言")),
             types.BotCommand("status", _t("获取运行设备系统信息")),
@@ -213,7 +205,7 @@ class DownloadBot:
             if config:
                 self.config = config
                 self.assign_config(self.config)
-        
+
         # Fallback to file if config not loaded from DB
         if not self.config and os.path.exists(self.config_path):
             with open(self.config_path, encoding="utf-8") as f:
@@ -223,7 +215,7 @@ class DownloadBot:
                     self.assign_config(self.config)
 
         await self.bot.start()
-        
+
         # Restore tasks from DB
         if db.conn:
             try:
@@ -234,26 +226,32 @@ class DownloadBot:
                         try:
                             # Recreate TaskNode
                             node = TaskNode.from_dict(task_data, bot=self.bot)
-                            
+
                             # Re-add to local dict (without saving again to avoid recursion/redundancy)
                             self.task_node[node.task_id] = node
-                            
+
                             # Important: Update max task_id to avoid collision
                             if node.task_id >= self.task_id:
                                 self.task_id = node.task_id + 1
-                                
+
                             # Re-trigger download logic
                             # We need to recreate ChatDownloadConfig and start the task
                             chat_download_config = ChatDownloadConfig()
-                            chat_download_config.last_read_message_id = node.start_offset_id
+                            chat_download_config.last_read_message_id = (
+                                node.start_offset_id
+                            )
                             chat_download_config.download_filter = node.download_filter
-                            
+
                             # Start background task
                             self.app.loop.create_task(
-                                self.download_chat_task(self.client, chat_download_config, node)
+                                self.download_chat_task(
+                                    self.client, chat_download_config, node
+                                )
                             )
                             node.is_running = True
-                            logger.info(f"Restored task {node.task_id} for chat {node.chat_id}")
+                            logger.info(
+                                f"Restored task {node.task_id} for chat {node.chat_id}"
+                            )
                         except Exception as e:
                             logger.error(f"Failed to restore task {task_data}: {e}")
             except Exception as e:
@@ -644,18 +642,18 @@ async def system_status(client: pyrogram.Client, message: pyrogram.types.Message
 
         # Memory info
         mem = psutil.virtual_memory()
-        mem_used_gb = mem.used / (1024 ** 3)
-        mem_total_gb = mem.total / (1024 ** 3)
+        mem_used_gb = mem.used / (1024**3)
+        mem_total_gb = mem.total / (1024**3)
 
         # Disk info
-        disk = psutil.disk_usage('/')
-        disk_used_gb = disk.used / (1024 ** 3)
-        disk_total_gb = disk.total / (1024 ** 3)
+        disk = psutil.disk_usage("/")
+        disk_used_gb = disk.used / (1024**3)
+        disk_total_gb = disk.total / (1024**3)
 
         # Network info
         net_io = psutil.net_io_counters()
-        bytes_sent_gb = net_io.bytes_sent / (1024 ** 3)
-        bytes_recv_gb = net_io.bytes_recv / (1024 ** 3)
+        bytes_sent_gb = net_io.bytes_sent / (1024**3)
+        bytes_recv_gb = net_io.bytes_recv / (1024**3)
 
         # Active tasks info
         active_tasks = len(_bot.task_node)
@@ -785,7 +783,9 @@ async def download_from_link(client: pyrogram.Client, message: pyrogram.types.Me
     Returns:
         None
     """
-    logger.info(f"[download_from_link] Received message from user {message.from_user.id}: {message.text}")
+    logger.info(
+        f"[download_from_link] Received message from user {message.from_user.id}: {message.text}"
+    )
 
     if not message.text or not message.text.startswith("https://t.me"):
         logger.warning(f"[download_from_link] Invalid link format: {message.text}")
@@ -815,19 +815,31 @@ async def download_from_link(client: pyrogram.Client, message: pyrogram.types.Me
             if download_message:
                 # Check if this message belongs to a media group
                 if download_message.media_group_id:
-                    logger.info(f"[download_from_link] Detected media group: {download_message.media_group_id}")
+                    logger.info(
+                        f"[download_from_link] Detected media group: {download_message.media_group_id}"
+                    )
                     # Get all messages in the media group
                     try:
-                        media_group_messages = await _bot.client.get_media_group(chat_id, message_id)
-                        logger.info(f"[download_from_link] Found {len(media_group_messages)} messages in media group")
-                        
+                        media_group_messages = await _bot.client.get_media_group(
+                            chat_id, message_id
+                        )
+                        logger.info(
+                            f"[download_from_link] Found {len(media_group_messages)} messages in media group"
+                        )
+
                         # Download each message in the group
                         for idx, group_msg in enumerate(media_group_messages):
-                            logger.info(f"[download_from_link] Downloading {idx+1}/{len(media_group_messages)}: msg_id={group_msg.id}")
+                            logger.info(
+                                f"[download_from_link] Downloading {idx+1}/{len(media_group_messages)}: msg_id={group_msg.id}"
+                            )
                             await direct_download(_bot, entity.id, message, group_msg)
                     except Exception as e:
-                        logger.warning(f"[download_from_link] Failed to get media group: {e}, downloading single message")
-                        await direct_download(_bot, entity.id, message, download_message)
+                        logger.warning(
+                            f"[download_from_link] Failed to get media group: {e}, downloading single message"
+                        )
+                        await direct_download(
+                            _bot, entity.id, message, download_message
+                        )
                 else:
                     # Single message, download directly
                     await direct_download(_bot, entity.id, message, download_message)

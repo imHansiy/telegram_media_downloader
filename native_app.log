@@ -1,0 +1,140 @@
+[local] $ pip install -r requirements.txt && python3 media_downloader.py
+Collecting https://github.com/tangyoha/pyrogram/archive/refs/heads/patch.zip (from -r requirements.txt (line 2))
+  Using cached https://github.com/tangyoha/pyrogram/archive/refs/heads/patch.zip
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting PyYAML==5.3.1 (from -r requirements.txt (line 4))
+  Using cached pyyaml-5.3.1-cp312-cp312-linux_x86_64.whl
+Collecting rich==12.5.1 (from -r requirements.txt (line 5))
+  Using cached rich-12.5.1-py3-none-any.whl.metadata (18 kB)
+Collecting PyTgCrypto==1.2.6 (from -r requirements.txt (line 6))
+  Using cached PyTgCrypto-1.2.6-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (6.3 kB)
+Collecting loguru==0.6.0 (from -r requirements.txt (line 7))
+  Using cached loguru-0.6.0-py3-none-any.whl.metadata (21 kB)
+Collecting Werkzeug==2.2.2 (from -r requirements.txt (line 9))
+  Using cached Werkzeug-2.2.2-py3-none-any.whl.metadata (4.4 kB)
+Collecting flask==2.2.2 (from -r requirements.txt (line 10))
+  Using cached Flask-2.2.2-py3-none-any.whl.metadata (3.9 kB)
+Collecting ply==3.11 (from -r requirements.txt (line 11))
+  Using cached ply-3.11-py2.py3-none-any.whl.metadata (844 bytes)
+Collecting ruamel.yaml==0.17.21 (from -r requirements.txt (line 12))
+  Using cached ruamel.yaml-0.17.21-py3-none-any.whl.metadata (13 kB)
+Collecting flask-login==0.6.2 (from -r requirements.txt (line 13))
+  Using cached Flask_Login-0.6.2-py3-none-any.whl.metadata (5.8 kB)
+Collecting pycryptodome==3.18.0 (from -r requirements.txt (line 14))
+  Using cached pycryptodome-3.18.0-cp35-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (3.4 kB)
+Collecting requests==2.32.3 (from -r requirements.txt (line 15))
+  Using cached requests-2.32.3-py3-none-any.whl.metadata (4.6 kB)
+Collecting psycopg2-binary (from -r requirements.txt (line 16))
+  Using cached psycopg2_binary-2.9.11-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (4.9 kB)
+Collecting aiohttp (from -r requirements.txt (line 17))
+  Using cached aiohttp-3.13.5-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (8.1 kB)
+Collecting psutil (from -r requirements.txt (line 18))
+  Using cached psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl.metadata (22 kB)
+Collecting pyaes==1.6.1 (from Pyrogram==2.1.22->-r requirements.txt (line 2))
+  Using cached pyaes-1.6.1-py3-none-any.whl
+Collecting pysocks==1.7.1 (from Pyrogram==2.1.22->-r requirements.txt (line 2))
+  Using cached PySocks-1.7.1-py3-none-any.whl.metadata (13 kB)
+Collecting commonmark<0.10.0,>=0.9.0 (from rich==12.5.1->-r requirements.txt (line 5))
+  Using cached commonmark-0.9.1-py2.py3-none-any.whl.metadata (5.7 kB)
+Collecting pygments<3.0.0,>=2.6.0 (from rich==12.5.1->-r requirements.txt (line 5))
+  Using cached pygments-2.20.0-py3-none-any.whl.metadata (2.5 kB)
+Collecting MarkupSafe>=2.1.1 (from Werkzeug==2.2.2->-r requirements.txt (line 9))
+  Using cached markupsafe-3.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (2.7 kB)
+Collecting Jinja2>=3.0 (from flask==2.2.2->-r requirements.txt (line 10))
+  Using cached jinja2-3.1.6-py3-none-any.whl.metadata (2.9 kB)
+Collecting itsdangerous>=2.0 (from flask==2.2.2->-r requirements.txt (line 10))
+  Using cached itsdangerous-2.2.0-py3-none-any.whl.metadata (1.9 kB)
+Collecting click>=8.0 (from flask==2.2.2->-r requirements.txt (line 10))
+  Using cached click-8.3.2-py3-none-any.whl.metadata (2.6 kB)
+Collecting charset-normalizer<4,>=2 (from requests==2.32.3->-r requirements.txt (line 15))
+  Using cached charset_normalizer-3.4.7-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (40 kB)
+Collecting idna<4,>=2.5 (from requests==2.32.3->-r requirements.txt (line 15))
+  Using cached idna-3.11-py3-none-any.whl.metadata (8.4 kB)
+Collecting urllib3<3,>=1.21.1 (from requests==2.32.3->-r requirements.txt (line 15))
+  Using cached urllib3-2.6.3-py3-none-any.whl.metadata (6.9 kB)
+Collecting certifi>=2017.4.17 (from requests==2.32.3->-r requirements.txt (line 15))
+  Using cached certifi-2026.2.25-py3-none-any.whl.metadata (2.5 kB)
+Collecting aiohappyeyeballs>=2.5.0 (from aiohttp->-r requirements.txt (line 17))
+  Using cached aiohappyeyeballs-2.6.1-py3-none-any.whl.metadata (5.9 kB)
+Collecting aiosignal>=1.4.0 (from aiohttp->-r requirements.txt (line 17))
+  Using cached aiosignal-1.4.0-py3-none-any.whl.metadata (3.7 kB)
+Collecting attrs>=17.3.0 (from aiohttp->-r requirements.txt (line 17))
+  Using cached attrs-26.1.0-py3-none-any.whl.metadata (8.8 kB)
+Collecting frozenlist>=1.1.1 (from aiohttp->-r requirements.txt (line 17))
+  Using cached frozenlist-1.8.0-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl.metadata (20 kB)
+Collecting multidict<7.0,>=4.5 (from aiohttp->-r requirements.txt (line 17))
+  Using cached multidict-6.7.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (5.3 kB)
+Collecting propcache>=0.2.0 (from aiohttp->-r requirements.txt (line 17))
+  Using cached propcache-0.4.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (13 kB)
+Collecting yarl<2.0,>=1.17.0 (from aiohttp->-r requirements.txt (line 17))
+  Using cached yarl-1.23.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (79 kB)
+Collecting typing-extensions>=4.2 (from aiosignal>=1.4.0->aiohttp->-r requirements.txt (line 17))
+  Using cached typing_extensions-4.15.0-py3-none-any.whl.metadata (3.3 kB)
+WARNING: The candidate selected for download or install is a yanked version: 'pytgcrypto' candidate (version 1.2.6 at https://files.pythonhosted.org/packages/21/10/3e8e2a0ec43dfeca422771a7d9f6d3182d26847b60a2d5dc070cc7712542/PyTgCrypto-1.2.6-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (from https://pypi.org/simple/pytgcrypto/) (requires-python:~=3.7))
+Reason for being yanked: <none given>
+Using cached rich-12.5.1-py3-none-any.whl (235 kB)
+Using cached PyTgCrypto-1.2.6-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (51 kB)
+Using cached loguru-0.6.0-py3-none-any.whl (58 kB)
+Using cached Werkzeug-2.2.2-py3-none-any.whl (232 kB)
+Using cached Flask-2.2.2-py3-none-any.whl (101 kB)
+Using cached ply-3.11-py2.py3-none-any.whl (49 kB)
+Using cached ruamel.yaml-0.17.21-py3-none-any.whl (109 kB)
+Using cached Flask_Login-0.6.2-py3-none-any.whl (17 kB)
+Using cached pycryptodome-3.18.0-cp35-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (2.1 MB)
+Using cached requests-2.32.3-py3-none-any.whl (64 kB)
+Using cached PySocks-1.7.1-py3-none-any.whl (16 kB)
+Using cached charset_normalizer-3.4.7-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (216 kB)
+Using cached commonmark-0.9.1-py2.py3-none-any.whl (51 kB)
+Using cached idna-3.11-py3-none-any.whl (71 kB)
+Using cached pygments-2.20.0-py3-none-any.whl (1.2 MB)
+Using cached urllib3-2.6.3-py3-none-any.whl (131 kB)
+Using cached psycopg2_binary-2.9.11-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (4.2 MB)
+Using cached aiohttp-3.13.5-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (1.8 MB)
+Using cached multidict-6.7.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (256 kB)
+Using cached yarl-1.23.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (100 kB)
+Using cached psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl (155 kB)
+Using cached aiohappyeyeballs-2.6.1-py3-none-any.whl (15 kB)
+Using cached aiosignal-1.4.0-py3-none-any.whl (7.5 kB)
+Using cached attrs-26.1.0-py3-none-any.whl (67 kB)
+Using cached certifi-2026.2.25-py3-none-any.whl (153 kB)
+Using cached click-8.3.2-py3-none-any.whl (108 kB)
+Using cached frozenlist-1.8.0-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (242 kB)
+Using cached itsdangerous-2.2.0-py3-none-any.whl (16 kB)
+Using cached jinja2-3.1.6-py3-none-any.whl (134 kB)
+Using cached markupsafe-3.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (22 kB)
+Using cached propcache-0.4.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (221 kB)
+Using cached typing_extensions-4.15.0-py3-none-any.whl (44 kB)
+Building wheels for collected packages: Pyrogram
+  Building wheel for Pyrogram (pyproject.toml): started
+  Building wheel for Pyrogram (pyproject.toml): finished with status 'done'
+  Created wheel for Pyrogram: filename=pyrogram-2.1.22-py3-none-any.whl size=4403311 sha256=6191cffc4248c79f670336fa986b7e5673d7d9d5338e62a3d0fcd8b322f6fa36
+  Stored in directory: /tmp/pip-ephem-wheel-cache-qo_gf2vl/wheels/59/ca/68/122d8bf837362086b7075cbc056d273a4b69f4ec34a2f64b0d
+Successfully built Pyrogram
+Installing collected packages: pyaes, ply, commonmark, urllib3, typing-extensions, ruamel.yaml, PyYAML, PyTgCrypto, pysocks, pygments, pycryptodome, psycopg2-binary, psutil, propcache, multidict, MarkupSafe, loguru, itsdangerous, idna, frozenlist, click, charset-normalizer, certifi, attrs, aiohappyeyeballs, yarl, Werkzeug, rich, requests, Pyrogram, Jinja2, aiosignal, flask, aiohttp, flask-login
+
+Successfully installed Jinja2-3.1.6 MarkupSafe-3.0.3 PyTgCrypto-1.2.6 PyYAML-5.3.1 Pyrogram-2.1.22 Werkzeug-2.2.2 aiohappyeyeballs-2.6.1 aiohttp-3.13.5 aiosignal-1.4.0 attrs-26.1.0 certifi-2026.2.25 charset-normalizer-3.4.7 click-8.3.2 commonmark-0.9.1 flask-2.2.2 flask-login-0.6.2 frozenlist-1.8.0 idna-3.11 itsdangerous-2.2.0 loguru-0.6.0 multidict-6.7.1 ply-3.11 propcache-0.4.1 psutil-7.2.2 psycopg2-binary-2.9.11 pyaes-1.6.1 pycryptodome-3.18.0 pygments-2.20.0 pysocks-1.7.1 requests-2.32.3 rich-12.5.1 ruamel.yaml-0.17.21 typing-extensions-4.15.0 urllib3-2.6.3 yarl-1.23.0
+DEBUG: [stat] Loaded 2 completed items from DB
+DEBUG: [stat] Restored download state: Downloading
+[03:52:26] Telegram Media Downloader v2.2.5,                          meta.py:18
+           Copyright (C) 2025 tangyoha <https://github.com/tangyoha>            
+           Licensed under the terms of the MIT License                meta.py:21
+                                                                                
+2026-04-19 03:52:26.104 | INFO     | utils.meta:print_meta:22 - Device: CPython 3.12.13 - Telegram Media Downloader 2.2.5
+2026-04-19 03:52:26.104 | INFO     | utils.meta:print_meta:23 - System: Linux 6.6.123+ (EN)
+DEBUG: [main] db.conn is: <connection object at 0x78a60fe75800; dsn: 'user=avnadmin password=xxx dbname=defaultdb host=pg-1b8693c0-gg-7e75.h.aivencloud.com port=12284 sslmode=require', closed: 0>
+DEBUG: [main] db.dsn is: postgres://avnadmin:...
+DEBUG: [main] Loaded session from DB: True, length: 362
+DEBUG: [main] in_memory mode: False
+ * Serving Flask app 'module.web'
+ * Debug mode: off
+2026-04-19 03:52:27.244 | SUCCESS  | __main__:main:866 - Successfully started (Press Ctrl+C to stop)
+2026-04-19 03:52:27.286 | INFO     | __main__:download_all_chat:678 - Refreshing dialogs/peers cache to fix PEER_ID_INVALID...
+2026-04-19 03:52:29.440 | SUCCESS  | __main__:download_all_chat:684 - Successfully cached 88 dialogs.
+2026-04-19 03:52:30.477 | WARNING  | __main__:main:898 - Telegram FloodWait detected. Waiting for 117 seconds before retry...
+[local] ERROR sh exited with non-zero status: no exit status
+[local] ERROR task failed

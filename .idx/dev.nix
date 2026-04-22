@@ -6,6 +6,7 @@
   packages = [
     pkgs.python3
     pkgs.docker-compose
+    pkgs.mise
   ];
 
   # Enable Docker service

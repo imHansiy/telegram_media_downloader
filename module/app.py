@@ -9,6 +9,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Callable, List, Optional, Union
 
+from dotenv import load_dotenv
 from loguru import logger
 from ruamel import yaml
 
@@ -196,7 +197,7 @@ class TaskNode:
         }
 
     @staticmethod
-    def from_dict(data: dict, bot=None) -> 'TaskNode':
+    def from_dict(data: dict, bot=None) -> "TaskNode":
         """Deserialize TaskNode from dict"""
         node = TaskNode(
             chat_id=data.get("chat_id"),
@@ -409,6 +410,9 @@ class Application:
         self.download_filter = Filter()
         self.is_running = True
 
+        # Load environment variables from .env file
+        load_dotenv()
+
         self.total_download_task = 0
 
         self.chat_download_config: dict = {}
@@ -479,14 +483,23 @@ class Application:
             save_path = _config["save_path"]
             # Fix Windows path on Linux
             if os.name != "nt" and ":" in save_path and "\\" in save_path:
-                print(f"DEBUG: [app] Detected Windows path on Linux: {save_path}, converting to relative.")
-                # Try to take the part after the last backslash or just use a default relative path
+                print(
+                    f"DEBUG: [app] Detected Windows path on Linux: {save_path}, converting to relative."
+                )
                 save_path = "./downloads"
             self.save_path = save_path
 
-        self.api_id = _config.get("api_id", "")
-        self.api_hash = _config.get("api_hash", "")
-        self.bot_token = _config.get("bot_token", "")
+        # Override from Env if exists
+        self.save_path = os.getenv("SAVE_PATH", self.save_path)
+
+        self.api_id = os.getenv("API_ID", _config.get("api_id", ""))
+        self.api_hash = os.getenv("API_HASH", _config.get("api_hash", ""))
+        self.bot_token = os.getenv("BOT_TOKEN", _config.get("bot_token", ""))
+
+        self.web_host = os.getenv("WEB_HOST", _config.get("web_host", self.web_host))
+        self.web_port = int(
+            os.getenv("WEB_PORT", _config.get("web_port", self.web_port))
+        )
 
         self.media_types = _config.get("media_types", [])
         self.file_formats = _config.get("file_formats", {})
@@ -533,13 +546,16 @@ class Application:
 
             if upload_drive_config.get("webdav_url"):
                 self.cloud_drive_config.webdav_url = upload_drive_config["webdav_url"]
-            
-            if upload_drive_config.get("webdav_username"):
-                self.cloud_drive_config.webdav_username = upload_drive_config["webdav_username"]
-                
-            if upload_drive_config.get("webdav_password"):
-                self.cloud_drive_config.webdav_password = upload_drive_config["webdav_password"]
 
+            if upload_drive_config.get("webdav_username"):
+                self.cloud_drive_config.webdav_username = upload_drive_config[
+                    "webdav_username"
+                ]
+
+            if upload_drive_config.get("webdav_password"):
+                self.cloud_drive_config.webdav_password = upload_drive_config[
+                    "webdav_password"
+                ]
 
         self.file_name_prefix_split = _config.get(
             "file_name_prefix_split", self.file_name_prefix_split
@@ -644,9 +660,9 @@ class Application:
                     "ids_to_retry"
                 ]
                 for it in self.chat_download_config[self._chat_id].ids_to_retry:
-                    self.chat_download_config[self._chat_id].ids_to_retry_dict[it] = (
-                        True
-                    )
+                    self.chat_download_config[self._chat_id].ids_to_retry_dict[
+                        it
+                    ] = True
 
             self.chat_download_config[self._chat_id].last_read_message_id = _config[
                 "last_read_message_id"
@@ -696,9 +712,9 @@ class Application:
                     "ids_to_retry"
                 ]
                 for it in self.chat_download_config[self._chat_id].ids_to_retry:
-                    self.chat_download_config[self._chat_id].ids_to_retry_dict[it] = (
-                        True
-                    )
+                    self.chat_download_config[self._chat_id].ids_to_retry_dict[
+                        it
+                    ] = True
                 self.app_data.pop("ids_to_retry")
         else:
             if app_data.get("chat"):
@@ -713,9 +729,9 @@ class Application:
                             "ids_to_retry", []
                         )
                         for it in self.chat_download_config[chat_id].ids_to_retry:
-                            self.chat_download_config[chat_id].ids_to_retry_dict[it] = (
-                                True
-                            )
+                            self.chat_download_config[chat_id].ids_to_retry_dict[
+                                it
+                            ] = True
         return True
 
     async def upload_file(
@@ -937,14 +953,18 @@ class Application:
                 with open(self.config_file, "w", encoding="utf-8") as yaml_file:
                     _yaml.dump(self.config, yaml_file)
             except Exception as e:
-                logger.warning(f"Failed to write local config file (non-critical if DB is active): {e}")
+                logger.warning(
+                    f"Failed to write local config file (non-critical if DB is active): {e}"
+                )
 
         if immediate:
             try:
                 with open(self.app_data_file, "w", encoding="utf-8") as yaml_file:
                     _yaml.dump(self.app_data, yaml_file)
             except Exception as e:
-                logger.warning(f"Failed to write local data file (non-critical if DB is active): {e}")
+                logger.warning(
+                    f"Failed to write local data file (non-critical if DB is active): {e}"
+                )
 
     def set_language(self, language: Language):
         """Set Language"""
@@ -963,7 +983,8 @@ class Application:
             try:
                 if os.path.exists(os.path.join(os.path.abspath("."), self.config_file)):
                     with open(
-                        os.path.join(os.path.abspath("."), self.config_file), encoding="utf-8"
+                        os.path.join(os.path.abspath("."), self.config_file),
+                        encoding="utf-8",
                     ) as f:
                         config = _yaml.load(f.read())
                         if config:

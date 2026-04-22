@@ -17,11 +17,11 @@ from module.bot import start_download_bot, stop_download_bot
 from module.cloud_drive import CloudDrive
 from module.db import db
 from module.download_stat import (
+    add_pending_download,
+    get_pending_downloads,
+    remove_pending_download,
     update_download_status,
     verify_and_save_download,
-    add_pending_download,
-    remove_pending_download,
-    get_pending_downloads,
 )
 from module.get_chat_history_v2 import get_chat_history_v2
 from module.language import _t
@@ -323,10 +323,15 @@ async def download_task(
     node.download_status[message.id] = download_status
 
     # Skip file size check for WebDAV streaming (file doesn't exist locally)
-    if app.cloud_drive_config.upload_adapter == "webdav" and download_status == DownloadStatus.SuccessDownload:
+    if (
+        app.cloud_drive_config.upload_adapter == "webdav"
+        and download_status == DownloadStatus.SuccessDownload
+    ):
         file_size = 0  # File was streamed directly, not saved locally
     else:
-        file_size = os.path.getsize(file_name) if file_name and os.path.exists(file_name) else 0
+        file_size = (
+            os.path.getsize(file_name) if file_name and os.path.exists(file_name) else 0
+        )
 
     await upload_telegram_chat(
         client,
@@ -450,7 +455,7 @@ async def download_media(
         return DownloadStatus.SkipDownload, None
 
     message_id = message.id
-    
+
     # Register as pending download for resume on restart
     add_pending_download(node.chat_id, message_id, ui_file_name)
 
@@ -460,14 +465,14 @@ async def download_media(
             # Check if using WebDAV for streaming
             if app.cloud_drive_config.upload_adapter == "webdav":
                 logger.info(f"Starting streaming upload to WebDAV: {ui_file_name}")
-                
+
                 # Use pyrogram's stream_media which returns an async generator
                 stream_generator = client.stream_media(message, limit=0, offset=0)
-                
+
                 success = await CloudDrive.webdav_upload_stream(
                     app.cloud_drive_config,
                     app.save_path,
-                    file_name, # Relative path handled inside
+                    file_name,  # Relative path handled inside
                     stream_generator,
                     media_size,
                     progress_callback=update_upload_stat,
@@ -478,16 +483,18 @@ async def download_media(
                         node,
                         client,
                         True,
-                    )
+                    ),
                 )
-                
+
                 if success:
                     # Mock successful download path to satisfy later logic, though file doesn't exist locally
                     # We might need to adjust logic later if it checks for file existence
                     # For now, we trick it by returning a dummy path if successful
                     temp_download_path = "STREAMED_TO_WEBDAV"
                     # Mark as success with proper file info
-                    verify_and_save_download(node.chat_id, message.id, ui_file_name, media_size, node.task_id)
+                    verify_and_save_download(
+                        node.chat_id, message.id, ui_file_name, media_size, node.task_id
+                    )
                     # CRITICAL: Remove from pending downloads to prevent re-download on restart
                     remove_pending_download(node.chat_id, message.id)
                     return DownloadStatus.SuccessDownload, file_name
@@ -507,26 +514,34 @@ async def download_media(
                         client,
                     ),
                 )
-            
+
             # Success handling for standard download (outside try block but inside for loop)
             if temp_download_path:
                 if temp_download_path != "STREAMED_TO_WEBDAV":
                     if isinstance(temp_download_path, str):
-                        _check_download_finish(media_size, temp_download_path, ui_file_name)
-                        
+                        _check_download_finish(
+                            media_size, temp_download_path, ui_file_name
+                        )
+
                         # Verify and persist completion to DB
-                        verify_and_save_download(node.chat_id, message.id, ui_file_name, media_size, node.task_id)
-                        
+                        verify_and_save_download(
+                            node.chat_id,
+                            message.id,
+                            ui_file_name,
+                            media_size,
+                            node.task_id,
+                        )
+
                         await asyncio.sleep(0.5)
                         _move_to_download_path(temp_download_path, file_name)
                 else:
                     # Logic for streamed content - already handled above
                     pass
-                
+
                 # Remove from pending downloads (completed successfully)
                 remove_pending_download(node.chat_id, message.id)
                 return DownloadStatus.SuccessDownload, file_name
-                
+
         except pyrogram.errors.exceptions.bad_request_400.BadRequest:
             logger.warning(
                 f"Message[{message.id}]: {_t('file reference expired, refetching')}..."
@@ -672,7 +687,7 @@ async def download_chat_task(
 
 async def download_all_chat(client: pyrogram.Client):
     """Download All chat"""
-    
+
     # Pre-load dialogs to cache Access Hashes for peers
     # This fixes PEER_ID_INVALID errors for newly added chat_ids
     logger.info("Refreshing dialogs/peers cache to fix PEER_ID_INVALID...")
@@ -688,14 +703,18 @@ async def download_all_chat(client: pyrogram.Client):
     # Resume pending downloads from previous session
     pending = get_pending_downloads()
     if pending:
-        logger.info(f"Resuming {len(pending)} pending downloads from previous session...")
+        logger.info(
+            f"Resuming {len(pending)} pending downloads from previous session..."
+        )
         for item in pending:
             chat_id = item.get("chat_id")
             message_id = item.get("message_id")
             file_name = item.get("file_name", "unknown")
             if chat_id and message_id:
                 try:
-                    logger.info(f"Resuming download: chat={chat_id}, msg={message_id}, file={file_name}")
+                    logger.info(
+                        f"Resuming download: chat={chat_id}, msg={message_id}, file={file_name}"
+                    )
                     # Fetch the message
                     message = await client.get_messages(chat_id, message_id)
                     if message and not message.empty:
@@ -704,7 +723,9 @@ async def download_all_chat(client: pyrogram.Client):
                         await queue.put((message, node))
                         logger.success(f"Queued for resume: msg={message_id}")
                     else:
-                        logger.warning(f"Message {message_id} no longer exists, removing from pending")
+                        logger.warning(
+                            f"Message {message_id} no longer exists, removing from pending"
+                        )
                         remove_pending_download(chat_id, message_id)
                 except Exception as e:
                     logger.error(f"Failed to resume download {message_id}: {e}")
@@ -734,7 +755,7 @@ async def run_until_all_task_finish():
             break
 
         await asyncio.sleep(1)
-        
+
         # Periodic auto-save every 10 seconds
         tick += 1
         if tick % 10 == 0:
@@ -768,10 +789,14 @@ def main():
     # Try to load session from DB, but don't force it yet
     session_string = None
     print(f"DEBUG: [main] db.conn is: {db.conn}")
-    print(f"DEBUG: [main] db.dsn is: {db.dsn[:20] + '...' if db.dsn and len(db.dsn) > 20 else db.dsn}")
+    print(
+        f"DEBUG: [main] db.dsn is: {db.dsn[:20] + '...' if db.dsn and len(db.dsn) > 20 else db.dsn}"
+    )
     if db.conn:
         session_string = db.load_setting("session")
-        print(f"DEBUG: [main] Loaded session from DB: {bool(session_string)}, length: {len(session_string) if session_string else 0}")
+        print(
+            f"DEBUG: [main] Loaded session from DB: {bool(session_string)}, length: {len(session_string) if session_string else 0}"
+        )
     else:
         print("DEBUG: [main] No database connection, cannot load session.")
 
@@ -836,11 +861,11 @@ def main():
                 if db.conn:
                     db.save_setting("session", None)
                     logger.info("Invalid session cleared from database.")
-                
+
                 # Reset client
                 client = None
                 session_string = None
-                
+
                 # Enter Web UI mode
                 logger.info(f"Web UI running at http://{app.web_host}:{app.web_port}")
                 logger.warning("Please login again via Web UI at /tg_login")
@@ -857,7 +882,9 @@ def main():
                         # NOTE: export_session_string() is NOT a coroutine, it's a sync method!
                         s = client.export_session_string()
                         db.save_setting("session", s)
-                        print(f"DEBUG: [main] Session saved to DB, length: {len(s) if s else 0}")
+                        print(
+                            f"DEBUG: [main] Session saved to DB, length: {len(s) if s else 0}"
+                        )
                     except Exception as e:
                         logger.warning(f"Failed to export/save session string: {e}")
 
@@ -894,6 +921,14 @@ def main():
 
     except KeyboardInterrupt:
         logger.info(_t("KeyboardInterrupt"))
+    except pyrogram.errors.exceptions.flood_420.FloodWait as e:
+        logger.warning(
+            f"Telegram FloodWait detected. Waiting for {e.value} seconds before retry..."
+        )
+        import time
+
+        time.sleep(e.value + 5)
+        # We exit after sleep, allowing Docker to restart normally but with the required delay
     except Exception as e:
         logger.exception("{}", e)
     finally:
