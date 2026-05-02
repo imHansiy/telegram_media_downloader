@@ -80,6 +80,8 @@ upload_drive:
 
 # 数据库配置（可选，默认使用本地文件）
 # DATABASE_URL: postgresql://user:password@host:port/dbname
+# DB_KEEPALIVE_INTERVAL_SECONDS: 14400  # 可选，默认 4 小时
+# DB_KEEPALIVE_APP_NAME: telegram_media_downloader  # 可选，心跳行标识
 
 web_host: 0.0.0.0
 web_port: 5000
@@ -87,6 +89,10 @@ web_login_secret: "123456"
 language: ZH
 max_download_task: 5
 ```
+
+当配置 `DATABASE_URL` 后，后端会自动创建一个很小的 `app_keepalive` 表，并启动一个低频保活任务。
+默认每 4 小时对该表写入一次，并立刻回读校验，确认数据库仍然具备真实的可写可读能力。
+这个任务完全在后端执行，不依赖前端页面访问。
 
 ## 🕹️ 使用场景
 

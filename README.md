@@ -80,6 +80,8 @@ upload_drive:
 
 # Database Configuration (Optional, default is local files)
 # DATABASE_URL: postgresql://user:password@host:port/dbname
+# DB_KEEPALIVE_INTERVAL_SECONDS: 14400  # Optional, defaults to 4 hours
+# DB_KEEPALIVE_APP_NAME: telegram_media_downloader  # Optional keepalive row key
 
 web_host: 0.0.0.0
 web_port: 5000
@@ -87,6 +89,11 @@ web_login_secret: "123456"
 language: ZH
 max_download_task: 5
 ```
+
+When `DATABASE_URL` is configured, the backend creates a tiny `app_keepalive` table and
+runs a low-frequency keepalive task. By default it writes one row every 4 hours and
+reads it back immediately to confirm the database is still truly writable and readable.
+This runs entirely on the backend and does not depend on web page visits.
 
 ## 🕹️ Use Cases
 
