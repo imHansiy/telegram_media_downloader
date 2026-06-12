@@ -114,9 +114,11 @@ The Web UI can store multiple Telegram account profiles. Each profile keeps its
 own Telegram session, app config, and bot submission access settings. You can
 create blank profiles, clone the current config into a new profile, rename
 profiles, delete inactive profiles, and write a new Telegram login into a
-specific profile. The current runtime activates one profile at a time; switching
-profiles stops the old runtime and starts the selected profile with its saved
-config/session.
+specific profile. Multiple profiles with saved sessions can run at the same
+time; each profile gets its own Telegram client, download queue, workers, and
+config. The Bot runner remains process-wide: if multiple running profiles define
+a bot token, the first successfully started profile owns the Bot so the same
+token is not consumed by multiple update loops.
 
 ## 🤝 Contributing
 Read through our [contributing guidelines](./CONTRIBUTING.md) to learn about our submission process and coding rules.

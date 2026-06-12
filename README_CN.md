@@ -110,8 +110,10 @@ max_download_task: 5
 ### 4. 多账户与多配置档案
 Web UI 的“Telegram 接入管理”支持保存多个 Telegram 账户档案。每个档案保存独立的
 Telegram session、应用配置和 Bot 投递权限。可以创建空档案、复制当前配置新建档案、
-重命名档案、删除非活跃档案，也可以把一次新的 Telegram 登录写入指定档案。当前版本一次
-只运行一个激活档案，切换档案时会停止旧运行态并使用目标档案的配置与 session 热启动。
+重命名档案、删除非活跃档案，也可以把一次新的 Telegram 登录写入指定档案。多个已保存
+session 的档案可以同时启动，每个档案拥有独立 Telegram client、下载队列、worker 和配置。
+Bot 是进程级单实例；当多个运行中的档案都配置了 Bot token 时，只会由第一个成功启动的档案
+持有 Bot，避免同一个 bot token 多实例抢更新。
 
 ## 🤝 贡献
 请阅读 [贡献指南](./CONTRIBUTING.md) 以了解我们的开发规范。

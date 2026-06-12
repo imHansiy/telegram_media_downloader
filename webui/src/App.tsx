@@ -39,6 +39,8 @@ type ActiveTab = 'dashboard' | 'files' | 'config' | 'accounts';
 interface BackendTask {
   chat: string;
   id: string;
+  profile_id?: string | null;
+  profileId?: string | null;
   filename: string;
   total_size: string;
   download_progress: string;
@@ -54,6 +56,15 @@ interface BackendTask {
   completed_ts?: number | null;
   state?: string;
   status?: string;
+}
+
+function backendTaskProfile(item: BackendTask): string | null {
+  return item.profile_id || item.profileId || null;
+}
+
+function backendTaskId(item: BackendTask): string {
+  const profileId = backendTaskProfile(item);
+  return profileId ? `${profileId}:${item.chat}:${item.id}` : `${item.chat}:${item.id}`;
 }
 
 interface BootstrapPayload {
@@ -146,7 +157,8 @@ function taskFromBackend(item: BackendTask): SyncTask {
   const downloadProgress = Number.parseFloat(item.download_progress) || 0;
   const uploadProgress = Number.parseFloat(item.upload_progress) || 0;
   return {
-    id: `${item.chat}:${item.id}`,
+    id: backendTaskId(item),
+    profileId: backendTaskProfile(item) || undefined,
     type,
     sourceId: item.chat,
     sourceName: item.chat,
@@ -164,7 +176,8 @@ function taskFromBackend(item: BackendTask): SyncTask {
 function completedFromBackend(item: BackendTask): CompletedFile {
   const relativeParts = (item.relative_path || '').split('/').filter(Boolean);
   return {
-    id: `${item.chat}:${item.id}`,
+    id: backendTaskId(item),
+    profileId: backendTaskProfile(item) || undefined,
     name: item.filename,
     type: mediaTypeFromFilename(item.filename),
     sizeBytes: parseHumanBytes(item.total_size),
@@ -393,10 +406,15 @@ export default function App() {
   };
 
   const handleTaskAction = async (id: string, action: 'pause' | 'resume' | 'delete') => {
-    const [chatId, messageId] = id.split(':');
+    const parts = id.split(':');
+    const hasProfile = parts.length >= 3;
+    const profileId = hasProfile ? parts[0] : undefined;
+    const chatId = hasProfile ? parts[1] : parts[0];
+    const messageId = hasProfile ? parts[2] : parts[1];
     await postJson('/task_control', {
       chat_id: chatId,
       message_id: messageId,
+      profile_id: profileId,
       action,
     });
   };
@@ -451,6 +469,22 @@ export default function App() {
     applyAccountStatus(data.account);
     await loadBootstrap();
     setStatusMessage(data.runtime?.message || '已连接保存的 Telegram session。');
+  };
+
+  const handleStartAccount = async (profileId: string) => {
+    const data = await postJson<{ account: BootstrapPayload['account']; runtime?: any }>('/api/profiles/start', {
+      profile_id: profileId,
+    });
+    applyAccountStatus(data.account);
+    setStatusMessage(data.runtime?.message || '账号运行态已启动。');
+  };
+
+  const handleStopAccount = async (profileId: string) => {
+    const data = await postJson<{ account: BootstrapPayload['account']; runtime?: any }>('/api/profiles/stop', {
+      profile_id: profileId,
+    });
+    applyAccountStatus(data.account);
+    setStatusMessage(data.runtime?.message || '账号运行态已停止。');
   };
 
   const handleLogout = async (profileId?: string) => {
@@ -732,6 +766,8 @@ export default function App() {
                 onRenameProfile={handleRenameProfile}
                 onDeleteProfile={handleDeleteProfile}
                 onDisconnectAccount={handleLogout}
+                onStartAccount={handleStartAccount}
+                onStopAccount={handleStopAccount}
                 onConnectSavedSession={handleConnectSaved}
                 onSendCode={handleSendCode}
                 onVerifyCode={handleVerifyCode}

@@ -22,7 +22,9 @@ _total_download_speed: int = 0
 _total_download_size: int = 0
 _last_download_time: float = time.time()
 _download_state: DownloadState = DownloadState.Downloading
-_task_states: dict = {}  # { (chat_id, message_id): 'running' | 'paused' | 'deleted' }
+_task_states: dict = (
+    {}
+)  # { (profile_id, chat_id, message_id): 'running' | 'paused' | 'deleted' }
 _pending_downloads: dict = (
     {}
 )  # {(chat_id, message_id): {"chat_id": x, "message_id": y, "file_name": z}}
@@ -84,11 +86,43 @@ def set_download_state(state: DownloadState):
             print(f"Error saving download state: {e}")
 
 
-def add_pending_download(chat_id: int, message_id: int, file_name: str = ""):
+def _pending_key(chat_id: int, message_id: int, profile_id: str = None) -> str:
+    profile_part = profile_id or "legacy"
+    return f"{profile_part}:{chat_id}_{message_id}"
+
+
+def _task_key(chat_id: int, message_id: int, profile_id: str = None):
+    return (profile_id or "legacy", int(chat_id), int(message_id))
+
+
+def _legacy_task_key(chat_id: int, message_id: int):
+    return (int(chat_id), int(message_id))
+
+
+def _task_key_to_string(key) -> str:
+    if len(key) == 3:
+        profile_id, chat_id, message_id = key
+        return f"{profile_id}:{chat_id}:{message_id}"
+    chat_id, message_id = key
+    return f"{chat_id}:{message_id}"
+
+
+def _save_task_states():
+    if db.conn:
+        to_save = {
+            _task_key_to_string(key): state for key, state in _task_states.items()
+        }
+        db.save_setting("task_states", to_save)
+
+
+def add_pending_download(
+    chat_id: int, message_id: int, file_name: str = "", profile_id: str = None
+):
     """Register a download as pending (for resume on restart)"""
     global _pending_downloads
-    key = f"{chat_id}_{message_id}"
+    key = _pending_key(chat_id, message_id, profile_id)
     _pending_downloads[key] = {
+        "profile_id": profile_id,
         "chat_id": chat_id,
         "message_id": message_id,
         "file_name": file_name,
@@ -97,18 +131,28 @@ def add_pending_download(chat_id: int, message_id: int, file_name: str = ""):
     _save_pending_downloads()
 
 
-def remove_pending_download(chat_id: int, message_id: int):
+def remove_pending_download(chat_id: int, message_id: int, profile_id: str = None):
     """Remove a download from pending list (after completion)"""
     global _pending_downloads
-    key = f"{chat_id}_{message_id}"
+    key = _pending_key(chat_id, message_id, profile_id)
+    legacy_key = f"{chat_id}_{message_id}"
     if key in _pending_downloads:
         del _pending_downloads[key]
         _save_pending_downloads()
+    elif legacy_key in _pending_downloads:
+        del _pending_downloads[legacy_key]
+        _save_pending_downloads()
 
 
-def get_pending_downloads() -> list:
+def get_pending_downloads(profile_id: str = None) -> list:
     """Get list of pending downloads for resume"""
-    return list(_pending_downloads.values())
+    if profile_id is None:
+        return list(_pending_downloads.values())
+    return [
+        item
+        for item in _pending_downloads.values()
+        if item.get("profile_id") in (profile_id, None)
+    ]
 
 
 def _save_pending_downloads():
@@ -202,8 +246,7 @@ async def update_download_status(
     chat_id = node.chat_id
 
     # --- Per-task Control ---
-    key = (chat_id, message_id)
-    state = _task_states.get(key, "running")
+    state = get_task_state(chat_id, message_id, node.profile_id)
 
     if state == "deleted":
         client.stop_transmission()
@@ -215,7 +258,7 @@ async def update_download_status(
             client.stop_transmission()
         await asyncio.sleep(1)
         # Re-check state
-        state = _task_states.get(key, "running")
+        state = get_task_state(chat_id, message_id, node.profile_id)
         if state == "deleted":
             client.stop_transmission()
             return
@@ -246,6 +289,7 @@ async def update_download_status(
         _download_result[chat_id][message_id]["down_byte"] = down_byte
         _download_result[chat_id][message_id]["end_time"] = end_time
         _download_result[chat_id][message_id]["download_speed"] = download_speed
+        _download_result[chat_id][message_id]["profile_id"] = node.profile_id
         _download_result[chat_id][message_id][
             "each_second_total_download"
         ] = each_second_total_download
@@ -261,6 +305,7 @@ async def update_download_status(
             "download_speed": down_byte / (cur_time - start_time),
             "each_second_total_download": each_second_total_download,
             "task_id": node.task_id,
+            "profile_id": node.profile_id,
         }
         _total_download_size += down_byte
 
@@ -280,6 +325,7 @@ def verify_and_save_download(
     file_name: str = "",
     total_size: int = 0,
     task_id: int = 0,
+    profile_id: str = None,
 ):
     """Mark download as complete and save to DB.
 
@@ -322,6 +368,7 @@ def verify_and_save_download(
                 "start_time": time.time(),
                 "end_time": time.time(),
                 "task_id": task_id,
+                "profile_id": profile_id or (u_info or {}).get("profile_id"),
             }
             print(
                 f"DEBUG: [stat] Created new history record for chat={chat_id}, msg={message_id}, file={file_name}, size={total_size}"
@@ -337,6 +384,7 @@ def verify_and_save_download(
             item["end_time"] = time.time()
             if "task_id" not in item:
                 item["task_id"] = task_id
+            item["profile_id"] = profile_id or item.get("profile_id")
             print(
                 f"DEBUG: [stat] Updated existing record for chat={chat_id}, msg={message_id}"
             )
@@ -350,11 +398,17 @@ def verify_and_save_download(
 
         # Clean up task state (no longer needed once completed)
         global _task_states
-        if (chat_id, message_id) in _task_states:
-            del _task_states[(chat_id, message_id)]
-            if db.conn:
-                to_save = {f"{c}:{m}": s for (c, m), s in _task_states.items()}
-                db.save_setting("task_states", to_save)
+        task_key = _task_key(chat_id, message_id, profile_id)
+        legacy_key = _legacy_task_key(chat_id, message_id)
+        changed = False
+        if task_key in _task_states:
+            del _task_states[task_key]
+            changed = True
+        if legacy_key in _task_states:
+            del _task_states[legacy_key]
+            changed = True
+        if changed:
+            _save_task_states()
 
     except Exception as e:
         print(f"Error saving download history: {e}")
@@ -421,13 +475,19 @@ def init_stat():
         if db.conn:
             saved_states = db.load_setting("task_states")
             if saved_states:
-                # Convert "chat_id:msg_id" back to (chat_id, msg_id) tuple
+                # Convert both legacy "chat_id:msg_id" and
+                # "profile_id:chat_id:msg_id" keys back to tuples.
                 restored_states = {}
                 for key_str, state in saved_states.items():
                     try:
-                        c_id, m_id = map(int, key_str.split(":"))
-                        restored_states[(c_id, m_id)] = state
-                    except:
+                        parts = key_str.split(":")
+                        if len(parts) == 3:
+                            profile_id, c_id, m_id = parts
+                            restored_states[(profile_id, int(c_id), int(m_id))] = state
+                        elif len(parts) == 2:
+                            c_id, m_id = map(int, parts)
+                            restored_states[(c_id, m_id)] = state
+                    except Exception:
                         continue
                 _task_states = restored_states
                 print(f"DEBUG: [stat] Loaded {len(_task_states)} task states from DB")
@@ -462,7 +522,7 @@ def clear_download_history():
     return True
 
 
-def remove_download_task(chat_id: int, message_id: int):
+def remove_download_task(chat_id: int, message_id: int, profile_id: str = None):
     """Remove a specific download task from history"""
     global _download_result
 
@@ -470,6 +530,10 @@ def remove_download_task(chat_id: int, message_id: int):
 
     # Remove from download_result
     if chat_id in _download_result and message_id in _download_result[chat_id]:
+        item = _download_result[chat_id][message_id]
+        if profile_id and item.get("profile_id") not in (profile_id, None):
+            return False
+
         del _download_result[chat_id][message_id]
 
         # Clean up empty chat entries
@@ -484,41 +548,50 @@ def remove_download_task(chat_id: int, message_id: int):
     # Also remove from upload_result
     from module.upload_stat import remove_upload_status
 
-    remove_upload_status(chat_id, message_id)
+    remove_upload_status(chat_id, message_id, profile_id)
 
     return removed
 
 
-def set_task_state(chat_id: int, message_id: int, state: str):
+def set_task_state(
+    chat_id: int, message_id: int, state: str, profile_id: str = None
+):
     """Set the control state for an individual task.
 
     state: 'running' | 'paused' | 'deleted'
     """
     global _task_states
+    key = _task_key(chat_id, message_id, profile_id)
+    legacy_key = _legacy_task_key(chat_id, message_id)
 
     if state == "running":
         # Remove if it was explicitly set to something else, default is running
-        if (chat_id, message_id) in _task_states:
-            del _task_states[(chat_id, message_id)]
+        if key in _task_states:
+            del _task_states[key]
+        if legacy_key in _task_states:
+            del _task_states[legacy_key]
     else:
-        _task_states[(chat_id, message_id)] = state
+        _task_states[key] = state
 
     # If state is deleted, also remove from pending downloads
     if state == "deleted":
-        remove_pending_download(chat_id, message_id)
+        remove_pending_download(chat_id, message_id, profile_id)
 
     # Save to DB
-    if db.conn:
-        # Convert tuple keys to strings for JSON
-        to_save = {f"{c}:{m}": s for (c, m), s in _task_states.items()}
-        db.save_setting("task_states", to_save)
+    _save_task_states()
 
     return True
 
 
-def get_task_state(chat_id: int, message_id: int):
+def get_task_state(chat_id: int, message_id: int, profile_id: str = None):
     """Get the current state of a task"""
-    return _task_states.get((chat_id, message_id), "running")
+    key = _task_key(chat_id, message_id, profile_id)
+    legacy_key = _legacy_task_key(chat_id, message_id)
+    if key in _task_states:
+        return _task_states[key]
+    if legacy_key in _task_states:
+        return _task_states[legacy_key]
+    return "running"
 
 
 # Initialize on module load

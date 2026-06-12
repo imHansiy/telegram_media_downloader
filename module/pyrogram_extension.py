@@ -991,13 +991,17 @@ def record_download_status(func):
         media_types: List[str],
         file_formats: dict,
         node: TaskNode,
+        *args,
+        **kwargs,
     ):
         if _download_cache[(node.chat_id, message.id)] is DownloadStatus.Downloading:
             return DownloadStatus.Downloading, None
 
         _download_cache[(node.chat_id, message.id)] = DownloadStatus.Downloading
 
-        status, file_name = await func(client, message, media_types, file_formats, node)
+        status, file_name = await func(
+            client, message, media_types, file_formats, node, *args, **kwargs
+        )
 
         _download_cache[(node.chat_id, message.id)] = status
 
@@ -1392,6 +1396,7 @@ async def update_cloud_upload_stat(
         speed=speed,
         eta=eta,
         file_name=file_name,
+        profile_id=getattr(node, "profile_id", None),
     )
 
 
@@ -1412,7 +1417,8 @@ async def update_upload_stat(
     from module.download_stat import DownloadState, get_download_state, get_task_state
 
     chat_id = node.chat_id
-    state = get_task_state(chat_id, message_id)
+    profile_id = getattr(node, "profile_id", None)
+    state = get_task_state(chat_id, message_id, profile_id)
 
     if state == "deleted":
         if client:
@@ -1428,7 +1434,7 @@ async def update_upload_stat(
                     client.stop_transmission()
             await asyncio.sleep(1)
             # Re-check state
-            state = get_task_state(chat_id, message_id)
+            state = get_task_state(chat_id, message_id, profile_id)
             if state == "deleted":
                 if client:
                     client.stop_transmission()
@@ -1473,6 +1479,7 @@ async def update_upload_stat(
         current_speed=int(speed_val),
         file_name=file_name,
         eta="",  # TODO: calculate ETA if needed
+        profile_id=getattr(node, "profile_id", None),
     )
 
 

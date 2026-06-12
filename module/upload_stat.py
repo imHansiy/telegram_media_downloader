@@ -12,7 +12,11 @@ _total_uploaded_diff: int = 0
 
 
 def register_upload_task(
-    chat_id: int, message_id: int, file_name: str, total_bytes: int
+    chat_id: int,
+    message_id: int,
+    file_name: str,
+    total_bytes: int,
+    profile_id: str = None,
 ):
     """
     Pre-register an upload task so it shows in UI immediately.
@@ -32,6 +36,7 @@ def register_upload_task(
             "eta": "计算中...",
             "chat_id": chat_id,
             "message_id": message_id,
+            "profile_id": profile_id,
             "updated_at": time.time(),
             "state": "waiting",  # waiting, uploading, retrying, failed, success
         }
@@ -113,6 +118,7 @@ def update_upload_status(
     current_speed: int,  # bytes/s
     file_name: str,
     eta: Optional[str] = None,
+    profile_id: str = None,
 ):
     """
     Update upload status for a specific task.
@@ -143,6 +149,7 @@ def update_upload_status(
         "eta": eta if eta else "0s",
         "chat_id": chat_id,
         "message_id": message_id,
+        "profile_id": profile_id,
         "updated_at": cur_time,
     }
 
@@ -164,6 +171,7 @@ def update_upload_status_str(
     speed: str,  # e.g. "3.5MB/s"
     eta: str,
     file_name: str,
+    profile_id: str = None,
 ):
     """
     Update upload status from string-based input (e.g. Rclone).
@@ -188,12 +196,18 @@ def update_upload_status_str(
         current_speed,
         file_name,
         eta,
+        profile_id,
     )
 
 
-def remove_upload_status(chat_id: int, message_id: int):
+def remove_upload_status(chat_id: int, message_id: int, profile_id: str = None):
     """Remove upload status when finished"""
     if chat_id in _upload_result and message_id in _upload_result[chat_id]:
+        if profile_id and _upload_result[chat_id][message_id].get("profile_id") not in (
+            profile_id,
+            None,
+        ):
+            return
         del _upload_result[chat_id][message_id]
         # Clean up empty chat dict
         if not _upload_result[chat_id]:

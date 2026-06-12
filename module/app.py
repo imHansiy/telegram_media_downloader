@@ -18,7 +18,7 @@ from module.cloud_drive import CloudDrive, CloudDriveConfig
 from module.db import db
 from module.filter import Filter
 from module.language import Language, set_language
-from module.profiles import save_active_profile
+from module.profiles import save_active_profile, update_profile
 from utils.format import replace_date_time, validate_title
 from utils.meta_data import MetaData
 
@@ -138,8 +138,10 @@ class TaskNode:
         task_type: TaskType = TaskType.Download,
         task_id: int = 0,
         topic_id: int = 0,
+        profile_id: str = None,
     ):
         self.chat_id = chat_id
+        self.profile_id = profile_id
         self.from_user_id = from_user_id
         self.upload_telegram_chat_id = upload_telegram_chat_id
         self.reply_message_id = reply_message_id
@@ -195,6 +197,7 @@ class TaskNode:
             "task_id": self.task_id,
             "task_type": self.task_type.value,
             "topic_id": self.topic_id,
+            "profile_id": self.profile_id,
             # We don't save runtime state like total_task etc. as we want to restart fresh or
             # we rely on download history to skip items.
         }
@@ -217,6 +220,7 @@ class TaskNode:
             task_id=data.get("task_id", 0),
             task_type=TaskType(data.get("task_type", 1)),
             topic_id=data.get("topic_id", 0),
+            profile_id=data.get("profile_id"),
         )
         return node
 
@@ -439,6 +443,7 @@ class Application:
         self.restart_program = False
         self.config: dict = {}
         self.app_data: dict = {}
+        self.profile_id: str = None
         self.file_path_prefix: List[str] = ["chat_title", "media_datetime"]
         self.file_name_prefix: List[str] = ["message_id", "file_name"]
         self.file_name_prefix_split: str = " - "
@@ -1028,13 +1033,20 @@ class Application:
         if immediate:
             # Save to DB
             if db.conn:
-                db.save_setting("config", self.config)
-                db.save_setting("data", self.app_data)
-                save_active_profile(
-                    config=self.config,
-                    app_data=self.app_data,
-                    sync_legacy=False,
-                )
+                if self.profile_id:
+                    update_profile(
+                        self.profile_id,
+                        config=self.config,
+                        app_data=self.app_data,
+                    )
+                else:
+                    db.save_setting("config", self.config)
+                    db.save_setting("data", self.app_data)
+                    save_active_profile(
+                        config=self.config,
+                        app_data=self.app_data,
+                        sync_legacy=False,
+                    )
 
             try:
                 with open(self.config_file, "w", encoding="utf-8") as yaml_file:

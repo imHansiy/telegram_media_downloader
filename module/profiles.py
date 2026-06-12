@@ -37,6 +37,7 @@ def _profile_from_legacy() -> dict:
         "bot_setting": _legacy_value("bot_setting", {}) or {},
         "session": _legacy_value("session", None),
         "account": None,
+        "runtime_enabled": bool(_legacy_value("session", None)),
         "created_at": now,
         "updated_at": now,
     }
@@ -71,6 +72,12 @@ def _normalize_store(store: dict | None) -> dict:
                 "bot_setting": profile.get("bot_setting") or {},
                 "session": profile.get("session"),
                 "account": profile.get("account"),
+                "runtime_enabled": bool(
+                    profile.get(
+                        "runtime_enabled",
+                        bool(profile.get("session")) if "runtime_enabled" not in profile else False,
+                    )
+                ),
                 "created_at": profile.get("created_at") or utc_now(),
                 "updated_at": profile.get("updated_at") or utc_now(),
             }
@@ -158,6 +165,7 @@ def save_active_profile(
     bot_setting: Any = _UNSET,
     session: Any = _UNSET,
     account: Any = _UNSET,
+    runtime_enabled: Any = _UNSET,
     name: Any = _UNSET,
     sync_legacy: bool = True,
 ) -> dict:
@@ -176,6 +184,8 @@ def save_active_profile(
         profile["session"] = session
     if account is not _UNSET:
         profile["account"] = account
+    if runtime_enabled is not _UNSET:
+        profile["runtime_enabled"] = bool(runtime_enabled)
     if name is not _UNSET and name:
         profile["name"] = str(name)
     profile["updated_at"] = utc_now()
@@ -220,6 +230,7 @@ def create_profile(
     bot_setting: dict | None = None,
     session: str | None = None,
     account: dict | None = None,
+    runtime_enabled: bool = False,
     activate: bool = True,
 ) -> dict:
     """Create a new profile, optionally making it active."""
@@ -234,6 +245,7 @@ def create_profile(
         "bot_setting": copy.deepcopy(bot_setting if bot_setting is not None else {}),
         "session": session,
         "account": account,
+        "runtime_enabled": bool(runtime_enabled),
         "created_at": now,
         "updated_at": now,
     }

@@ -16,6 +16,11 @@ export interface TelegramAccount {
   createdAt: string;
   hasSession?: boolean;
   isActive?: boolean;
+  isRunning?: boolean;
+  runtimeStatus?: 'starting' | 'running' | 'stopping' | 'stopped' | 'error' | string;
+  runtimeMessage?: string;
+  botRunning?: boolean;
+  runtimeEnabled?: boolean;
 }
 
 export type MediaType = 'photo' | 'video' | 'document' | 'audio' | 'voice';
@@ -52,6 +57,7 @@ export interface BotAccessConfig {
 
 export interface SyncTask {
   id: string;
+  profileId?: string;
   type: MediaType;
   sourceId: string; // e.g. "@durov" or "t.me/c/12345/2"
   sourceName: string; // Friendly name of channel
@@ -68,6 +74,7 @@ export interface SyncTask {
 
 export interface CompletedFile {
   id: string;
+  profileId?: string;
   name: string;
   type: MediaType;
   sizeBytes: number;

@@ -69,6 +69,7 @@ _app_instance: Application = None
 _restart_callback = None
 _start_runtime_callback = None
 _stop_runtime_callback = None
+_runtime_status_callback = None
 
 
 class User(UserMixin):
@@ -215,11 +216,23 @@ def _get_client_account_meta(client: Client = None) -> dict | None:
     return None
 
 
-def _profile_to_account(profile: dict, active_profile_id: str, connected_meta: dict | None = None) -> dict:
+def _profile_to_account(
+    profile: dict,
+    active_profile_id: str,
+    connected_meta: dict | None = None,
+    runtime_info: dict | None = None,
+) -> dict:
     """Convert a profile into the React account card shape."""
     is_active = profile["id"] == active_profile_id
-    account = connected_meta if is_active and connected_meta else (profile.get("account") or {})
+    runtime_info = runtime_info or {}
+    runtime_account = runtime_info.get("account") or {}
+    account = (
+        runtime_account
+        or (connected_meta if is_active and connected_meta else None)
+        or (profile.get("account") or {})
+    )
     profile_name = profile.get("name") or account.get("firstName") or "Telegram Profile"
+    is_running = bool(runtime_info.get("running"))
 
     return {
         "id": profile["id"],
@@ -229,11 +242,16 @@ def _profile_to_account(profile: dict, active_profile_id: str, connected_meta: d
         "phoneNumber": account.get("phoneNumber") or "",
         "username": account.get("username") or "",
         "firstName": account.get("firstName") or profile_name,
-        "status": "connected" if is_active and connected_meta else "disconnected",
-        "sessionName": "active_session" if is_active else "saved_session",
+        "status": "connected" if is_running else "disconnected",
+        "sessionName": "running_session" if is_running else "saved_session",
         "createdAt": profile.get("created_at") or "",
         "hasSession": bool(profile.get("session")),
         "isActive": is_active,
+        "isRunning": is_running,
+        "runtimeStatus": runtime_info.get("status") or "stopped",
+        "runtimeMessage": runtime_info.get("message") or "",
+        "botRunning": bool(runtime_info.get("bot_started")),
+        "runtimeEnabled": bool(profile.get("runtime_enabled")),
     }
 
 
@@ -253,8 +271,14 @@ def _get_telegram_account_status() -> dict:
             print(f"DEBUG: [account_status] Failed to save account metadata: {e}")
 
     profiles = get_profiles() if db.conn else []
+    runtime_status = _runtime_status_callback() if _runtime_status_callback else {}
     accounts = [
-        _profile_to_account(profile, active_profile_id, connected_meta)
+        _profile_to_account(
+            profile,
+            active_profile_id,
+            connected_meta,
+            runtime_status.get(profile["id"]),
+        )
         for profile in profiles
     ]
     active_account = next((item for item in accounts if item["id"] == active_profile_id), None)
@@ -287,6 +311,7 @@ def init_web(
     restart_callback=None,
     start_runtime_callback=None,
     stop_runtime_callback=None,
+    runtime_status_callback=None,
 ):
     """
     Set the value of the users variable.
@@ -302,11 +327,13 @@ def init_web(
     global _restart_callback
     global _start_runtime_callback
     global _stop_runtime_callback
+    global _runtime_status_callback
     global _app_instance
     _client = client
     _restart_callback = restart_callback
     _start_runtime_callback = start_runtime_callback
     _stop_runtime_callback = stop_runtime_callback
+    _runtime_status_callback = runtime_status_callback
     _app_instance = app
 
     if app.web_login_secret:
@@ -490,7 +517,6 @@ def api_account_status():
 @login_required
 def api_profiles_create():
     """Create a Telegram account/config profile."""
-    global _client
     try:
         if not db.conn:
             return jsonify({"success": False, "message": "Database not connected"}), 503
@@ -512,9 +538,10 @@ def api_profiles_create():
         runtime_result = None
         if activate:
             _apply_profile_to_app(profile)
-            if _stop_runtime_callback:
-                runtime_result = _stop_runtime_callback()
-            _client = None
+            runtime_result = {
+                "status": "selected",
+                "message": "账号档案已设为当前编辑档案。",
+            }
 
         return jsonify(
             {
@@ -575,6 +602,15 @@ def api_profiles_delete(profile_id=None):
         if not profile_id:
             return jsonify({"success": False, "message": "profile_id is required"}), 400
 
+        runtime_status = _runtime_status_callback() if _runtime_status_callback else {}
+        if runtime_status.get(profile_id, {}).get("running"):
+            return jsonify(
+                {
+                    "success": False,
+                    "message": "账号正在运行，请先停止后台任务再删除。",
+                }
+            ), 409
+
         delete_profile(profile_id)
         return jsonify(
             {
@@ -594,8 +630,7 @@ def api_profiles_delete(profile_id=None):
 @_flask_app.route("/api/profiles/activate", methods=["POST"])
 @login_required
 def api_profiles_activate():
-    """Switch the active Telegram account/config profile."""
-    global _client
+    """Switch the active profile used for editing/config pages."""
     try:
         if not db.conn:
             return jsonify({"success": False, "message": "Database not connected"}), 503
@@ -608,45 +643,77 @@ def api_profiles_activate():
         active_profile = activate_profile(profile_id)
         _apply_profile_to_app(active_profile)
 
-        runtime_result = {
-            "status": "not_started",
-            "message": "Profile activated. No saved Telegram session for this profile.",
-        }
-        saved_session = active_profile.get("session")
-        if saved_session:
-            config_data = active_profile.get("config") or _load_current_config()
-            api_id, api_hash, _ = _resolve_api_credentials(config_data=config_data)
-            if not api_id or not api_hash:
-                return jsonify(
-                    {
-                        "success": False,
-                        "message": "Profile activated, but api_id or api_hash is missing.",
-                        "account": _get_telegram_account_status(),
-                    }
-                ), 400
-
-            _client = _create_client_from_session(
-                api_id,
-                api_hash,
-                _app_instance.proxy,
-                _app_instance.session_file_path,
-                _app_instance.loop,
-                saved_session,
-            )
-            runtime_result = (
-                _start_runtime_callback(_client)
-                if _start_runtime_callback
-                else {"status": "not_started", "message": "Runtime callback is not configured."}
-            )
-        else:
-            if _stop_runtime_callback:
-                runtime_result = _stop_runtime_callback()
-            _client = None
-
         return jsonify(
             {
                 "success": True,
                 "message": "Profile activated.",
+                "runtime": {
+                    "status": "selected",
+                    "message": "账号档案已设为当前编辑档案。",
+                },
+                "account": _get_telegram_account_status(),
+            }
+        )
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@_flask_app.route("/api/profiles/start", methods=["POST"])
+@login_required
+def api_profiles_start():
+    """Start one profile runtime."""
+    try:
+        if not db.conn:
+            return jsonify({"success": False, "message": "Database not connected"}), 503
+        if not _start_runtime_callback:
+            return jsonify({"success": False, "message": "Runtime callback is not configured."}), 503
+
+        data = request.get_json(silent=True) or {}
+        profile_id = data.get("profile_id") or data.get("profileId")
+        if not profile_id:
+            return jsonify({"success": False, "message": "profile_id is required"}), 400
+
+        profile = next((item for item in get_profiles() if item["id"] == profile_id), None)
+        if not profile:
+            return jsonify({"success": False, "message": "Profile not found"}), 404
+        if not profile.get("session"):
+            return jsonify({"success": False, "message": "No saved Telegram session found."}), 404
+
+        runtime_result = _start_runtime_callback(None, profile)
+        return jsonify(
+            {
+                "success": runtime_result.get("status") != "error",
+                "runtime": runtime_result,
+                "account": _get_telegram_account_status(),
+            }
+        )
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@_flask_app.route("/api/profiles/stop", methods=["POST"])
+@login_required
+def api_profiles_stop():
+    """Stop one profile runtime."""
+    try:
+        if not _stop_runtime_callback:
+            return jsonify({"success": False, "message": "Runtime callback is not configured."}), 503
+
+        data = request.get_json(silent=True) or {}
+        profile_id = data.get("profile_id") or data.get("profileId")
+        if not profile_id:
+            return jsonify({"success": False, "message": "profile_id is required"}), 400
+
+        runtime_result = _stop_runtime_callback(profile_id)
+        return jsonify(
+            {
+                "success": True,
                 "runtime": runtime_result,
                 "account": _get_telegram_account_status(),
             }
@@ -670,7 +737,9 @@ def api_account_logout():
         is_active = profile_id == active_profile.get("id")
 
         if is_active and _stop_runtime_callback:
-            _stop_runtime_callback()
+            _stop_runtime_callback(profile_id)
+        elif _stop_runtime_callback and profile_id:
+            _stop_runtime_callback(profile_id)
 
         if db.conn and profile_id:
             clear_profile_session(profile_id)
@@ -700,10 +769,11 @@ def api_account_logout():
 @login_required
 def api_account_connect_saved_session():
     """Start runtime with an already saved session string."""
-    global _client
     try:
         if not db.conn:
             return jsonify({"success": False, "message": "Database not connected"}), 503
+        if not _start_runtime_callback:
+            return jsonify({"success": False, "message": "Runtime callback is not configured."}), 503
 
         data = request.get_json(silent=True) or {}
         requested_profile_id = data.get("profile_id") or data.get("profileId")
@@ -717,25 +787,7 @@ def api_account_connect_saved_session():
         if not saved_session:
             return jsonify({"success": False, "message": "No saved Telegram session found."}), 404
 
-        config_data = active_profile.get("config") or _load_current_config()
-        api_id, api_hash, _ = _resolve_api_credentials(config_data=config_data)
-        if not api_id or not api_hash:
-            return jsonify({"success": False, "message": "api_id or api_hash is missing."}), 400
-
-        loop = _app_instance.loop
-        _client = _create_client_from_session(
-            api_id,
-            api_hash,
-            _app_instance.proxy,
-            _app_instance.session_file_path,
-            loop,
-            saved_session,
-        )
-        runtime_result = (
-            _start_runtime_callback(_client)
-            if _start_runtime_callback
-            else {"status": "not_started", "message": "Runtime callback is not configured."}
-        )
+        runtime_result = _start_runtime_callback(None, active_profile)
         return jsonify({"success": True, "runtime": runtime_result, "account": _get_telegram_account_status()})
     except Exception as e:
         import traceback
@@ -762,9 +814,9 @@ def api_account_send_code():
     session["login_profile_name"] = data.get("profile_name") or data.get("profileName") or phone_number
 
     try:
-        if create_profile_flag or target_profile_id:
+        if target_profile_id:
             if _stop_runtime_callback:
-                _stop_runtime_callback()
+                _stop_runtime_callback(target_profile_id)
             if _client:
                 try:
                     loop = _app_instance.loop
@@ -1028,6 +1080,7 @@ def _save_session_and_start_runtime(client):
     create_new_profile = bool(session.pop("login_create_profile", False))
     login_api_id = session.pop("login_api_id", None)
     login_api_hash = session.pop("login_api_hash", None)
+    profile = get_active_profile() if db.conn else None
     profile_config = _load_current_config()
     if login_api_id and login_api_hash:
         profile_config = dict(profile_config)
@@ -1037,20 +1090,22 @@ def _save_session_and_start_runtime(client):
     if db.conn:
         print("DEBUG: [tg_login] Saving session to active profile...")
         if create_new_profile or not target_profile_id:
-            create_profile(
+            profile = create_profile(
                 name=display_name,
                 config=profile_config,
                 session=session_string,
                 account=account_meta,
+                runtime_enabled=True,
                 activate=True,
             )
         else:
-            update_profile(
+            profile = update_profile(
                 target_profile_id,
                 name=display_name,
                 config=profile_config,
                 session=session_string,
                 account=account_meta,
+                runtime_enabled=True,
             )
             activate_profile(target_profile_id)
         print("DEBUG: [tg_login] Profile session saved successfully.")
@@ -1063,7 +1118,7 @@ def _save_session_and_start_runtime(client):
     runtime_result = {"status": "not_started", "message": "Runtime callback is not configured."}
     if _start_runtime_callback:
         try:
-            runtime_result = _start_runtime_callback(client)
+            runtime_result = _start_runtime_callback(client, profile)
         except Exception as e:
             runtime_result = {
                 "status": "error",
@@ -1108,7 +1163,7 @@ def tg_login():
         try:
             if _stop_runtime_callback:
                 try:
-                    stop_result = _stop_runtime_callback()
+                    stop_result = _stop_runtime_callback(get_active_profile()["id"])
                     print(f"DEBUG: [tg_login] Runtime stop result: {stop_result}")
                 except Exception as e:
                     print(f"DEBUG: [tg_login] Error stopping runtime: {e}")
@@ -1161,7 +1216,7 @@ def tg_login():
                 loop,
                 saved_session,
             )
-            runtime_result = _start_runtime_callback(_client) if _start_runtime_callback else {
+            runtime_result = _start_runtime_callback(_client, active_profile) if _start_runtime_callback else {
                 "status": "not_started",
                 "message": "Runtime callback is not configured.",
             }
@@ -1181,8 +1236,6 @@ def tg_login():
         session["login_profile_name"] = phone_number
 
         try:
-            if _stop_runtime_callback:
-                _stop_runtime_callback()
             if _client:
                 try:
                     loop = _app_instance.loop
@@ -1400,11 +1453,12 @@ def api_remove_task():
         
         chat_id = int(data.get("chat_id", 0))
         message_id = int(data.get("message_id", 0))
+        profile_id = data.get("profile_id") or data.get("profileId")
         
         if not chat_id or not message_id:
             return jsonify({"success": False, "message": "缺少 chat_id 或 message_id"}), 400
         
-        success = remove_download_task(chat_id, message_id)
+        success = remove_download_task(chat_id, message_id, profile_id)
         if success:
             return jsonify({"success": True, "message": "任务已删除"})
         else:
@@ -1421,45 +1475,7 @@ def get_download_list():
         return "[]"
 
     already_down = request.args.get("already_down") == "true"
-
-    download_result = get_download_result()
-    result = "["
-    for chat_id, messages in download_result.items():
-        for idx, value in messages.items():
-            is_already_down = value["down_byte"] == value["total_size"]
-
-            if already_down and not is_already_down:
-                continue
-
-            if not already_down and is_already_down:
-                continue
-
-            if result != "[":
-                result += ","
-            download_speed = format_byte(value["download_speed"]) + "/s"
-            result += (
-                '{ "chat":"'
-                + f"{chat_id}"
-                + '", "id":"'
-                + f"{idx}"
-                + '", "filename":"'
-                + os.path.basename(value["file_name"])
-                + '", "total_size":"'
-                + f"{format_byte(value['total_size'])}"
-                + '" ,"download_progress":"'
-            )
-            result += (
-                f"{round(value['down_byte'] / value['total_size'] * 100, 1)}"
-                + '" ,"download_speed":"'
-                + download_speed
-                + '" ,"save_path":"'
-                + value["file_name"].replace("\\", "/")
-                + '"}'
-            )
-
-    result += "]"
-    result += "]"
-    return result
+    return jsonify(_get_formatted_list(already_down))
 
 
 def _get_formatted_list(already_down=False):
@@ -1486,6 +1502,9 @@ def _get_formatted_list(already_down=False):
         base_item = d_item if d_item else u_item
         if not base_item:
             continue
+        profile_id = (d_item or {}).get("profile_id") or (u_item or {}).get(
+            "profile_id"
+        )
 
         # Extract basic info
         file_name = base_item.get("file_name", "Unknown")
@@ -1623,7 +1642,11 @@ def _get_formatted_list(already_down=False):
             "completed_at": completed_at_fmt if is_truly_finished else None,
             "created_ts": created_ts,
             "completed_ts": completed_ts if is_truly_finished else None,
-            "state": get_task_state(chat_id, idx) if not already_down else 'finished',
+            "profile_id": profile_id,
+            "profileId": profile_id,
+            "state": get_task_state(chat_id, idx, profile_id)
+            if not already_down
+            else 'finished',
             "status": status_text
         }
         data.append(item)
@@ -1641,6 +1664,7 @@ def api_task_control():
         
         chat_id = int(data.get("chat_id", 0))
         message_id = int(data.get("message_id", 0))
+        profile_id = data.get("profile_id") or data.get("profileId")
         action = data.get("action") # 'pause', 'resume', 'delete'
         
         if not chat_id or not message_id or not action:
@@ -1656,7 +1680,7 @@ def api_task_control():
         if not target_state:
             return jsonify({"success": False, "message": "无效的操作"}), 400
             
-        success = set_task_state(chat_id, message_id, target_state)
+        success = set_task_state(chat_id, message_id, target_state, profile_id)
         return jsonify({"success": True, "message": f"任务已{action}"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500

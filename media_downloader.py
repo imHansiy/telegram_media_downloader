@@ -1,11 +1,13 @@
 """Downloads media from telegram."""
 
 import asyncio
+import copy
 import inspect
 import logging
 import os
 import shutil
 import time
+from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Union
 
 import pyrogram
@@ -26,7 +28,13 @@ from module.download_stat import (
 )
 from module.get_chat_history_v2 import get_chat_history_v2
 from module.language import _t
-from module.profiles import save_active_profile, sync_active_profile_to_legacy
+from module.profiles import (
+    get_active_profile,
+    get_profiles,
+    save_active_profile,
+    sync_active_profile_to_legacy,
+    update_profile,
+)
 from module.pyrogram_extension import (
     HookClient,
     fetch_message,
@@ -179,6 +187,7 @@ async def _get_media_meta(
     message: pyrogram.types.Message,
     media_obj: Union[Audio, Document, Photo, Video, VideoNote, Voice],
     _type: str,
+    runtime_app: Application = app,
 ) -> Tuple[str, str, Optional[str]]:
     """Extract file name and file id from media object.
 
@@ -207,14 +216,16 @@ async def _get_media_meta(
         dirname = validate_title(f"{message.chat.title}")
 
     if message.date:
-        datetime_dir_name = message.date.strftime(app.date_format)
+        datetime_dir_name = message.date.strftime(runtime_app.date_format)
     else:
         datetime_dir_name = "0"
 
     if _type in ["voice", "video_note"]:
         # pylint: disable = C0209
         file_format = media_obj.mime_type.split("/")[-1]  # type: ignore
-        file_save_path = app.get_file_save_path(_type, dirname, datetime_dir_name)
+        file_save_path = runtime_app.get_file_save_path(
+            _type, dirname, datetime_dir_name
+        )
         file_name = "{} - {}_{}.{}".format(
             message.id,
             _type,
@@ -222,7 +233,7 @@ async def _get_media_meta(
             file_format,
         )
         file_name = validate_title(file_name)
-        temp_file_name = os.path.join(app.temp_save_path, dirname, file_name)
+        temp_file_name = os.path.join(runtime_app.temp_save_path, dirname, file_name)
 
         file_name = os.path.join(file_save_path, file_name)
     else:
@@ -245,23 +256,26 @@ async def _get_media_meta(
 
         if caption:
             caption = validate_title(caption)
-            app.set_caption_name(chat_id, message.media_group_id, caption)
-            app.set_caption_entities(
+            runtime_app.set_caption_name(chat_id, message.media_group_id, caption)
+            runtime_app.set_caption_entities(
                 chat_id, message.media_group_id, message.caption_entities
             )
         else:
-            caption = app.get_caption_name(chat_id, message.media_group_id)
+            caption = runtime_app.get_caption_name(chat_id, message.media_group_id)
 
         if not file_name and message.photo:
             file_name = f"{message.photo.file_unique_id}"
 
         gen_file_name = (
-            app.get_file_name(message.id, file_name, caption) + file_name_suffix
+            runtime_app.get_file_name(message.id, file_name, caption)
+            + file_name_suffix
         )
 
-        file_save_path = app.get_file_save_path(_type, dirname, datetime_dir_name)
+        file_save_path = runtime_app.get_file_save_path(
+            _type, dirname, datetime_dir_name
+        )
 
-        temp_file_name = os.path.join(app.temp_save_path, dirname, gen_file_name)
+        temp_file_name = os.path.join(runtime_app.temp_save_path, dirname, gen_file_name)
 
         file_name = os.path.join(file_save_path, gen_file_name)
     return truncate_filename(file_name), truncate_filename(temp_file_name), file_format
@@ -270,12 +284,13 @@ async def _get_media_meta(
 async def add_download_task(
     message: pyrogram.types.Message,
     node: TaskNode,
+    runtime_queue: asyncio.Queue = queue,
 ):
     """Add Download task"""
     if message.empty:
         return False
     node.download_status[message.id] = DownloadStatus.Downloading
-    await queue.put((message, node))
+    await runtime_queue.put((message, node))
     node.total_task += 1
     return True
 
@@ -308,25 +323,30 @@ async def save_msg_to_file(
 
 
 async def download_task(
-    client: pyrogram.Client, message: pyrogram.types.Message, node: TaskNode
+    client: pyrogram.Client,
+    message: pyrogram.types.Message,
+    node: TaskNode,
+    runtime_app: Application = app,
 ):
     """Download and Forward media"""
 
     download_status, file_name = await download_media(
-        client, message, app.media_types, app.file_formats, node
+        client, message, runtime_app.media_types, runtime_app.file_formats, node, runtime_app
     )
 
-    if app.enable_download_txt and message.text and not message.media:
-        download_status, file_name = await save_msg_to_file(app, node.chat_id, message)
+    if runtime_app.enable_download_txt and message.text and not message.media:
+        download_status, file_name = await save_msg_to_file(
+            runtime_app, node.chat_id, message
+        )
 
     if not node.bot:
-        app.set_download_id(node, message.id, download_status)
+        runtime_app.set_download_id(node, message.id, download_status)
 
     node.download_status[message.id] = download_status
 
     # Skip file size check for WebDAV streaming (file doesn't exist locally)
     if (
-        app.cloud_drive_config.upload_adapter == "webdav"
+        runtime_app.cloud_drive_config.upload_adapter == "webdav"
         and download_status == DownloadStatus.SuccessDownload
     ):
         file_size = 0  # File was streamed directly, not saved locally
@@ -338,7 +358,7 @@ async def download_task(
     await upload_telegram_chat(
         client,
         node.upload_user if node.upload_user else client,
-        app,
+        runtime_app,
         node,
         message,
         download_status,
@@ -351,9 +371,9 @@ async def download_task(
         and download_status is DownloadStatus.SuccessDownload
     ):
         ui_file_name = file_name
-        if app.hide_file_name:
+        if runtime_app.hide_file_name:
             ui_file_name = f"****{os.path.splitext(file_name)[-1]}"
-        if await app.upload_file(
+        if await runtime_app.upload_file(
             file_name, update_cloud_upload_stat, (node, message.id, ui_file_name)
         ):
             node.upload_success_count += 1
@@ -376,6 +396,7 @@ async def download_media(
     media_types: List[str],
     file_formats: dict,
     node: TaskNode,
+    runtime_app: Application = app,
 ):
     """
     Download media from Telegram.
@@ -423,12 +444,12 @@ async def download_media(
             if _media is None:
                 continue
             file_name, temp_file_name, file_format = await _get_media_meta(
-                node.chat_id, message, _media, _type
+                node.chat_id, message, _media, _type, runtime_app
             )
             media_size = getattr(_media, "file_size", 0)
 
             ui_file_name = file_name
-            if app.hide_file_name:
+            if runtime_app.hide_file_name:
                 ui_file_name = f"****{os.path.splitext(file_name)[-1]}"
 
             if _can_download(_type, file_formats, file_format):
@@ -459,21 +480,21 @@ async def download_media(
     message_id = message.id
 
     # Register as pending download for resume on restart
-    add_pending_download(node.chat_id, message_id, ui_file_name)
+    add_pending_download(node.chat_id, message_id, ui_file_name, node.profile_id)
 
     for retry in range(3):
 
         try:
             # Check if using WebDAV for streaming
-            if app.cloud_drive_config.upload_adapter == "webdav":
+            if runtime_app.cloud_drive_config.upload_adapter == "webdav":
                 logger.info(f"Starting streaming upload to WebDAV: {ui_file_name}")
 
                 # Use pyrogram's stream_media which returns an async generator
                 stream_generator = client.stream_media(message, limit=0, offset=0)
 
                 success = await CloudDrive.webdav_upload_stream(
-                    app.cloud_drive_config,
-                    app.save_path,
+                    runtime_app.cloud_drive_config,
+                    runtime_app.save_path,
                     file_name,  # Relative path handled inside
                     stream_generator,
                     media_size,
@@ -495,10 +516,15 @@ async def download_media(
                     temp_download_path = "STREAMED_TO_WEBDAV"
                     # Mark as success with proper file info
                     verify_and_save_download(
-                        node.chat_id, message.id, ui_file_name, media_size, node.task_id
+                        node.chat_id,
+                        message.id,
+                        ui_file_name,
+                        media_size,
+                        node.task_id,
+                        node.profile_id,
                     )
                     # CRITICAL: Remove from pending downloads to prevent re-download on restart
-                    remove_pending_download(node.chat_id, message.id)
+                    remove_pending_download(node.chat_id, message.id, node.profile_id)
                     return DownloadStatus.SuccessDownload, file_name
                 else:
                     raise Exception("WebDAV stream upload failed")
@@ -532,6 +558,7 @@ async def download_media(
                             ui_file_name,
                             media_size,
                             node.task_id,
+                            node.profile_id,
                         )
 
                         await asyncio.sleep(0.5)
@@ -541,7 +568,7 @@ async def download_media(
                     pass
 
                 # Remove from pending downloads (completed successfully)
-                remove_pending_download(node.chat_id, message.id)
+                remove_pending_download(node.chat_id, message.id, node.profile_id)
                 return DownloadStatus.SuccessDownload, file_name
 
         except pyrogram.errors.exceptions.bad_request_400.BadRequest:
@@ -606,11 +633,15 @@ def _check_config() -> bool:
     return True
 
 
-async def worker(client: pyrogram.client.Client):
+async def worker(
+    client: pyrogram.client.Client,
+    runtime_app: Application = app,
+    runtime_queue: asyncio.Queue = queue,
+):
     """Work for download task"""
-    while app.is_running:
+    while runtime_app.is_running:
         try:
-            item = await queue.get()
+            item = await runtime_queue.get()
             message = item[0]
             node: TaskNode = item[1]
 
@@ -618,9 +649,9 @@ async def worker(client: pyrogram.client.Client):
                 continue
 
             if node.client:
-                await download_task(node.client, message, node)
+                await download_task(node.client, message, node, runtime_app)
             else:
-                await download_task(client, message, node)
+                await download_task(client, message, node, runtime_app)
         except Exception as e:
             logger.exception(f"{e}")
 
@@ -629,6 +660,8 @@ async def download_chat_task(
     client: pyrogram.Client,
     chat_download_config: ChatDownloadConfig,
     node: TaskNode,
+    runtime_app: Application = app,
+    runtime_queue: asyncio.Queue = queue,
 ):
     """Download all task"""
     messages_iter = get_chat_history_v2(
@@ -649,7 +682,7 @@ async def download_chat_task(
         )
 
         for message in skipped_messages:
-            await add_download_task(message, node)
+            await add_download_task(message, node, runtime_queue)
 
     async for message in messages_iter:  # type: ignore
         meta_data = MetaData()
@@ -657,26 +690,26 @@ async def download_chat_task(
         caption = message.caption
         if caption:
             caption = validate_title(caption)
-            app.set_caption_name(node.chat_id, message.media_group_id, caption)
-            app.set_caption_entities(
+            runtime_app.set_caption_name(node.chat_id, message.media_group_id, caption)
+            runtime_app.set_caption_entities(
                 node.chat_id, message.media_group_id, message.caption_entities
             )
         else:
-            caption = app.get_caption_name(node.chat_id, message.media_group_id)
+            caption = runtime_app.get_caption_name(node.chat_id, message.media_group_id)
         set_meta_data(meta_data, message, caption)
 
-        if app.need_skip_message(chat_download_config, message.id):
+        if runtime_app.need_skip_message(chat_download_config, message.id):
             continue
 
-        if app.exec_filter(chat_download_config, meta_data):
-            await add_download_task(message, node)
+        if runtime_app.exec_filter(chat_download_config, meta_data):
+            await add_download_task(message, node, runtime_queue)
         else:
             node.download_status[message.id] = DownloadStatus.SkipDownload
             if message.media_group_id:
                 await upload_telegram_chat(
                     client,
                     node.upload_user,
-                    app,
+                    runtime_app,
                     node,
                     message,
                     DownloadStatus.SkipDownload,
@@ -687,7 +720,12 @@ async def download_chat_task(
     node.is_running = True
 
 
-async def download_all_chat(client: pyrogram.Client):
+async def download_all_chat(
+    client: pyrogram.Client,
+    runtime_app: Application = app,
+    runtime_queue: asyncio.Queue = queue,
+    profile_id: str = None,
+):
     """Download All chat"""
 
     # Pre-load dialogs to cache Access Hashes for peers
@@ -703,7 +741,7 @@ async def download_all_chat(client: pyrogram.Client):
         logger.warning(f"Failed to refresh dialogs cache: {e}")
 
     # Resume pending downloads from previous session
-    pending = get_pending_downloads()
+    pending = get_pending_downloads(profile_id)
     if pending:
         logger.info(
             f"Resuming {len(pending)} pending downloads from previous session..."
@@ -721,23 +759,25 @@ async def download_all_chat(client: pyrogram.Client):
                     message = await client.get_messages(chat_id, message_id)
                     if message and not message.empty:
                         # Create a task node for this download
-                        node = TaskNode(chat_id=chat_id)
-                        await queue.put((message, node))
+                        node = TaskNode(chat_id=chat_id, profile_id=profile_id)
+                        await runtime_queue.put((message, node))
                         logger.success(f"Queued for resume: msg={message_id}")
                     else:
                         logger.warning(
                             f"Message {message_id} no longer exists, removing from pending"
                         )
-                        remove_pending_download(chat_id, message_id)
+                        remove_pending_download(chat_id, message_id, profile_id)
                 except Exception as e:
                     logger.error(f"Failed to resume download {message_id}: {e}")
                     # Remove failed items to avoid infinite retry
-                    remove_pending_download(chat_id, message_id)
+                    remove_pending_download(chat_id, message_id, profile_id)
 
-    for key, value in app.chat_download_config.items():
-        value.node = TaskNode(chat_id=key)
+    for key, value in runtime_app.chat_download_config.items():
+        value.node = TaskNode(chat_id=key, profile_id=profile_id)
         try:
-            await download_chat_task(client, value, value.node)
+            await download_chat_task(
+                client, value, value.node, runtime_app, runtime_queue
+            )
         except Exception as e:
             logger.warning(f"Download {key} error: {e}")
         finally:
@@ -791,16 +831,81 @@ async def stop_server(client: pyrogram.Client):
     await client.stop()
 
 
+@dataclass
+class ProfileRuntime:
+    """Runtime state for one Telegram account profile."""
+
+    profile_id: str
+    profile_name: str
+    app: Application
+    client: pyrogram.Client
+    queue: asyncio.Queue
+    tasks: list = field(default_factory=list)
+    running: bool = False
+    status: str = "starting"
+    message: str = ""
+    bot_started: bool = False
+    started_at: float = field(default_factory=time.time)
+
+
+def _clean_telegram_api_value(value) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _build_runtime_app(profile: dict) -> Application:
+    """Build an isolated Application object for a profile."""
+    runtime_app = Application(CONFIG_NAME, DATA_FILE_NAME, APPLICATION_NAME)
+    created_loop = runtime_app.loop
+    if created_loop is not app.loop and not created_loop.is_closed():
+        created_loop.close()
+    runtime_app.loop = app.loop
+    asyncio.set_event_loop(app.loop)
+    runtime_app.profile_id = profile.get("id")
+    runtime_app.config = copy.deepcopy(profile.get("config") or {})
+    runtime_app.app_data = copy.deepcopy(profile.get("app_data") or {})
+    runtime_app.assign_config(runtime_app.config)
+    runtime_app.assign_app_data(runtime_app.app_data)
+    return runtime_app
+
+
+def _create_client_for_runtime(profile: dict, runtime_app: Application):
+    """Create a Telegram client for a profile's saved session."""
+    session_string = profile.get("session")
+    api_id = _clean_telegram_api_value(runtime_app.api_id)
+    api_hash = _clean_telegram_api_value(runtime_app.api_hash)
+    if not session_string:
+        raise RuntimeError("Profile has no saved Telegram session.")
+    if not api_id or not api_hash:
+        raise RuntimeError("Profile api_id or api_hash is missing.")
+
+    runtime_client = HookClient(
+        f"media_downloader_{profile.get('id')}",
+        api_id=int(api_id),
+        api_hash=api_hash,
+        proxy=runtime_app.proxy,
+        workdir=runtime_app.session_file_path,
+        start_timeout=runtime_app.start_timeout,
+        session_string=session_string,
+        in_memory=False,
+        no_updates=True,
+    )
+    runtime_client.loop = app.loop
+    return runtime_client
+
+
 def main():
     """Main function of the downloader."""
-    tasks = []
-    runtime_started = False
+    runtimes: dict[str, ProfileRuntime] = {}
+    bot_owner_profile_id = None
 
     if db.conn:
         try:
             active_profile = sync_active_profile_to_legacy()
             active_config = active_profile.get("config") or {}
             active_app_data = active_profile.get("app_data") or {}
+            app.profile_id = active_profile.get("id")
             if active_config:
                 app.chat_download_config = {}
                 app._chat_id = ""
@@ -816,60 +921,12 @@ def main():
         except Exception as e:
             logger.warning(f"Failed to sync active profile on startup: {e}")
 
-    # Try to load session from DB, but don't force it yet
-    session_string = None
-    print(f"DEBUG: [main] db.conn is: {db.conn}")
-    print(
-        f"DEBUG: [main] db.dsn is: {db.dsn[:20] + '...' if db.dsn and len(db.dsn) > 20 else db.dsn}"
-    )
-    if db.conn:
-        session_string = db.load_setting("session")
-        print(
-            f"DEBUG: [main] Loaded session from DB: {bool(session_string)}, length: {len(session_string) if session_string else 0}"
-        )
-    else:
-        print("DEBUG: [main] No database connection, cannot load session.")
-
-    in_memory = not bool(session_string)
-    print(f"DEBUG: [main] in_memory mode: {in_memory}")
-
-    client = None
-
-    # Check if we have enough config to initialize client
-    if app.api_id and app.api_hash:
-        try:
-            # Pyrogram 2.0+ removed 'loop' parameter from Client.__init__
-            # We set the event loop for the current thread to ensure proper binding
-            asyncio.set_event_loop(app.loop)
-
-            client = HookClient(
-                "media_downloader",
-                api_id=int(app.api_id),
-                api_hash=app.api_hash,
-                proxy=app.proxy,
-                workdir=app.session_file_path,
-                start_timeout=app.start_timeout,
-                session_string=session_string,
-                in_memory=in_memory,
-                no_updates=True,
-            )
-            client.loop = app.loop
-        except Exception as e:
-            logger.error(f"Failed to initialize client: {e}")
-
-    # Pass a restart callback to Web UI
     def restart_callback():
         logger.warning("Restarting application via Web UI request...")
-        # Since we can't easily restart the python process in-place cleanly without
-        # external supervisor, we exit with status code 0 or 1.
-        # In Docker/Render, the container orchestrator will restart it.
-        # We can also try to re-run main(), but cleanup is tricky.
-        # Let's rely on container restart.
         app.is_running = False
-        # Stop loop if running
         try:
             app.loop.stop()
-        except:
+        except Exception:
             pass
 
     async def ensure_client_runtime_ready(runtime_client: pyrogram.Client):
@@ -885,202 +942,319 @@ def main():
         if not getattr(runtime_client, "is_initialized", False):
             await runtime_client.initialize()
 
-    async def activate_runtime(runtime_client: pyrogram.Client):
-        """Start download workers and bot without restarting the process."""
-        nonlocal client, runtime_started
-        if runtime_started:
-            if runtime_client is not client:
-                logger.info("Switching Telegram runtime client without process restart.")
-                await deactivate_runtime(stop_client=True)
-            else:
-                return {
-                    "status": "already_running",
-                    "message": "后台任务已在运行，无需重启。",
-                }
+    def get_profile_by_id(profile_id: str) -> dict:
+        for item in get_profiles():
+            if item.get("id") == profile_id:
+                return item
+        raise KeyError(f"Profile {profile_id} not found")
 
-        if not runtime_client:
-            raise RuntimeError("Telegram client is not initialized.")
+    async def runtime_maintenance(state: ProfileRuntime):
+        tick = 0
+        while state.app.is_running:
+            await asyncio.sleep(1)
+            tick += 1
+            if tick % 10 == 0:
+                state.app.update_config()
 
-        client = runtime_client
-        await ensure_client_runtime_ready(client)
-        set_max_concurrent_transmissions(client, app.max_concurrent_transmissions)
+    async def activate_runtime(runtime_client: pyrogram.Client = None, profile=None):
+        """Start one profile runtime without stopping other running profiles."""
+        nonlocal bot_owner_profile_id
+        profile = profile or get_active_profile()
+        profile_id = profile.get("id")
+        profile_name = profile.get("name") or profile_id
+        current = runtimes.get(profile_id)
+        if current and current.running:
+            return {
+                "status": "already_running",
+                "message": f"{profile_name} 已在运行。",
+                "profile_id": profile_id,
+            }
 
-        if db.conn:
+        runtime_app = _build_runtime_app(profile)
+        runtime_queue = asyncio.Queue()
+        if runtime_client is None:
+            runtime_client = _create_client_for_runtime(profile, runtime_app)
+
+        state = ProfileRuntime(
+            profile_id=profile_id,
+            profile_name=profile_name,
+            app=runtime_app,
+            client=runtime_client,
+            queue=runtime_queue,
+        )
+        runtimes[profile_id] = state
+
+        async def runtime_add_download_task(message, node):
+            node.profile_id = profile_id
+            return await add_download_task(message, node, runtime_queue)
+
+        async def runtime_download_chat_task(client_arg, chat_config, node):
+            node.profile_id = profile_id
+            return await download_chat_task(
+                client_arg, chat_config, node, runtime_app, runtime_queue
+            )
+
+        try:
+            await ensure_client_runtime_ready(runtime_client)
+            set_max_concurrent_transmissions(
+                runtime_client, runtime_app.max_concurrent_transmissions
+            )
             try:
-                session = client.export_session_string()
-                if inspect.isawaitable(session):
-                    session = await session
-                save_active_profile(session=session)
-                logger.info("Telegram session saved after runtime activation.")
+                session_string = runtime_client.export_session_string()
+                if inspect.isawaitable(session_string):
+                    session_string = await session_string
+                update_profile(
+                    profile_id,
+                    session=session_string,
+                    runtime_enabled=True,
+                )
+                logger.info(f"Telegram session saved for profile {profile_id}.")
             except Exception as e:
                 logger.warning(f"Failed to export/save session string: {e}")
 
-        app.is_running = True
-        tasks.append(app.loop.create_task(download_all_chat(client)))
-        for _ in range(app.max_download_task):
-            tasks.append(app.loop.create_task(worker(client)))
-
-        bot_started = False
-        if app.bot_token:
-            try:
-                await start_download_bot(app, client, add_download_task, download_chat_task)
-                bot_started = True
-            except Exception as e:
-                logger.exception(
-                    "Failed to start Telegram bot; continuing with Web UI only: {}",
-                    e,
-                )
-                try:
-                    await stop_download_bot()
-                except Exception as stop_error:
-                    logger.warning(
-                        f"Failed to clean up bot after startup error: {stop_error}"
+            runtime_app.is_running = True
+            state.tasks.append(
+                app.loop.create_task(
+                    download_all_chat(
+                        runtime_client, runtime_app, runtime_queue, profile_id
                     )
+                )
+            )
+            for _ in range(runtime_app.max_download_task):
+                state.tasks.append(
+                    app.loop.create_task(
+                        worker(runtime_client, runtime_app, runtime_queue)
+                    )
+                )
+            state.tasks.append(app.loop.create_task(runtime_maintenance(state)))
 
-        runtime_started = True
-        logger.success(_t("Successfully started (Press Ctrl+C to stop)"))
-        if bot_started:
-            runtime_message = "后台下载任务和 Bot 已启动，无需重启容器。"
-        elif app.bot_token:
-            runtime_message = "后台下载任务已启动；Bot 启动失败，请检查 Telegram API 配置。"
-        else:
-            runtime_message = "后台下载任务已启动，无需重启容器。"
-        return {
-            "status": "started",
-            "message": runtime_message,
-        }
+            if runtime_app.bot_token:
+                if bot_owner_profile_id and bot_owner_profile_id != profile_id:
+                    state.message = (
+                        "后台下载任务已启动；Bot 已由其它账号运行，当前账号跳过 Bot。"
+                    )
+                else:
+                    try:
+                        await start_download_bot(
+                            runtime_app,
+                            runtime_client,
+                            runtime_add_download_task,
+                            runtime_download_chat_task,
+                        )
+                        state.bot_started = True
+                        bot_owner_profile_id = profile_id
+                    except Exception as e:
+                        logger.exception(
+                            "Failed to start Telegram bot for profile {}: {}",
+                            profile_id,
+                            e,
+                        )
+                        state.message = (
+                            "后台下载任务已启动；Bot 启动失败，请检查 Telegram API 配置。"
+                        )
+                        try:
+                            await stop_download_bot()
+                        except Exception as stop_error:
+                            logger.warning(
+                                "Failed to clean up bot after startup error: "
+                                f"{stop_error}"
+                            )
 
-    async def deactivate_runtime(stop_client: bool = True):
-        """Stop bot, workers, and the active Telegram client without stopping Flask."""
-        nonlocal client, runtime_started
-        if not runtime_started and not client:
+            state.running = True
+            state.status = "running"
+            if not state.message:
+                state.message = (
+                    "后台下载任务和 Bot 已启动。"
+                    if state.bot_started
+                    else "后台下载任务已启动。"
+                )
+            logger.success(f"Profile runtime started: {profile_name} ({profile_id})")
+            return {
+                "status": "started",
+                "message": state.message,
+                "profile_id": profile_id,
+                "bot_started": state.bot_started,
+            }
+        except Exception as e:
+            state.running = False
+            state.status = "error"
+            state.message = str(e)
+            logger.exception(f"Failed to start profile runtime {profile_id}: {e}")
+            await deactivate_runtime(profile_id, stop_client=True, mark_disabled=True)
+            return {
+                "status": "error",
+                "message": str(e),
+                "profile_id": profile_id,
+            }
+
+    async def deactivate_runtime(
+        profile_id: str = None,
+        stop_client: bool = True,
+        mark_disabled: bool = True,
+    ):
+        """Stop one profile runtime without stopping Flask or other profiles."""
+        nonlocal bot_owner_profile_id
+        if profile_id == "all":
+            results = []
+            for running_profile_id in list(runtimes.keys()):
+                results.append(
+                    await deactivate_runtime(
+                        running_profile_id, stop_client, mark_disabled
+                    )
+                )
+            return {
+                "status": "stopped",
+                "message": "所有账号运行态已停止。",
+                "results": results,
+            }
+
+        if not profile_id:
+            profile_id = get_active_profile().get("id") if db.conn else None
+
+        state = runtimes.get(profile_id)
+        if not state:
+            if mark_disabled and db.conn and profile_id:
+                update_profile(profile_id, runtime_enabled=False)
             return {
                 "status": "not_running",
                 "message": "后台任务未运行。",
+                "profile_id": profile_id,
             }
 
-        old_client = client
-        runtime_started = False
-        app.is_running = False
+        state.running = False
+        state.status = "stopping"
+        state.app.is_running = False
 
-        if app.bot_token:
+        if state.bot_started:
             try:
                 await stop_download_bot()
             except Exception as e:
                 logger.warning(f"Failed to stop bot cleanly: {e}")
+            bot_owner_profile_id = None
 
-        for task in list(tasks):
+        for task in list(state.tasks):
             task.cancel()
-        if tasks:
+        if state.tasks:
             try:
-                await asyncio.gather(*tasks, return_exceptions=True)
+                await asyncio.gather(*state.tasks, return_exceptions=True)
             except Exception as e:
                 logger.warning(f"Failed to cancel runtime tasks cleanly: {e}")
-        tasks.clear()
+        state.tasks.clear()
 
-        while not queue.empty():
+        while not state.queue.empty():
             try:
-                queue.get_nowait()
+                state.queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
 
-        if stop_client and old_client:
+        if stop_client and state.client:
             try:
-                if getattr(old_client, "is_connected", False) or getattr(
-                    old_client, "is_initialized", False
+                if getattr(state.client, "is_connected", False) or getattr(
+                    state.client, "is_initialized", False
                 ):
-                    await stop_server(old_client)
+                    await stop_server(state.client)
             except ConnectionError as e:
                 logger.warning(f"Telegram client already stopped: {e}")
             except Exception as e:
                 logger.warning(f"Failed to stop Telegram client cleanly: {e}")
 
-        if old_client is client:
-            client = None
+        state.status = "stopped"
+        state.message = "账号运行态已停止。"
+        runtimes.pop(profile_id, None)
+        if mark_disabled and db.conn and profile_id:
+            update_profile(profile_id, runtime_enabled=False)
 
         return {
             "status": "stopped",
-            "message": "旧 Telegram 运行态已停止。",
+            "message": state.message,
+            "profile_id": profile_id,
         }
 
-    def start_runtime_callback(runtime_client: pyrogram.Client):
-        future = asyncio.run_coroutine_threadsafe(
-            activate_runtime(runtime_client), app.loop
-        )
-        return future.result(timeout=90)
+    def runtime_status_callback():
+        status = {}
+        for profile_id, state in runtimes.items():
+            account = None
+            me = getattr(state.client, "me", None)
+            if me:
+                first_name = getattr(me, "first_name", None) or ""
+                last_name = getattr(me, "last_name", None) or ""
+                full_name = (
+                    f"{first_name} {last_name}".strip()
+                    or getattr(me, "username", None)
+                    or str(me.id)
+                )
+                account = {
+                    "id": str(me.id),
+                    "phoneNumber": getattr(me, "phone_number", None) or "",
+                    "username": f"@{me.username}" if getattr(me, "username", None) else "",
+                    "firstName": full_name,
+                }
+            status[profile_id] = {
+                "running": state.running,
+                "status": state.status,
+                "message": state.message,
+                "bot_started": state.bot_started,
+                "started_at": state.started_at,
+                "account": account,
+            }
+        return status
 
-    def stop_runtime_callback():
+    def start_runtime_callback(runtime_client: pyrogram.Client = None, profile=None):
+        if isinstance(profile, str):
+            profile = get_profile_by_id(profile)
         future = asyncio.run_coroutine_threadsafe(
-            deactivate_runtime(stop_client=True), app.loop
+            activate_runtime(runtime_client, profile), app.loop
         )
-        return future.result(timeout=90)
+        return future.result(timeout=120)
+
+    def stop_runtime_callback(profile_id: str = None):
+        future = asyncio.run_coroutine_threadsafe(
+            deactivate_runtime(profile_id, stop_client=True), app.loop
+        )
+        return future.result(timeout=120)
 
     try:
         app.pre_run()
-        # Initialize Web UI with client (which might be None or unauthenticated)
-        init_web(app, client, restart_callback, start_runtime_callback, stop_runtime_callback)
+        init_web(
+            app,
+            None,
+            restart_callback,
+            start_runtime_callback,
+            stop_runtime_callback,
+            runtime_status_callback,
+        )
 
-        # If we have a valid client AND a session string, we can start downloading
-        if client and session_string:
-            set_max_concurrent_transmissions(client, app.max_concurrent_transmissions)
-
-            try:
-                app.loop.run_until_complete(start_server(client))
-            except pyrogram.errors.exceptions.unauthorized_401.AuthKeyUnregistered:
-                # Session is invalid/expired - clear it and enter Web UI mode
-                logger.warning(
-                    "Session is invalid or expired (AUTH_KEY_UNREGISTERED). "
-                    "Clearing session and entering Web UI mode for re-login."
-                )
-                if db.conn:
-                    save_active_profile(session=None)
-                    logger.info("Invalid session cleared from database.")
-
-                # Reset client
-                client = None
-                session_string = None
-
-                # Enter Web UI mode
-                logger.info(f"Web UI running at http://{app.web_host}:{app.web_port}")
-                logger.warning("Please login again via Web UI at /tg_login")
-                app.loop.run_forever()
-                return  # Exit main after web UI mode ends
-            except Exception as start_error:
-                # Re-raise other errors
-                raise start_error
-
-            # Auto-save session if changed (rare but possible)
-            def save_session_to_db_sync():
-                if db.conn:
-                    try:
-                        s = client.export_session_string()
-                        if inspect.isawaitable(s):
-                            s = app.loop.run_until_complete(s)
-                        save_active_profile(session=s)
-                        print(
-                            f"DEBUG: [main] Session saved to DB, length: {len(s) if s else 0}"
+        if db.conn:
+            profiles = get_profiles()
+            autostart_profiles = [
+                profile
+                for profile in profiles
+                if profile.get("runtime_enabled") and profile.get("session")
+            ]
+            for profile in autostart_profiles:
+                try:
+                    result = app.loop.run_until_complete(activate_runtime(None, profile))
+                    if result.get("status") == "error":
+                        logger.warning(
+                            f"Profile {profile.get('id')} failed to start: "
+                            f"{result.get('message')}"
                         )
-                    except Exception as e:
-                        logger.warning(f"Failed to export/save session string: {e}")
+                except pyrogram.errors.exceptions.unauthorized_401.AuthKeyUnregistered:
+                    update_profile(
+                        profile.get("id"),
+                        session=None,
+                        runtime_enabled=False,
+                    )
+                    logger.warning(
+                        f"Invalid session cleared for profile {profile.get('id')}."
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to auto-start profile {profile.get('id')}: {e}"
+                    )
 
-            save_session_to_db_sync()
-
-            app.loop.run_until_complete(activate_runtime(client))
-
-            # Start loop
-            _exec_loop()
-        else:
-            # We are in "Web Configuration Mode"
-            if not client:
-                logger.warning(
-                    "No API ID/Hash found in config. Please set them via Web UI."
-                )
-            elif not session_string:
-                logger.warning("No session found. Please login via Web UI.")
-
-            logger.info(f"Web UI running at http://{app.web_host}:{app.web_port}")
-            # Run forever to keep Web UI serving
-            app.loop.run_forever()
+        logger.info(f"Web UI running at http://{app.web_host}:{app.web_port}")
+        app.loop.run_forever()
 
     except KeyboardInterrupt:
         logger.info(_t("KeyboardInterrupt"))
@@ -1096,20 +1270,14 @@ def main():
         logger.exception("{}", e)
     finally:
         app.is_running = False
-        if client:
-            if app.bot_token:
-                app.loop.run_until_complete(stop_download_bot())
-            try:
-                if getattr(client, "is_connected", False) or getattr(
-                    client, "is_initialized", False
-                ):
-                    app.loop.run_until_complete(stop_server(client))
-            except ConnectionError as e:
-                logger.warning(f"Telegram client already stopped: {e}")
-        for task in tasks:
-            task.cancel()
+        try:
+            if not app.loop.is_closed():
+                app.loop.run_until_complete(
+                    deactivate_runtime("all", stop_client=True, mark_disabled=False)
+                )
+        except Exception as e:
+            logger.warning(f"Failed to stop profile runtimes cleanly: {e}")
         logger.info(_t("Stopped!"))
-        # check_for_updates(app.proxy)
         logger.info(f"{_t('update config')}......")
         app.update_config()
         logger.success(

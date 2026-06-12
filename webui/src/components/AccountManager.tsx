@@ -39,6 +39,8 @@ interface AccountManagerProps {
   onRenameProfile: (id: string, name: string) => Promise<void> | void;
   onDeleteProfile: (id: string) => Promise<void> | void;
   onDisconnectAccount: (id: string) => Promise<void> | void;
+  onStartAccount: (id: string) => Promise<void> | void;
+  onStopAccount: (id: string) => Promise<void> | void;
   onConnectSavedSession: (id?: string) => Promise<void>;
   onSendCode: (
     phoneNumber: string,
@@ -64,6 +66,8 @@ export function AccountManager({
   onRenameProfile,
   onDeleteProfile,
   onDisconnectAccount,
+  onStartAccount,
+  onStopAccount,
   onConnectSavedSession,
   onSendCode,
   onVerifyCode,
@@ -314,6 +318,7 @@ export function AccountManager({
           {accounts.map((acct) => {
             const isActive = activeAccountId === acct.id;
             const hasSession = Boolean(acct.hasSession);
+            const isRunning = Boolean(acct.isRunning || acct.status === 'connected');
             const displayName = profileLabel(acct);
             const identity = acct.username || acct.userId || (hasSession ? 'saved_session' : '未登录');
             return (
@@ -486,18 +491,27 @@ export function AccountManager({
                   )}
 
                   <div className="flex items-center justify-between border-t border-slate-805 pt-3.5">
-                    <div className={`text-[10px] flex items-center gap-1 ${acct.status === 'connected' ? 'text-emerald-400' : hasSession ? 'text-indigo-400' : 'text-slate-500'}`}>
+                    <div className={`text-[10px] flex items-center gap-1 ${isRunning ? 'text-emerald-400' : hasSession ? 'text-indigo-400' : 'text-slate-500'}`}>
                       <CheckCircle2 className="w-3.5 h-3.5" />
-                      {acct.status === 'connected' ? '运行中' : hasSession ? '已保存 Session' : '未登录'}
+                      {isRunning ? '运行中' : hasSession ? '已保存 Session' : '未登录'}
                     </div>
                     <div className="flex items-center gap-2">
-                      {hasSession && acct.status !== 'connected' && (
+                      {hasSession && !isRunning && (
                         <button
-                          onClick={() => run(() => onConnectSavedSession(acct.id))}
+                          onClick={() => run(() => Promise.resolve(onStartAccount(acct.id)))}
                           className="text-[10px] text-indigo-400 hover:text-indigo-300 flex items-center gap-1.5 transition-colors cursor-pointer"
                         >
                           <ShieldCheck className="w-3.5 h-3.5" />
-                          连接
+                          启动
+                        </button>
+                      )}
+                      {hasSession && isRunning && (
+                        <button
+                          onClick={() => run(() => Promise.resolve(onStopAccount(acct.id)))}
+                          className="text-[10px] text-amber-400 hover:text-amber-300 flex items-center gap-1.5 transition-colors cursor-pointer"
+                        >
+                          <LogOut className="w-3.5 h-3.5" />
+                          停止
                         </button>
                       )}
                       {!hasSession && (
