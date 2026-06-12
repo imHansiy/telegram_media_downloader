@@ -133,13 +133,16 @@ export function AccountManager({
   const handleSendCode = (event: React.FormEvent) => {
     event.preventDefault();
     run(async () => {
+      const cleanPhoneNumber = phoneNumber.trim();
+      const cleanApiId = apiId.trim();
+      const cleanApiHash = apiHash.trim();
       await onSendCode(
-        phoneNumber,
-        useConfiguredApi ? undefined : apiId,
-        useConfiguredApi ? undefined : apiHash,
+        cleanPhoneNumber,
+        useConfiguredApi ? undefined : cleanApiId,
+        useConfiguredApi ? undefined : cleanApiHash,
         loginTargetProfileId || undefined,
         !loginTargetProfileId,
-        loginTargetProfileId && loginTargetAccount ? profileLabel(loginTargetAccount) : phoneNumber,
+        loginTargetProfileId && loginTargetAccount ? profileLabel(loginTargetAccount) : cleanPhoneNumber,
       );
       setStep('code');
     });

@@ -111,6 +111,33 @@ def _render_spa():
     )
 
 
+def _clean_scalar(value) -> str:
+    """Normalize scalar values coming from JSON, env vars, or stored config."""
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _resolve_api_credentials(data: dict | None = None, config_data: dict | None = None):
+    """Return clean Telegram API credentials and whether request supplied them."""
+    data = data or {}
+    config_data = config_data or {}
+    request_api_id = _clean_scalar(data.get("api_id") or data.get("apiId"))
+    request_api_hash = _clean_scalar(data.get("api_hash") or data.get("apiHash"))
+    request_supplied = bool(request_api_id or request_api_hash)
+    if request_supplied:
+        return request_api_id, request_api_hash, bool(request_api_id and request_api_hash)
+
+    api_id = request_api_id or _clean_scalar(config_data.get("api_id"))
+    api_hash = request_api_hash or _clean_scalar(config_data.get("api_hash"))
+
+    if _app_instance:
+        api_id = api_id or _clean_scalar(_app_instance.api_id)
+        api_hash = api_hash or _clean_scalar(_app_instance.api_hash)
+
+    return api_id, api_hash, request_supplied and bool(request_api_id and request_api_hash)
+
+
 def _load_current_config() -> dict:
     """Load current config from DB or in-memory app."""
     if db.conn:
@@ -588,8 +615,7 @@ def api_profiles_activate():
         saved_session = active_profile.get("session")
         if saved_session:
             config_data = active_profile.get("config") or _load_current_config()
-            api_id = config_data.get("api_id") or _app_instance.api_id
-            api_hash = config_data.get("api_hash") or _app_instance.api_hash
+            api_id, api_hash, _ = _resolve_api_credentials(config_data=config_data)
             if not api_id or not api_hash:
                 return jsonify(
                     {
@@ -692,8 +718,7 @@ def api_account_connect_saved_session():
             return jsonify({"success": False, "message": "No saved Telegram session found."}), 404
 
         config_data = active_profile.get("config") or _load_current_config()
-        api_id = config_data.get("api_id") or _app_instance.api_id
-        api_hash = config_data.get("api_hash") or _app_instance.api_hash
+        api_id, api_hash, _ = _resolve_api_credentials(config_data=config_data)
         if not api_id or not api_hash:
             return jsonify({"success": False, "message": "api_id or api_hash is missing."}), 400
 
@@ -725,7 +750,7 @@ def api_account_send_code():
     """Send Telegram login code."""
     global _client
     data = request.get_json(silent=True) or {}
-    phone_number = data.get("phone_number") or data.get("phoneNumber")
+    phone_number = _clean_scalar(data.get("phone_number") or data.get("phoneNumber"))
     if not phone_number:
         return jsonify({"success": False, "message": "phone_number is required"}), 400
 
@@ -755,8 +780,7 @@ def api_account_send_code():
             _apply_profile_to_app(target_profile)
 
         config_data = _load_current_config()
-        api_id = data.get("api_id") or config_data.get("api_id") or _app_instance.api_id
-        api_hash = data.get("api_hash") or config_data.get("api_hash") or _app_instance.api_hash
+        api_id, api_hash, request_api_supplied = _resolve_api_credentials(data, config_data)
         if not api_id or not api_hash:
             return jsonify({"success": False, "message": "api_id or api_hash is missing."}), 400
 
@@ -780,6 +804,9 @@ def api_account_send_code():
         future = asyncio.run_coroutine_threadsafe(_send_code(_client, phone_number), loop)
         sent_code = future.result(timeout=30)
         session["phone_code_hash"] = sent_code.phone_code_hash
+        if request_api_supplied:
+            session["login_api_id"] = api_id
+            session["login_api_hash"] = api_hash
         return jsonify({"success": True, "message": "Verification code sent."})
     except Exception as e:
         import traceback
@@ -999,13 +1026,20 @@ def _save_session_and_start_runtime(client):
     )
     target_profile_id = session.pop("login_profile_id", None)
     create_new_profile = bool(session.pop("login_create_profile", False))
+    login_api_id = session.pop("login_api_id", None)
+    login_api_hash = session.pop("login_api_hash", None)
+    profile_config = _load_current_config()
+    if login_api_id and login_api_hash:
+        profile_config = dict(profile_config)
+        profile_config["api_id"] = login_api_id
+        profile_config["api_hash"] = login_api_hash
 
     if db.conn:
         print("DEBUG: [tg_login] Saving session to active profile...")
         if create_new_profile or not target_profile_id:
             create_profile(
                 name=display_name,
-                config=_load_current_config(),
+                config=profile_config,
                 session=session_string,
                 account=account_meta,
                 activate=True,
@@ -1014,6 +1048,7 @@ def _save_session_and_start_runtime(client):
             update_profile(
                 target_profile_id,
                 name=display_name,
+                config=profile_config,
                 session=session_string,
                 account=account_meta,
             )
@@ -1113,8 +1148,7 @@ def tg_login():
                 return "Error: No saved Telegram session found."
 
             config = active_profile.get("config") or _load_current_config()
-            api_id = config.get("api_id") or _app_instance.api_id
-            api_hash = config.get("api_hash") or _app_instance.api_hash
+            api_id, api_hash, _ = _resolve_api_credentials(config_data=config)
             if not api_id or not api_hash:
                 return "Error: api_id or api_hash not found. Please set them in Config page first."
 
@@ -1140,7 +1174,7 @@ def tg_login():
     
     # Handle new login
     if request.method == "POST" and request.form.get("phone_number"):
-        phone_number = request.form.get("phone_number")
+        phone_number = _clean_scalar(request.form.get("phone_number"))
         session["phone_number"] = phone_number
         session["login_create_profile"] = True
         session["login_profile_id"] = None
@@ -1161,8 +1195,7 @@ def tg_login():
 
             # 1. Ensure we have api_id and api_hash
             config = _load_current_config()
-            api_id = config.get("api_id") or _app_instance.api_id
-            api_hash = config.get("api_hash") or _app_instance.api_hash
+            api_id, api_hash, _ = _resolve_api_credentials(config_data=config)
 
             if not api_id or not api_hash:
                 return "Error: api_id or api_hash not found. Please set them in Config page first."
