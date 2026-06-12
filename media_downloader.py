@@ -747,14 +747,21 @@ async def download_all_chat(client: pyrogram.Client):
 async def run_until_all_task_finish():
     """Normal download"""
     tick = 0
+    idle_logged = False
     while True:
         finish: bool = True
         for _, value in app.chat_download_config.items():
             if not value.need_check or value.total_task != value.finish_task:
                 finish = False
 
-        if (not app.bot_token and finish) or app.restart_program:
+        if app.restart_program:
             break
+
+        if not app.bot_token and finish and not idle_logged:
+            logger.info("All download tasks are finished. Keeping Web UI alive.")
+            idle_logged = True
+        elif not finish:
+            idle_logged = False
 
         await asyncio.sleep(1)
 
