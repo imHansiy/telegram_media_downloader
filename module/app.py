@@ -354,6 +354,13 @@ class ChatDownloadConfig:
         self.node: TaskNode = TaskNode(0)
 
 
+def _clean_config_value(value, default="") -> str:
+    """Return a trimmed string for scalar config/env values."""
+    if value is None:
+        value = default
+    return str(value).strip()
+
+
 def get_config(config, key, default=None, val_type=str, verbose=True):
     """
     Retrieves a configuration value from the given `config` dictionary
@@ -503,9 +510,13 @@ class Application:
         # Override from Env if exists
         self.save_path = os.getenv("SAVE_PATH", self.save_path)
 
-        self.api_id = os.getenv("API_ID", _config.get("api_id", ""))
-        self.api_hash = os.getenv("API_HASH", _config.get("api_hash", ""))
-        self.bot_token = os.getenv("BOT_TOKEN", _config.get("bot_token", ""))
+        self.api_id = _clean_config_value(os.getenv("API_ID", _config.get("api_id", "")))
+        self.api_hash = _clean_config_value(
+            os.getenv("API_HASH", _config.get("api_hash", ""))
+        )
+        self.bot_token = _clean_config_value(
+            os.getenv("BOT_TOKEN", _config.get("bot_token", ""))
+        )
 
         self.web_host = os.getenv("WEB_HOST", _config.get("web_host", self.web_host))
         self.web_port = int(

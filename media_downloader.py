@@ -920,14 +920,34 @@ def main():
         for _ in range(app.max_download_task):
             tasks.append(app.loop.create_task(worker(client)))
 
+        bot_started = False
         if app.bot_token:
-            await start_download_bot(app, client, add_download_task, download_chat_task)
+            try:
+                await start_download_bot(app, client, add_download_task, download_chat_task)
+                bot_started = True
+            except Exception as e:
+                logger.exception(
+                    "Failed to start Telegram bot; continuing with Web UI only: {}",
+                    e,
+                )
+                try:
+                    await stop_download_bot()
+                except Exception as stop_error:
+                    logger.warning(
+                        f"Failed to clean up bot after startup error: {stop_error}"
+                    )
 
         runtime_started = True
         logger.success(_t("Successfully started (Press Ctrl+C to stop)"))
+        if bot_started:
+            runtime_message = "后台下载任务和 Bot 已启动，无需重启容器。"
+        elif app.bot_token:
+            runtime_message = "后台下载任务已启动；Bot 启动失败，请检查 Telegram API 配置。"
+        else:
+            runtime_message = "后台下载任务已启动，无需重启容器。"
         return {
             "status": "started",
-            "message": "后台下载任务和 Bot 已启动，无需重启容器。",
+            "message": runtime_message,
         }
 
     async def deactivate_runtime(stop_client: bool = True):
