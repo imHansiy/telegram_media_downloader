@@ -53,9 +53,13 @@ interface AccountManagerProps {
   onVerifyCode: (code: string) => Promise<{ needsPassword: boolean }>;
   onVerifyPassword: (password: string) => Promise<void>;
   onRefresh: () => Promise<void>;
-  botAccess: BotAccessConfig;
-  onSaveBotAccess: (config: BotAccessConfig) => Promise<void> | void;
+  onSaveBotAccess: (profileId: string, config: BotAccessConfig) => Promise<void> | void;
 }
+
+const defaultBotAccess: BotAccessConfig = {
+  mode: 'self',
+  allowedUsers: [],
+};
 
 export function AccountManager({
   accounts,
@@ -73,7 +77,6 @@ export function AccountManager({
   onVerifyCode,
   onVerifyPassword,
   onRefresh,
-  botAccess,
   onSaveBotAccess,
 }: AccountManagerProps) {
   const [step, setStep] = useState<'list' | 'phone' | 'code' | 'password'>('list');
@@ -86,18 +89,13 @@ export function AccountManager({
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [settingsAccountId, setSettingsAccountId] = useState<string | null>(null);
-  const [botAccessMode, setBotAccessMode] = useState<BotAccessMode>(botAccess.mode);
-  const [allowedUsersText, setAllowedUsersText] = useState(botAccess.allowedUsers.join('\n'));
+  const [botAccessMode, setBotAccessMode] = useState<BotAccessMode>(defaultBotAccess.mode);
+  const [allowedUsersText, setAllowedUsersText] = useState(defaultBotAccess.allowedUsers.join('\n'));
   const [accessFeedback, setAccessFeedback] = useState('');
   const [newProfileName, setNewProfileName] = useState('');
   const [renamingProfileId, setRenamingProfileId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [loginTargetProfileId, setLoginTargetProfileId] = useState<string | null>(null);
-
-  useEffect(() => {
-    setBotAccessMode(botAccess.mode);
-    setAllowedUsersText(botAccess.allowedUsers.join('\n'));
-  }, [botAccess]);
 
   const accessModes: Array<{
     mode: BotAccessMode;
@@ -110,7 +108,10 @@ export function AccountManager({
     { mode: 'public', label: '全部用户', description: '任何人可私聊投递', icon: Globe2 },
   ];
 
-  const selectedAccessLabel = accessModes.find((item) => item.mode === botAccess.mode)?.label || '仅自己';
+  const accessForAccount = (acct: TelegramAccount): BotAccessConfig => acct.botAccess || defaultBotAccess;
+  const selectedAccessLabel = (acct: TelegramAccount) => (
+    accessModes.find((item) => item.mode === accessForAccount(acct).mode)?.label || '仅自己'
+  );
   const loginTargetAccount = accounts.find((acct) => acct.id === loginTargetProfileId);
 
   const profileLabel = (acct: TelegramAccount) => acct.profileName || acct.firstName || 'Telegram Profile';
@@ -121,6 +122,15 @@ export function AccountManager({
       .map((item) => item.trim())
       .filter(Boolean)
   );
+
+  useEffect(() => {
+    if (!settingsAccountId) return;
+    const acct = accounts.find((item) => item.id === settingsAccountId);
+    if (!acct) return;
+    const access = accessForAccount(acct);
+    setBotAccessMode(access.mode);
+    setAllowedUsersText(access.allowedUsers.join('\n'));
+  }, [settingsAccountId, accounts]);
 
   const run = async (fn: () => Promise<void>) => {
     setLoading(true);
@@ -214,13 +224,27 @@ export function AccountManager({
     setStep('phone');
   };
 
-  const handleSaveBotAccess = () => {
+  const openSettings = (acct: TelegramAccount) => {
+    if (settingsAccountId === acct.id) {
+      setSettingsAccountId(null);
+      setAccessFeedback('');
+      return;
+    }
+
+    const access = accessForAccount(acct);
+    setSettingsAccountId(acct.id);
+    setBotAccessMode(access.mode);
+    setAllowedUsersText(access.allowedUsers.join('\n'));
+    setAccessFeedback('');
+  };
+
+  const handleSaveBotAccess = (acct: TelegramAccount) => {
     run(async () => {
       const nextAccess = {
         mode: botAccessMode,
         allowedUsers: parseAllowedUsers(allowedUsersText),
       } as BotAccessConfig;
-      await onSaveBotAccess(nextAccess);
+      await onSaveBotAccess(acct.id, nextAccess);
       setAccessFeedback('Bot 投递权限已保存。');
       setTimeout(() => setAccessFeedback(''), 2500);
     });
@@ -404,91 +428,89 @@ export function AccountManager({
                     </div>
                   </div>
 
-                  {isActive && (
-                    <div className="border-t border-slate-805 pt-3">
-                      <button
-                        type="button"
-                        onClick={() => setSettingsAccountId(settingsAccountId === acct.id ? null : acct.id)}
-                        className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-slate-950/50 border border-slate-805 text-slate-300 hover:text-white hover:border-slate-700 transition-colors cursor-pointer"
-                      >
-                        <span className="flex items-center gap-2 text-[11px] font-semibold">
-                          <Bot className="w-3.5 h-3.5 text-indigo-400" />
-                          Bot 投递权限
-                        </span>
-                        <span className="flex items-center gap-1.5 text-[10px] text-slate-500">
-                          {selectedAccessLabel}
-                          {settingsAccountId === acct.id ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-                        </span>
-                      </button>
+                  <div className="border-t border-slate-805 pt-3">
+                    <button
+                      type="button"
+                      onClick={() => openSettings(acct)}
+                      className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-slate-950/50 border border-slate-805 text-slate-300 hover:text-white hover:border-slate-700 transition-colors cursor-pointer"
+                    >
+                      <span className="flex items-center gap-2 text-[11px] font-semibold">
+                        <Bot className="w-3.5 h-3.5 text-indigo-400" />
+                        Bot 投递权限
+                      </span>
+                      <span className="flex items-center gap-1.5 text-[10px] text-slate-500">
+                        {selectedAccessLabel(acct)}
+                        {settingsAccountId === acct.id ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                      </span>
+                    </button>
 
-                      {settingsAccountId === acct.id && (
-                        <div className="mt-3 space-y-3 rounded-lg bg-slate-950/35 border border-slate-805 p-3 animate-fadeIn">
-                          <div className="grid grid-cols-1 gap-2">
-                            {accessModes.map((item) => {
-                              const Icon = item.icon;
-                              const active = botAccessMode === item.mode;
-                              return (
-                                <button
-                                  key={item.mode}
-                                  type="button"
-                                  onClick={() => setBotAccessMode(item.mode)}
-                                  className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-left transition-all cursor-pointer ${
-                                    active
-                                      ? 'bg-indigo-950/40 border-indigo-500/50 text-indigo-300'
-                                      : 'bg-slate-950/50 border-slate-805 text-slate-500 hover:text-slate-300 hover:border-slate-700'
-                                  }`}
-                                >
-                                  <Icon className="w-4 h-4 shrink-0" />
-                                  <span className="min-w-0">
-                                    <span className="block text-[11px] font-semibold">{item.label}</span>
-                                    <span className="block text-[10px] opacity-70">{item.description}</span>
-                                  </span>
-                                </button>
-                              );
-                            })}
-                          </div>
-
-                          {botAccessMode === 'allowed' && (
-                            <div className="space-y-1.5">
-                              <label className="block text-[10px] text-slate-500 font-semibold">
-                                指定用户 ID 或 @username
-                              </label>
-                              <textarea
-                                id={`textarea-bot-allowed-users-${acct.id}`}
-                                rows={4}
-                                className="w-full bg-slate-950/80 border border-slate-800 focus:border-indigo-500 rounded-lg p-2 text-slate-300 font-mono focus:outline-none text-[11px] resize-none"
-                                placeholder={'8906676091\n@telegram_user'}
-                                value={allowedUsersText}
-                                onChange={(event) => setAllowedUsersText(event.target.value)}
-                              />
-                            </div>
-                          )}
-
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-[10px] text-slate-500">
-                              非所有者只能私聊投递媒体或链接
-                            </span>
-                            <button
-                              type="button"
-                              disabled={loading}
-                              onClick={handleSaveBotAccess}
-                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 text-white text-[10px] font-bold transition-all cursor-pointer"
-                            >
-                              {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
-                              保存
-                            </button>
-                          </div>
-
-                          {accessFeedback && (
-                            <div className="text-[10px] text-emerald-400 flex items-center gap-1.5">
-                              <CheckCircle2 className="w-3.5 h-3.5" />
-                              {accessFeedback}
-                            </div>
-                          )}
+                    {settingsAccountId === acct.id && (
+                      <div className="mt-3 space-y-3 rounded-lg bg-slate-950/35 border border-slate-805 p-3 animate-fadeIn">
+                        <div className="grid grid-cols-1 gap-2">
+                          {accessModes.map((item) => {
+                            const Icon = item.icon;
+                            const active = botAccessMode === item.mode;
+                            return (
+                              <button
+                                key={item.mode}
+                                type="button"
+                                onClick={() => setBotAccessMode(item.mode)}
+                                className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-left transition-all cursor-pointer ${
+                                  active
+                                    ? 'bg-indigo-950/40 border-indigo-500/50 text-indigo-300'
+                                    : 'bg-slate-950/50 border-slate-805 text-slate-500 hover:text-slate-300 hover:border-slate-700'
+                                }`}
+                              >
+                                <Icon className="w-4 h-4 shrink-0" />
+                                <span className="min-w-0">
+                                  <span className="block text-[11px] font-semibold">{item.label}</span>
+                                  <span className="block text-[10px] opacity-70">{item.description}</span>
+                                </span>
+                              </button>
+                            );
+                          })}
                         </div>
-                      )}
-                    </div>
-                  )}
+
+                        {botAccessMode === 'allowed' && (
+                          <div className="space-y-1.5">
+                            <label className="block text-[10px] text-slate-500 font-semibold">
+                              指定用户 ID 或 @username
+                            </label>
+                            <textarea
+                              id={`textarea-bot-allowed-users-${acct.id}`}
+                              rows={4}
+                              className="w-full bg-slate-950/80 border border-slate-800 focus:border-indigo-500 rounded-lg p-2 text-slate-300 font-mono focus:outline-none text-[11px] resize-none"
+                              placeholder={'8906676091\n@telegram_user'}
+                              value={allowedUsersText}
+                              onChange={(event) => setAllowedUsersText(event.target.value)}
+                            />
+                          </div>
+                        )}
+
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[10px] text-slate-500">
+                            非所有者只能私聊投递媒体或链接
+                          </span>
+                          <button
+                            type="button"
+                            disabled={loading}
+                            onClick={() => handleSaveBotAccess(acct)}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 text-white text-[10px] font-bold transition-all cursor-pointer"
+                          >
+                            {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                            保存
+                          </button>
+                        </div>
+
+                        {accessFeedback && (
+                          <div className="text-[10px] text-emerald-400 flex items-center gap-1.5">
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            {accessFeedback}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
 
                   <div className="flex items-center justify-between border-t border-slate-805 pt-3.5">
                     <div className={`text-[10px] flex items-center gap-1 ${isRunning ? 'text-emerald-400' : hasSession ? 'text-indigo-400' : 'text-slate-500'}`}>

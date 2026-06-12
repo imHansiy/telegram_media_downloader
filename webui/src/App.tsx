@@ -395,13 +395,20 @@ export default function App() {
     setStatusMessage(result.message || '配置已保存。');
   };
 
-  const saveBotAccess = async (nextBotAccess: BotAccessConfig) => {
-    const next = applyBotAccessConfig(rawConfig, nextBotAccess);
-    const result = await postJson<{ status: string; message: string; config?: Record<string, any> }>('/api/config', {
-      config: next,
+  const saveBotAccess = async (profileId: string, nextBotAccess: BotAccessConfig) => {
+    const result = await postJson<{
+      account: BootstrapPayload['account'];
+      message?: string;
+      config?: Record<string, any>;
+    }>(`/api/profiles/${encodeURIComponent(profileId)}/bot_access`, {
+      mode: nextBotAccess.mode,
+      allowedUsers: nextBotAccess.allowedUsers,
     });
-    setRawConfig(next);
-    setBotAccess(nextBotAccess);
+    applyAccountStatus(result.account);
+    if (profileId === activeAccountId && result.config) {
+      setRawConfig(result.config);
+      setBotAccess(botAccessFromConfig(result.config));
+    }
     setStatusMessage(result.message || '配置已保存。');
   };
 
@@ -773,7 +780,6 @@ export default function App() {
                 onVerifyCode={handleVerifyCode}
                 onVerifyPassword={handleVerifyPassword}
                 onRefresh={handleAccountRefresh}
-                botAccess={botAccess}
                 onSaveBotAccess={saveBotAccess}
               />
             </div>

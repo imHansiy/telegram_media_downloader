@@ -1213,6 +1213,29 @@ def main():
         )
         return future.result(timeout=120)
 
+    async def update_runtime_config(profile_id: str, config: dict):
+        state = runtimes.get(profile_id)
+        if not state:
+            return {
+                "status": "not_running",
+                "message": "账号运行态未启动，配置已保存待下次启动生效。",
+                "profile_id": profile_id,
+            }
+
+        state.app.config = copy.deepcopy(config or {})
+        state.app.assign_config(state.app.config)
+        return {
+            "status": "applied",
+            "message": "账号运行态配置已热更新。",
+            "profile_id": profile_id,
+        }
+
+    def update_runtime_config_callback(profile_id: str, config: dict):
+        future = asyncio.run_coroutine_threadsafe(
+            update_runtime_config(profile_id, config), app.loop
+        )
+        return future.result(timeout=30)
+
     try:
         app.pre_run()
         init_web(
@@ -1222,6 +1245,7 @@ def main():
             start_runtime_callback,
             stop_runtime_callback,
             runtime_status_callback,
+            update_runtime_config_callback,
         )
 
         if db.conn:

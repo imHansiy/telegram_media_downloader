@@ -21,6 +21,7 @@ export interface TelegramAccount {
   runtimeMessage?: string;
   botRunning?: boolean;
   runtimeEnabled?: boolean;
+  botAccess?: BotAccessConfig;
 }
 
 export type MediaType = 'photo' | 'video' | 'document' | 'audio' | 'voice';

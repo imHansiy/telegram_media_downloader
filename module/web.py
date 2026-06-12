@@ -1,6 +1,7 @@
 """web ui for media download"""
 
 import logging
+import copy
 import os
 import threading
 import asyncio
@@ -70,6 +71,7 @@ _restart_callback = None
 _start_runtime_callback = None
 _stop_runtime_callback = None
 _runtime_status_callback = None
+_update_runtime_config_callback = None
 
 
 class User(UserMixin):
@@ -164,6 +166,8 @@ def _save_current_config(new_config: dict) -> dict:
     if not db.conn:
         return {"status": "error", "message": "Database not connected"}
 
+    active_profile = get_active_profile()
+    active_profile_id = active_profile.get("id")
     db.save_setting("config", new_config)
     save_active_profile(config=new_config, sync_legacy=False)
 
@@ -173,6 +177,9 @@ def _save_current_config(new_config: dict) -> dict:
         _app_instance.assign_config(new_config)
         _sync_web_login_secret()
 
+    if _update_runtime_config_callback and active_profile_id:
+        _update_runtime_config_callback(active_profile_id, new_config)
+
     return {
         "status": "success",
         "message": (
@@ -180,6 +187,59 @@ def _save_current_config(new_config: dict) -> dict:
             "API credentials, bot token, web host, and web port still require "
             "reconnect/restart."
         ),
+    }
+
+
+def _bot_access_from_config(config: dict | None) -> dict:
+    """Extract Bot submitter access settings from one profile config."""
+    config = config or {}
+    configured_mode = config.get("bot_download_access_mode")
+    allowed_users = config.get("allowed_user_ids") or []
+    if not isinstance(allowed_users, list):
+        allowed_users = []
+
+    if configured_mode in ("self", "allowed", "public"):
+        mode = configured_mode
+    elif config.get("bot_allow_public_download"):
+        mode = "public"
+    elif allowed_users:
+        mode = "allowed"
+    else:
+        mode = "self"
+
+    return {
+        "mode": mode,
+        "allowedUsers": [str(item) for item in allowed_users],
+    }
+
+
+def _apply_bot_access_to_config(
+    config: dict | None, mode: str, allowed_users: list[str]
+) -> dict:
+    next_config = copy.deepcopy(config or {})
+    next_config["bot_download_access_mode"] = mode
+    next_config["bot_allow_public_download"] = mode == "public"
+    next_config["allowed_user_ids"] = allowed_users
+    return next_config
+
+
+def _save_profile_config(profile_id: str, new_config: dict) -> dict:
+    """Persist config for one profile and apply it to a running runtime if present."""
+    if not db.conn:
+        return {"status": "error", "message": "Database not connected"}
+
+    active_profile = get_active_profile()
+    active_profile_id = active_profile.get("id")
+    if profile_id == active_profile_id:
+        return _save_current_config(new_config)
+
+    update_profile(profile_id, config=new_config)
+    if _update_runtime_config_callback:
+        _update_runtime_config_callback(profile_id, new_config)
+
+    return {
+        "status": "success",
+        "message": "Profile config saved.",
     }
 
 
@@ -252,6 +312,7 @@ def _profile_to_account(
         "runtimeMessage": runtime_info.get("message") or "",
         "botRunning": bool(runtime_info.get("bot_started")),
         "runtimeEnabled": bool(profile.get("runtime_enabled")),
+        "botAccess": _bot_access_from_config(profile.get("config") or {}),
     }
 
 
@@ -312,6 +373,7 @@ def init_web(
     start_runtime_callback=None,
     stop_runtime_callback=None,
     runtime_status_callback=None,
+    update_runtime_config_callback=None,
 ):
     """
     Set the value of the users variable.
@@ -328,12 +390,14 @@ def init_web(
     global _start_runtime_callback
     global _stop_runtime_callback
     global _runtime_status_callback
+    global _update_runtime_config_callback
     global _app_instance
     _client = client
     _restart_callback = restart_callback
     _start_runtime_callback = start_runtime_callback
     _stop_runtime_callback = stop_runtime_callback
     _runtime_status_callback = runtime_status_callback
+    _update_runtime_config_callback = update_runtime_config_callback
     _app_instance = app
 
     if app.web_login_secret:
@@ -690,6 +754,58 @@ def api_profiles_start():
                 "account": _get_telegram_account_status(),
             }
         )
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@_flask_app.route("/api/profiles/bot_access", methods=["POST"])
+@_flask_app.route("/api/profiles/<profile_id>/bot_access", methods=["POST", "PATCH"])
+@login_required
+def api_profiles_bot_access(profile_id=None):
+    """Save Bot submitter access settings for one profile."""
+    try:
+        if not db.conn:
+            return jsonify({"success": False, "message": "Database not connected"}), 503
+
+        data = request.get_json(silent=True) or {}
+        profile_id = profile_id or data.get("profile_id") or data.get("profileId")
+        if not profile_id:
+            return jsonify({"success": False, "message": "profile_id is required"}), 400
+
+        mode = data.get("mode") or data.get("bot_download_access_mode") or "self"
+        if mode not in ("self", "allowed", "public"):
+            return jsonify({"success": False, "message": "Invalid access mode"}), 400
+
+        allowed_users = data.get("allowedUsers", data.get("allowed_user_ids", []))
+        if not isinstance(allowed_users, list):
+            allowed_users = []
+        allowed_users = [str(item).strip() for item in allowed_users if str(item).strip()]
+
+        profile = next((item for item in get_profiles() if item["id"] == profile_id), None)
+        if not profile:
+            return jsonify({"success": False, "message": "Profile not found"}), 404
+
+        next_config = _apply_bot_access_to_config(
+            profile.get("config") or {}, mode, allowed_users
+        )
+        result = _save_profile_config(profile_id, next_config)
+        if result.get("status") == "error":
+            return jsonify({"success": False, **result}), 500
+
+        return jsonify(
+            {
+                "success": True,
+                "message": "Bot access saved.",
+                "config": next_config,
+                "botAccess": _bot_access_from_config(next_config),
+                "account": _get_telegram_account_status(),
+            }
+        )
+    except KeyError:
+        return jsonify({"success": False, "message": "Profile not found"}), 404
     except Exception as e:
         import traceback
 
