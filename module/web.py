@@ -4,6 +4,7 @@ import logging
 import os
 import threading
 import asyncio
+import inspect
 import json
 import time
 from datetime import datetime, timezone, timedelta
@@ -18,6 +19,7 @@ from flask import (
     session,
     Response,
     stream_with_context,
+    send_from_directory,
 )
 from flask_login import LoginManager, UserMixin, login_required, login_user
 from pyrogram import Client, errors
@@ -54,6 +56,8 @@ deAesCrypt = AesBase64("1234123412ABCDEF", "ABCDEF1234123412")
 _client: Client = None
 _app_instance: Application = None
 _restart_callback = None
+_start_runtime_callback = None
+_stop_runtime_callback = None
 
 
 class User(UserMixin):
@@ -84,6 +88,86 @@ def get_flask_app() -> Flask:
     return _flask_app
 
 
+def _render_spa():
+    """Serve the built React application."""
+    spa_dir = os.path.join(_flask_app.static_folder, "newui")
+    index_file = os.path.join(spa_dir, "index.html")
+    if os.path.exists(index_file):
+        return send_from_directory(spa_dir, "index.html")
+    return (
+        "New UI has not been built yet. Run `npm install && npm run build` in webui/.",
+        503,
+    )
+
+
+def _load_current_config() -> dict:
+    """Load current config from DB or in-memory app."""
+    current_config = {}
+    if db.conn:
+        current_config = db.load_setting("config") or {}
+
+    if not current_config and _app_instance:
+        current_config = _app_instance.config or {}
+
+    return current_config
+
+
+def _save_current_config(new_config: dict) -> dict:
+    """Persist config and apply immediately where supported."""
+    if not db.conn:
+        return {"status": "error", "message": "Database not connected"}
+
+    db.save_setting("config", new_config)
+
+    if _app_instance:
+        print("DEBUG: [web] Updating in-memory app config from Web UI")
+        _app_instance.config = new_config
+        _app_instance.assign_config(new_config)
+        _sync_web_login_secret()
+
+    return {
+        "status": "success",
+        "message": (
+            "Config saved and applied in memory. Connection-level changes such as "
+            "API credentials, bot token, web host, and web port still require "
+            "reconnect/restart."
+        ),
+    }
+
+
+def _get_telegram_account_status() -> dict:
+    """Return Telegram session state for the React UI."""
+    saved_session = db.load_setting("session") if db.conn else None
+    status = {
+        "logged_in": False,
+        "session_exists": bool(saved_session),
+        "account": None,
+    }
+
+    if _client and _client.is_connected:
+        try:
+            me = _client.me
+            if me:
+                first_name = me.first_name or ""
+                last_name = me.last_name or ""
+                full_name = f"{first_name} {last_name}".strip() or me.username or str(me.id)
+                status["logged_in"] = True
+                status["account"] = {
+                    "id": str(me.id),
+                    "phoneNumber": me.phone_number or "",
+                    "username": f"@{me.username}" if me.username else "",
+                    "firstName": full_name,
+                    "status": "connected",
+                    "sessionName": "database_session",
+                    "createdAt": "",
+                    "isPremium": getattr(me, "is_premium", False),
+                }
+        except Exception as e:
+            print(f"DEBUG: [account_status] Error getting user info: {e}")
+
+    return status
+
+
 def run_web_server(app: Application):
     """
     Runs a web server using the Flask framework.
@@ -95,7 +179,13 @@ def run_web_server(app: Application):
 
 
 # pylint: disable = W0603
-def init_web(app: Application, client: Client = None, restart_callback=None):
+def init_web(
+    app: Application,
+    client: Client = None,
+    restart_callback=None,
+    start_runtime_callback=None,
+    stop_runtime_callback=None,
+):
     """
     Set the value of the users variable.
 
@@ -108,9 +198,13 @@ def init_web(app: Application, client: Client = None, restart_callback=None):
     global web_login_users
     global _client
     global _restart_callback
+    global _start_runtime_callback
+    global _stop_runtime_callback
     global _app_instance
     _client = client
     _restart_callback = restart_callback
+    _start_runtime_callback = start_runtime_callback
+    _stop_runtime_callback = stop_runtime_callback
     _app_instance = app
 
     if app.web_login_secret:
@@ -127,10 +221,12 @@ def init_web(app: Application, client: Client = None, restart_callback=None):
 
 
 @_flask_app.route("/")
+@_flask_app.route("/files")
+@_flask_app.route("/accounts")
 @login_required
 def index():
     """index"""
-    return render_template("index.html", download_state=get_download_state())
+    return _render_spa()
 
 
 @_flask_app.route("/login", methods=["GET", "POST"])
@@ -154,38 +250,17 @@ def config():
     """Config Editor"""
     if request.method == "POST":
         try:
-            new_config = json.loads(request.form.get("config"))
-            if db.conn:
-                db.save_setting("config", new_config)
-                
-                # CRITICAL FIX: Update the in-memory app instance config immediately!
-                # If we don't do this, when the app stops, it will overwrite DB with old in-memory config.
-                if _app_instance:
-                    print("DEBUG: [web] Updating in-memory app config from Web UI")
-                    _app_instance.config = new_config
-                    _app_instance.assign_config(new_config)
-                
-                return jsonify(
-                    {
-                        "status": "success",
-                        "message": "Config saved to DB and Memory. Please restart container to apply changes.",
-                    }
-                )
+            payload = request.get_json(silent=True)
+            if payload is None:
+                new_config = json.loads(request.form.get("config"))
             else:
-                return jsonify({"status": "error", "message": "Database not connected"})
+                new_config = payload.get("config", payload)
+
+            return jsonify(_save_current_config(new_config))
         except Exception as e:
             return jsonify({"status": "error", "message": str(e)})
 
-    # Load current config
-    current_config = {}
-    if db.conn:
-        current_config = db.load_setting("config")
-
-    # If DB config is empty, fallback to current in-memory config
-    if not current_config and _app_instance:
-        current_config = _app_instance.config
-
-    return render_template("config.html", config=json.dumps(current_config, indent=2))
+    return _render_spa()
 
 
 @_flask_app.route("/test_webdav", methods=["POST"])
@@ -237,7 +312,16 @@ def clear_config_cache():
                     except Exception as load_err:
                         print(f"ERROR: [clear_config_cache] Failed to reload local config: {load_err}")
 
-                return render_template('action_result.html', success=True, title="修复成功 & 已重新加载!", message="<p>1. 数据库缓存已清除。</p><p>2. 本地 config.yaml 已加载到内存。</p><p><b>现在您可以安全地重启应用程序了。</b></p>")
+                return render_template(
+                    'action_result.html',
+                    success=True,
+                    title="修复成功 & 已重新加载!",
+                    message=(
+                        "<p>1. 数据库缓存已清除。</p>"
+                        "<p>2. 本地 config.yaml 已加载到内存。</p>"
+                        "<p>普通配置已立即生效；连接级设置仍需重新连接或重启。</p>"
+                    ),
+                )
             else:
                 return "Error: Database not connected"
         except Exception as e:
@@ -246,6 +330,247 @@ def clear_config_cache():
             return f"Error: {str(e)}"
     
     return render_template('action_result.html', success=False, title="修复配置循环", message="<p>这将清除数据库缓存并强制加载您的本地 config.yaml 文件。</p><p>这修复了旧设置在重启后不断回滚的问题。</p><form method='post'><button type='submit' class='btn btn-danger mt-4'>🚀 修复配置 & 清除缓存</button></form>")
+
+
+@_flask_app.route("/restart", methods=["POST"])
+@login_required
+def restart():
+    """Request an application restart from the configured supervisor."""
+    if not _restart_callback:
+        return jsonify({"success": False, "message": "Restart callback is not configured."}), 503
+
+    threading.Thread(target=_restart_callback, daemon=True).start()
+    return jsonify(
+        {
+            "success": True,
+            "message": "Restart requested. On Render/Docker, the process supervisor should start it again.",
+        }
+    )
+
+
+@_flask_app.route("/api/bootstrap")
+@login_required
+def api_bootstrap():
+    """Return initial data for the React app."""
+    return jsonify(
+        {
+            "version": utils.__version__,
+            "db": db.get_heartbeat_status(),
+            "config": _load_current_config(),
+            "account": _get_telegram_account_status(),
+        }
+    )
+
+
+@_flask_app.route("/api/config", methods=["GET", "POST"])
+@login_required
+def api_config():
+    """JSON config endpoint for the React app."""
+    if request.method == "GET":
+        return jsonify({"config": _load_current_config()})
+
+    payload = request.get_json(silent=True) or {}
+    new_config = payload.get("config", payload)
+    if not isinstance(new_config, dict):
+        return jsonify({"status": "error", "message": "Invalid config payload"}), 400
+
+    return jsonify(_save_current_config(new_config))
+
+
+@_flask_app.route("/api/account/status")
+@login_required
+def api_account_status():
+    """Return Telegram account/session status."""
+    return jsonify(_get_telegram_account_status())
+
+
+@_flask_app.route("/api/account/logout", methods=["POST"])
+@login_required
+def api_account_logout():
+    """Disconnect runtime and clear saved Telegram session."""
+    global _client
+    try:
+        if _stop_runtime_callback:
+            _stop_runtime_callback()
+
+        if db.conn:
+            db.save_setting("session", None)
+
+        if _client:
+            try:
+                loop = _app_instance.loop
+                if _client.is_connected:
+                    future = asyncio.run_coroutine_threadsafe(_client.disconnect(), loop)
+                    future.result(timeout=10)
+            except Exception as e:
+                print(f"DEBUG: [api_account_logout] Error disconnecting client: {e}")
+            _client = None
+
+        return jsonify({"success": True, "message": "Session disconnected."})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@_flask_app.route("/api/account/connect_saved_session", methods=["POST"])
+@login_required
+def api_account_connect_saved_session():
+    """Start runtime with an already saved session string."""
+    global _client
+    try:
+        if not db.conn:
+            return jsonify({"success": False, "message": "Database not connected"}), 503
+
+        saved_session = db.load_setting("session")
+        if not saved_session:
+            return jsonify({"success": False, "message": "No saved Telegram session found."}), 404
+
+        config_data = _load_current_config()
+        api_id = config_data.get("api_id") or _app_instance.api_id
+        api_hash = config_data.get("api_hash") or _app_instance.api_hash
+        if not api_id or not api_hash:
+            return jsonify({"success": False, "message": "api_id or api_hash is missing."}), 400
+
+        loop = _app_instance.loop
+        _client = _create_client_from_session(
+            api_id,
+            api_hash,
+            _app_instance.proxy,
+            _app_instance.session_file_path,
+            loop,
+            saved_session,
+        )
+        runtime_result = (
+            _start_runtime_callback(_client)
+            if _start_runtime_callback
+            else {"status": "not_started", "message": "Runtime callback is not configured."}
+        )
+        return jsonify({"success": True, "runtime": runtime_result, "account": _get_telegram_account_status()})
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@_flask_app.route("/api/account/send_code", methods=["POST"])
+@login_required
+def api_account_send_code():
+    """Send Telegram login code."""
+    global _client
+    data = request.get_json(silent=True) or {}
+    phone_number = data.get("phone_number") or data.get("phoneNumber")
+    if not phone_number:
+        return jsonify({"success": False, "message": "phone_number is required"}), 400
+
+    session["phone_number"] = phone_number
+
+    try:
+        config_data = _load_current_config()
+        api_id = data.get("api_id") or config_data.get("api_id") or _app_instance.api_id
+        api_hash = data.get("api_hash") or config_data.get("api_hash") or _app_instance.api_hash
+        if not api_id or not api_hash:
+            return jsonify({"success": False, "message": "api_id or api_hash is missing."}), 400
+
+        loop = _app_instance.loop
+        if not _client:
+            future = asyncio.run_coroutine_threadsafe(
+                _create_and_connect_client(
+                    api_id,
+                    api_hash,
+                    _app_instance.proxy,
+                    _app_instance.session_file_path,
+                    loop,
+                ),
+                loop,
+            )
+            _client = future.result(timeout=60)
+        elif not _client.is_connected:
+            future = asyncio.run_coroutine_threadsafe(_client.connect(), loop)
+            future.result(timeout=30)
+
+        future = asyncio.run_coroutine_threadsafe(_send_code(_client, phone_number), loop)
+        sent_code = future.result(timeout=30)
+        session["phone_code_hash"] = sent_code.phone_code_hash
+        return jsonify({"success": True, "message": "Verification code sent."})
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@_flask_app.route("/api/account/verify_code", methods=["POST"])
+@login_required
+def api_account_verify_code():
+    """Verify Telegram login code."""
+    data = request.get_json(silent=True) or {}
+    code = data.get("code")
+    phone_number = session.get("phone_number")
+    phone_code_hash = session.get("phone_code_hash")
+
+    if not code:
+        return jsonify({"success": False, "message": "code is required"}), 400
+    if not phone_number or not phone_code_hash:
+        return jsonify({"success": False, "message": "Login session expired."}), 400
+    if not _client:
+        return jsonify({"success": False, "message": "Client not initialized."}), 400
+
+    try:
+        loop = _app_instance.loop
+        future = asyncio.run_coroutine_threadsafe(
+            _sign_in_wrapper(_client, phone_number, phone_code_hash, code), loop
+        )
+        future.result(timeout=30)
+
+        _, runtime_result = _save_session_and_start_runtime(_client)
+        return jsonify(
+            {
+                "success": True,
+                "needs_password": False,
+                "runtime": runtime_result,
+                "account": _get_telegram_account_status(),
+            }
+        )
+    except errors.SessionPasswordNeeded:
+        return jsonify({"success": True, "needs_password": True})
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@_flask_app.route("/api/account/verify_password", methods=["POST"])
+@login_required
+def api_account_verify_password():
+    """Verify Telegram two-step password."""
+    data = request.get_json(silent=True) or {}
+    password = data.get("password")
+    if not password:
+        return jsonify({"success": False, "message": "password is required"}), 400
+    if not _client:
+        return jsonify({"success": False, "message": "Client not initialized."}), 400
+
+    try:
+        loop = _app_instance.loop
+        future = asyncio.run_coroutine_threadsafe(
+            _check_password_wrapper(_client, password), loop
+        )
+        future.result(timeout=30)
+
+        _, runtime_result = _save_session_and_start_runtime(_client)
+        return jsonify(
+            {
+                "success": True,
+                "runtime": runtime_result,
+                "account": _get_telegram_account_status(),
+            }
+        )
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        return jsonify({"success": False, "message": str(e)}), 500
 
 
 # --- Telegram Login Routes ---
@@ -269,10 +594,29 @@ async def _create_and_connect_client(api_id, api_hash, proxy, workdir, loop):
         workdir=workdir,
         in_memory=True,
         loop=loop,
+        no_updates=True,
     )
     print(f"DEBUG: Client created with loop: {id(client.loop)}")
     await client.connect()
     return client
+
+
+def _create_client_from_session(api_id, api_hash, proxy, workdir, loop, session_string):
+    """Create a client from an already saved session string."""
+    from module.pyrogram_extension import HookClient
+
+    return HookClient(
+        "media_downloader",
+        api_id=int(api_id),
+        api_hash=api_hash,
+        proxy=proxy,
+        workdir=workdir,
+        start_timeout=_app_instance.start_timeout if _app_instance else 60,
+        session_string=session_string,
+        in_memory=False,
+        loop=loop,
+        no_updates=True,
+    )
 
 
 async def _send_code(client, phone_number):
@@ -317,6 +661,76 @@ async def _check_password_wrapper(client, password):
     return await client.check_password(password)
 
 
+def _sync_web_login_secret():
+    """Apply web login password changes without restarting the process."""
+    global web_login_users
+    if not _app_instance:
+        return
+
+    if _app_instance.web_login_secret:
+        web_login_users = {"root": _app_instance.web_login_secret}
+        _flask_app.config["LOGIN_DISABLED"] = False
+    else:
+        web_login_users = {}
+        _flask_app.config["LOGIN_DISABLED"] = True
+
+
+def _save_session_and_start_runtime(client):
+    """Persist Telegram session and start runtime tasks if a callback is available."""
+    print("DEBUG: [tg_login] Calling export_session_string...")
+    session_string = client.export_session_string()
+    if inspect.isawaitable(session_string):
+        future = asyncio.run_coroutine_threadsafe(session_string, _app_instance.loop)
+        session_string = future.result(timeout=30)
+    print(
+        "DEBUG: [tg_login] Session string length: "
+        f"{len(session_string) if session_string else 0}"
+    )
+
+    if db.conn:
+        print("DEBUG: [tg_login] Saving session to database...")
+        db.save_setting("session", session_string)
+        print("DEBUG: [tg_login] Session saved successfully.")
+    else:
+        print("WARNING: [tg_login] Database not connected, session NOT saved!")
+
+    runtime_result = {"status": "not_started", "message": "Runtime callback is not configured."}
+    if _start_runtime_callback:
+        try:
+            runtime_result = _start_runtime_callback(client)
+        except Exception as e:
+            runtime_result = {
+                "status": "error",
+                "message": f"Session saved, but runtime activation failed: {e}",
+            }
+
+    return session_string, runtime_result
+
+
+def _render_login_success(runtime_result):
+    status = runtime_result.get("status") if isinstance(runtime_result, dict) else None
+    message = runtime_result.get("message") if isinstance(runtime_result, dict) else str(runtime_result)
+
+    if status in {"started", "already_running"}:
+        return render_template(
+            "action_result.html",
+            success=True,
+            title="Telegram 登录成功",
+            message=f"<p>Session 已保存。</p><p>{message}</p>",
+        )
+
+    return render_template(
+        "action_result.html",
+        success=True,
+        title="Telegram 登录成功",
+        message=(
+            "<p>Session 已保存。</p>"
+            f"<p>{message}</p>"
+            "<p>如果后台任务尚未启动，请使用重启按钮或重启容器。</p>"
+        ),
+    )
+
+
 @_flask_app.route("/tg_login", methods=["GET", "POST"])
 @login_required
 def tg_login():
@@ -326,6 +740,13 @@ def tg_login():
     if request.method == "POST" and request.form.get("action") == "logout":
         print("DEBUG: [tg_login] Logout requested")
         try:
+            if _stop_runtime_callback:
+                try:
+                    stop_result = _stop_runtime_callback()
+                    print(f"DEBUG: [tg_login] Runtime stop result: {stop_result}")
+                except Exception as e:
+                    print(f"DEBUG: [tg_login] Error stopping runtime: {e}")
+
             # Clear session from database
             if db.conn:
                 db.save_setting("session", None)
@@ -349,6 +770,41 @@ def tg_login():
             import traceback
             traceback.print_exc()
             return f"Logout Error: {str(e)}"
+
+    if request.method == "POST" and request.form.get("action") == "connect_saved_session":
+        try:
+            if not db.conn:
+                return "Error: Database not connected"
+
+            saved_session = db.load_setting("session")
+            if not saved_session:
+                return "Error: No saved Telegram session found."
+
+            config = db.load_setting("config") or {}
+            api_id = config.get("api_id") or _app_instance.api_id
+            api_hash = config.get("api_hash") or _app_instance.api_hash
+            if not api_id or not api_hash:
+                return "Error: api_id or api_hash not found. Please set them in Config page first."
+
+            loop = _app_instance.loop
+            _client = _create_client_from_session(
+                api_id,
+                api_hash,
+                _app_instance.proxy,
+                _app_instance.session_file_path,
+                loop,
+                saved_session,
+            )
+            runtime_result = _start_runtime_callback(_client) if _start_runtime_callback else {
+                "status": "not_started",
+                "message": "Runtime callback is not configured.",
+            }
+            return _render_login_success(runtime_result)
+        except Exception as e:
+            import traceback
+
+            traceback.print_exc()
+            return f"Connect Saved Session Error: {str(e)}"
     
     # Handle new login
     if request.method == "POST" and request.form.get("phone_number"):
@@ -398,46 +854,7 @@ def tg_login():
             traceback.print_exc()
             return f"Telegram Login Error: {str(e)}"
 
-    # Check if already logged in
-    logged_in = False
-    user_info = None
-    session_exists = False
-    
-    if db.conn:
-        saved_session = db.load_setting("session")
-        session_exists = bool(saved_session)
-    
-    # Try to get user info from client if connected
-    # NOTE: Use _client.me (cached property) instead of calling get_me() 
-    # to avoid event loop conflicts between Flask thread and main asyncio loop
-    if _client and _client.is_connected:
-        try:
-            me = _client.me  # This is a cached property, no async call needed
-            if me:
-                logged_in = True
-                first_name = me.first_name or ""
-                last_name = me.last_name or ""
-                full_name = f"{first_name} {last_name}".strip()
-                initials = (first_name[:1] + last_name[:1]).upper() if last_name else first_name[:2].upper()
-                
-                user_info = {
-                    "id": me.id,
-                    "first_name": first_name,
-                    "last_name": last_name,
-                    "full_name": full_name,
-                    "initials": initials,
-                    "username": me.username or "",
-                    "phone_number": me.phone_number or "",
-                    "is_premium": getattr(me, "is_premium", False),
-                }
-                print(f"DEBUG: [tg_login] User info from cache: {user_info}")
-            else:
-                print("DEBUG: [tg_login] _client.me is None, client may not be fully authorized")
-        except Exception as e:
-            print(f"DEBUG: [tg_login] Error getting user info: {e}")
-    
-    # Render page
-    return render_template("tg_login.html", logged_in=logged_in, user_info=user_info, session_exists=session_exists)
+    return _render_spa()
 
 
 @_flask_app.route("/tg_code", methods=["GET", "POST"])
@@ -476,20 +893,8 @@ def tg_code():
             sign_in_result = future.result(timeout=30)
             print(f"DEBUG: [tg_code] sign_in result: {sign_in_result}")
 
-            # Save session
-            # NOTE: export_session_string() is NOT a coroutine, it's a sync method!
-            print("DEBUG: [tg_code] Calling export_session_string...")
-            s = _client.export_session_string()
-            print(f"DEBUG: [tg_code] Session string length: {len(s) if s else 0}")
-
-            if db.conn:
-                print("DEBUG: [tg_code] Saving session to database...")
-                db.save_setting("session", s)
-                print("DEBUG: [tg_code] Session saved successfully.")
-            else:
-                print("WARNING: [tg_code] Database not connected, session NOT saved!")
-
-            return "Login Successful! Session saved. Please restart the container."
+            _, runtime_result = _save_session_and_start_runtime(_client)
+            return _render_login_success(runtime_result)
         except errors.SessionPasswordNeeded:
             print("DEBUG: [tg_code] Two-step verification required, redirecting to password page.")
             return redirect(url_for("tg_password"))
@@ -526,20 +931,8 @@ def tg_password():
             result = future.result(timeout=30)
             print(f"DEBUG: [tg_password] check_password result: {result}")
 
-            # Save session
-            # NOTE: export_session_string() is NOT a coroutine, it's a sync method!
-            print("DEBUG: [tg_password] Calling export_session_string...")
-            s = _client.export_session_string()
-            print(f"DEBUG: [tg_password] Session string length: {len(s) if s else 0}")
-
-            if db.conn:
-                print("DEBUG: [tg_password] Saving session to database...")
-                db.save_setting("session", s)
-                print("DEBUG: [tg_password] Session saved successfully.")
-            else:
-                print("WARNING: [tg_password] Database not connected, session NOT saved!")
-
-            return "Login Successful! Session saved. Please restart the container."
+            _, runtime_result = _save_session_and_start_runtime(_client)
+            return _render_login_success(runtime_result)
         except Exception as e:
             import traceback
             print(f"ERROR: [tg_password] Exception occurred: {type(e).__name__}: {str(e)}")
@@ -790,23 +1183,18 @@ def _get_formatted_list(already_down=False):
         # Paths
         local_path = file_name.replace("\\", "/")
         remote_path = local_path
+        config_save_path = ""
+        relative_path = CloudDrive.get_relative_upload_path("", local_path)
         if _app_instance and hasattr(_app_instance, 'cloud_drive_config'):
             cloud_cfg = _app_instance.cloud_drive_config
-            config_save_path = ""
             if hasattr(_app_instance, "save_path"):
                 config_save_path = _app_instance.save_path.replace("\\", "/").rstrip("/")
-            
+
+            relative_path = CloudDrive.get_relative_upload_path(
+                config_save_path, local_path
+            )
             if hasattr(cloud_cfg, 'remote_dir') and cloud_cfg.remote_dir:
-                try:
-                    # Calculate relative path to preserve folder structure (e.g. ChatName/Date/File.mp4)
-                    if config_save_path and local_path.startswith(config_save_path):
-                        rel_path = local_path[len(config_save_path):].lstrip("/")
-                    else:
-                        rel_path = os.path.basename(local_path)
-                except Exception:
-                    rel_path = os.path.basename(local_path)
-                
-                remote_path = f"{cloud_cfg.remote_dir.rstrip('/')}/{rel_path}"
+                remote_path = f"{cloud_cfg.remote_dir.rstrip('/')}/{relative_path}"
 
         # Valid Time
         created_ts = base_item.get("created_at") or base_item.get("start_time") or time.time()
@@ -850,8 +1238,11 @@ def _get_formatted_list(already_down=False):
             "upload_speed": upload_speed_str if not is_finishing else "0.0b/s",
             "save_path": local_path,
             "remote_path": remote_path,
+            "relative_path": relative_path,
             "created_at": created_at_fmt,
             "completed_at": completed_at_fmt if is_truly_finished else None,
+            "created_ts": created_ts,
+            "completed_ts": completed_ts if is_truly_finished else None,
             "state": get_task_state(chat_id, idx) if not already_down else 'finished',
             "status": status_text
         }
@@ -931,4 +1322,3 @@ def stream():
                 time.sleep(5)
 
     return Response(stream_with_context(generate()), mimetype='text/event-stream')
-

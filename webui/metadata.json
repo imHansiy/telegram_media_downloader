@@ -1,0 +1,6 @@
+{
+  "name": "Telegram Media Sync Manager",
+  "description": "A quiet, efficient management dashboard to connect Telegram accounts, configure download filters, monitor active sync speed, and view synced files in a structured cloud directory tree.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

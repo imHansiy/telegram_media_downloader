@@ -1,0 +1,115 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+/* Custom fade-in for smooth navigation changes */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideUp {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+@keyframes slideRight {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-slideUp {
+  animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-slideRight {
+  animation: slideRight 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Custom scrollbar styling for technical dashboard density */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #020617; /* slate-950 */
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1e293b; /* slate-800 */
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #334155; /* slate-700 */
+}
+
+/* Custom Light Mode Variable Overrides for Tailwind CSS v4 */
+.light-mode {
+  --color-slate-950: #f8fafc; /* Main body overall background */
+  --color-slate-900: #ffffff; /* Card/Modal/Container background */
+  --color-slate-850: #f1f5f9; /* Active rows, light hover states */
+  --color-slate-805: #cbd5e1; /* Soft items borders */
+  --color-slate-800: #e2e8f0; /* Main layout borders */
+  --color-slate-755: #94a3b8; /* Focused borders */
+  --color-slate-700: #94a3b8;
+  --color-slate-650: #64748b;
+  --color-slate-600: #475569;
+  --color-slate-550: #475569;
+  --color-slate-500: #64748b; /* Secondary metadata text labels */
+  --color-slate-450: #475569;
+  --color-slate-400: #334155; /* Secondary standard text */
+  --color-slate-350: #1e293b;
+  --color-slate-300: #1e293b; /* General text */
+  --color-slate-200: #0f172a; /* High-contrast text labels */
+  --color-slate-100: #020617; /* Core display headings */
+  --color-slate-50: #000000;
+  
+  --color-indigo-950: #ebf0ff;
+  --color-indigo-900: #cbdcfc;
+  --color-indigo-400: #4f46e5; /* Sapphire blue in light mode for visible contrast */
+
+  /* Map light mode scrollbar rules */
+  ::-webkit-scrollbar-track {
+    background: #f1f5f9 !important;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #cbd5e1 !important;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8 !important;
+  }
+}
+
+/* Heading color corrections to guarantee visibility in Light Mode */
+.light-mode h1,
+.light-mode h2,
+.light-mode h3,
+.light-mode h4,
+.light-mode h5,
+.light-mode h6,
+.light-mode legend {
+  color: var(--color-slate-100) !important;
+}
+
+/* Input placeholder text alignment for Light Mode */
+.light-mode input::placeholder,
+.light-mode textarea::placeholder {
+  color: #94a3b8 !important;
+}
+
+/* Select option state formatting in Light Mode */
+.light-mode select {
+  color: var(--color-slate-100) !important;
+  background-color: var(--color-slate-900) !important;
+}
+

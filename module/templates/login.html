@@ -11,7 +11,11 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      background: radial-gradient(circle at center, #1e293b 0%, #0f172a 100%);
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at top left, rgba(79, 70, 229, 0.18), transparent 34rem),
+        radial-gradient(circle at bottom right, rgba(16, 185, 129, 0.1), transparent 30rem),
+        var(--bg-primary);
     }
   </style>
 </head>
@@ -19,7 +23,8 @@
 <body>
   <div class="card login-card">
     <div class="text-center mb-4">
-      <h1 style="color: var(--accent); margin-bottom: 0.5rem;">TDL 管理器</h1>
+      <div class="eyebrow">Telegram Media Sync</div>
+      <h1 style="color: var(--accent); margin-bottom: 0.5rem;">同步控制台</h1>
       <p>请输入密码以继续。</p>
     </div>
 

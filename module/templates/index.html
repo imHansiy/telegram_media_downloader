@@ -3,14 +3,54 @@
 {% block content %}
 <div id="dashboard-view" class="h-full flex flex-col animate-fade-in">
   <!-- Header Section -->
-  <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
+  <div class="page-heading flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
     <div>
-      <h1 class="text-2xl font-bold mb-1">仪表盘</h1>
-      <p class="text-secondary opacity-70">系统运行状态与任务监控</p>
+      <div class="eyebrow">Sync Command Center</div>
+      <h1 class="text-2xl font-bold mb-1">任务仪表盘</h1>
+      <p class="text-secondary opacity-70">Telegram 媒体传输、WebDAV 上传与归档文件状态</p>
     </div>
     <div id="db-status" class="flex items-center gap-2 px-4 py-2 rounded-lg glass-container text-sm">
       <span id="db-status-dot" class="w-2 h-2 rounded-full bg-secondary"></span>
       <span>数据库: <span id="db-status-text">检查中...</span></span>
+    </div>
+  </div>
+
+  <div class="dashboard-metrics mb-6">
+    <div class="metric-card">
+      <div class="metric-icon metric-indigo">
+        <svg class="icon" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+      </div>
+      <div>
+        <div class="metric-label">传输队列</div>
+        <div class="metric-value" id="stat-active-total">0</div>
+      </div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-icon metric-emerald">
+        <svg class="icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></svg>
+      </div>
+      <div>
+        <div class="metric-label">归档文件</div>
+        <div class="metric-value" id="stat-history-total">0</div>
+      </div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-icon metric-sky">
+        <svg class="icon" viewBox="0 0 24 24"><path d="M12 3v12"></path><path d="m7 10 5 5 5-5"></path><path d="M5 21h14"></path></svg>
+      </div>
+      <div>
+        <div class="metric-label">下载速度</div>
+        <div class="metric-value metric-speed" id="stat-download-speed">0 B/s</div>
+      </div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-icon metric-amber">
+        <svg class="icon" viewBox="0 0 24 24"><path d="M12 21V9"></path><path d="m7 14 5-5 5 5"></path><path d="M5 3h14"></path></svg>
+      </div>
+      <div>
+        <div class="metric-label">上传速度</div>
+        <div class="metric-value metric-speed" id="stat-upload-speed">0 B/s</div>
+      </div>
     </div>
   </div>
 
@@ -23,7 +63,7 @@
         <div class="tab-btn-border"></div>
         <span
           class="relative z-10 flex items-center gap-2 group-[.active]:text-accent text-secondary group-hover:text-text transition-colors">
-          进行中
+          传输队列
           <span id="active-count" class="badge-soft badge-accent-soft">0</span>
         </span>
       </button>
@@ -34,7 +74,7 @@
         <div class="tab-btn-border"></div>
         <span
           class="relative z-10 flex items-center gap-2 group-[.active]:text-text text-secondary group-hover:text-text transition-colors">
-          已完成
+          归档文件
           <span id="history-count" class="badge-soft badge-secondary-soft">0</span>
         </span>
       </button>
@@ -67,7 +107,7 @@
   </div>
 
   <!-- Task Lists Container -->
-  <div class="flex-1 overflow-hidden relative rounded-xl border border-border shadow-lg bg-card/50 backdrop-blur-sm">
+  <div class="sync-panel flex-1 overflow-hidden relative rounded-xl border border-border shadow-lg bg-card/50 backdrop-blur-sm">
 
     <!-- Active Tasks Tab (Downloading + Uploading merged) -->
     <div id="tab-active" class="tab-content h-full flex flex-col">
@@ -113,10 +153,10 @@
             class="sticky top-0 bg-surface z-10 shadow-sm text-xs uppercase tracking-wider text-secondary font-semibold">
             <tr>
               <th width="60" class="text-center">类型</th>
-              <th width="80">ID</th>
-              <th width="30%">文件名</th>
+              <th width="80">ID/数量</th>
+              <th width="30%">名称</th>
               <th width="100">大小</th>
-              <th width="140">完成时间</th>
+              <th width="140">最新完成</th>
               <th>远程路径</th>
               <th width="60" class="text-center">操作</th>
             </tr>

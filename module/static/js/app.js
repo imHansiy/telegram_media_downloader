@@ -7,6 +7,7 @@ class App {
         this.intervals = {};
         this.currentFilter = 'all';
         this.lastData = [];
+        this.historyCollapsedFolders = new Set();
 
         this.init();
     }
@@ -52,8 +53,10 @@ class App {
                 const payload = JSON.parse(event.data);
 
                 if (payload.type === 'update') {
-                    // Wait, no global speed update needed anymore
-
+                    if (payload.status) {
+                        this.updateMetric('stat-download-speed', payload.status.download_speed || '0 B/s');
+                        this.updateMetric('stat-upload-speed', payload.status.upload_speed || '0 B/s');
+                    }
 
                     // Update Active Tasks
                     if (payload.tasks) {
@@ -74,6 +77,11 @@ class App {
         this.evtSource.onerror = (err) => {
             console.error('SSE Error:', err);
         };
+    }
+
+    updateMetric(id, value) {
+        const el = document.getElementById(id);
+        if (el) el.textContent = value;
     }
 
     async updateDownloadList() {
@@ -189,6 +197,7 @@ class App {
         // Update count badge
         const countBadge = document.getElementById('active-count');
         if (countBadge) countBadge.textContent = data.length;
+        this.updateMetric('stat-active-total', data.length);
 
         const tbody = document.getElementById('active-tbody');
         if (!tbody) return;
@@ -272,21 +281,235 @@ class App {
         tbody.innerHTML = html;
     }
 
+    escapeHtml(value) {
+        return String(value ?? '').replace(/[&<>"']/g, char => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+        }[char]));
+    }
+
+    getFileExtension(filename) {
+        const parts = String(filename || '').split('.');
+        return parts.length > 1 ? parts.pop().toLowerCase() : '';
+    }
+
+    getFileTypeRank(filename) {
+        const ext = this.getFileExtension(filename);
+        if (['mp4', 'mkv', 'avi', 'mov', 'webm'].includes(ext)) return 1;
+        if (['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(ext)) return 2;
+        if (['mp3', 'wav', 'flac', 'aac', 'm4a'].includes(ext)) return 3;
+        if (['zip', 'rar', '7z', 'tar', 'gz'].includes(ext)) return 4;
+        if (['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt'].includes(ext)) return 5;
+        return 6;
+    }
+
+    compareNames(a, b) {
+        return String(a || '').localeCompare(String(b || ''), 'zh-Hans', {
+            numeric: true,
+            sensitivity: 'base'
+        });
+    }
+
+    getHistoryTimestamp(item) {
+        const raw = Number(item.completed_ts || item.created_ts || 0);
+        if (Number.isFinite(raw) && raw > 0) return raw;
+
+        const text = item.completed_at || item.created_at || '';
+        const parsed = Date.parse(String(text).replace(' ', 'T'));
+        return Number.isNaN(parsed) ? 0 : parsed / 1000;
+    }
+
+    getHistoryPathParts(item) {
+        const fallbackName = item.filename || 'Unknown';
+        const rawPath = item.relative_path || item.remote_path || item.save_path || fallbackName;
+        const parts = String(rawPath)
+            .replace(/\\/g, '/')
+            .split('/')
+            .filter(Boolean);
+
+        if (parts.length === 0) return [fallbackName];
+
+        const lastPart = parts[parts.length - 1];
+        if (String(lastPart).toLowerCase() !== String(fallbackName).toLowerCase()) {
+            parts.push(fallbackName);
+        }
+
+        return parts;
+    }
+
+    touchHistoryFolder(folder, item, ts) {
+        folder.count += 1;
+        if (ts >= folder.latestTs) {
+            folder.latestTs = ts;
+            folder.latestLabel = item.completed_at || item.created_at || '-';
+        }
+    }
+
+    buildHistoryTree(data) {
+        const root = {
+            name: '',
+            path: '',
+            children: new Map(),
+            files: [],
+            count: 0,
+            latestTs: 0,
+            latestLabel: '-'
+        };
+
+        data.forEach(item => {
+            const parts = this.getHistoryPathParts(item);
+            const fileName = parts.pop() || item.filename || 'Unknown';
+            const ts = this.getHistoryTimestamp(item);
+            let folder = root;
+
+            this.touchHistoryFolder(folder, item, ts);
+
+            parts.forEach(part => {
+                const childPath = folder.path ? `${folder.path}/${part}` : part;
+                if (!folder.children.has(part)) {
+                    folder.children.set(part, {
+                        name: part,
+                        path: childPath,
+                        children: new Map(),
+                        files: [],
+                        count: 0,
+                        latestTs: 0,
+                        latestLabel: '-'
+                    });
+                }
+
+                folder = folder.children.get(part);
+                this.touchHistoryFolder(folder, item, ts);
+            });
+
+            folder.files.push({
+                ...item,
+                filename: item.filename || fileName,
+                _historyTs: ts,
+                _historyExt: this.getFileExtension(item.filename || fileName),
+                _historyTypeRank: this.getFileTypeRank(item.filename || fileName)
+            });
+        });
+
+        return root;
+    }
+
+    getSortedHistoryFolders(folder, depth) {
+        return Array.from(folder.children.values()).sort((a, b) => {
+            if (depth === 0 && b.latestTs !== a.latestTs) {
+                return b.latestTs - a.latestTs;
+            }
+
+            return this.compareNames(a.name, b.name);
+        });
+    }
+
+    getSortedHistoryFiles(folder) {
+        return folder.files.slice().sort((a, b) => {
+            if (a._historyTypeRank !== b._historyTypeRank) {
+                return a._historyTypeRank - b._historyTypeRank;
+            }
+
+            const extOrder = this.compareNames(a._historyExt, b._historyExt);
+            if (extOrder !== 0) return extOrder;
+
+            return this.compareNames(a.filename, b.filename);
+        });
+    }
+
+    renderHistoryFolderRow(folder, depth) {
+        const folderPath = this.escapeHtml(folder.path);
+        const folderName = this.escapeHtml(folder.name);
+        const folderArg = this.escapeHtml(JSON.stringify(folder.path));
+        const collapsed = this.historyCollapsedFolders.has(folder.path);
+        const indent = Math.min(depth * 22, 132);
+        const remotePath = this.escapeHtml(folder.path);
+
+        return `
+            <tr class="history-folder-row" data-folder-path="${folderPath}">
+                <td colspan="7" class="history-folder-cell">
+                    <button onclick="toggleHistoryFolder(${folderArg})" class="history-folder-card" style="margin-left: ${indent}px; width: calc(100% - ${indent}px);" title="${folderPath}">
+                        <span class="history-folder-art" aria-hidden="true"></span>
+                        <span class="history-folder-main">
+                            <span class="history-folder-title">
+                                <span class="history-folder-chevron">${collapsed ? '▸' : '▾'}</span>
+                                <span class="truncate">${folderName}</span>
+                            </span>
+                            <span class="history-folder-meta">
+                                <span>${folder.count} 项</span>
+                                <span>${this.escapeHtml(folder.latestLabel)}</span>
+                                <span class="truncate">${remotePath}</span>
+                            </span>
+                        </span>
+                    </button>
+                </td>
+            </tr>`;
+    }
+
+    renderHistoryFileRow(item, depth) {
+        const icon = this.getFileIcon(item.filename);
+        const remotePath = item.remote_path || item.save_path || '-';
+        const indent = Math.min(depth * 18, 108);
+
+        return `
+            <tr class="hover:bg-surface/50 transition-colors border-b border-border/50" data-chat="${this.escapeHtml(item.chat)}" data-id="${this.escapeHtml(item.id)}">
+                <td class="text-center text-xl py-3">${icon}</td>
+                <td class="text-secondary text-xs font-mono">${this.escapeHtml(item.id)}</td>
+                <td class="py-3">
+                    <div class="history-name-cell text-text text-sm" style="padding-left: ${indent}px;" title="${this.escapeHtml(item.filename)}">
+                        <span class="truncate">${this.escapeHtml(item.filename)}</span>
+                    </div>
+                </td>
+                <td class="text-secondary text-xs font-mono">${this.escapeHtml(item.total_size)}</td>
+                <td class="text-secondary text-[10px] font-mono">${this.escapeHtml(item.completed_at || item.created_at || '-')}</td>
+                <td class="text-secondary text-xs truncate" style="max-width: 240px;" title="${this.escapeHtml(remotePath)}">${this.escapeHtml(remotePath)}</td>
+                <td class="text-center py-3">
+                    <button onclick="removeTask('${this.escapeHtml(item.chat)}', '${this.escapeHtml(item.id)}')"
+                        class="text-secondary hover:text-danger transition-colors p-1 rounded hover:bg-danger/10"
+                        title="删除此记录">
+                        <svg class="icon" style="width:16px;height:16px;" viewBox="0 0 24 24">
+                            <polyline points="3 6 5 6 21 6"></polyline>
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                        </svg>
+                    </button>
+                </td>
+            </tr>`;
+    }
+
+    renderHistoryTreeRows(folder, depth = 0) {
+        const rows = [];
+
+        this.getSortedHistoryFolders(folder, depth).forEach(child => {
+            rows.push(this.renderHistoryFolderRow(child, depth));
+            if (!this.historyCollapsedFolders.has(child.path)) {
+                rows.push(this.renderHistoryTreeRows(child, depth + 1));
+            }
+        });
+
+        this.getSortedHistoryFiles(folder).forEach(item => {
+            rows.push(this.renderHistoryFileRow(item, depth));
+        });
+
+        return rows.join('');
+    }
+
     renderDownloadedTable(data) {
         // Update count badge
         const countBadge = document.getElementById('history-count');
         if (countBadge) countBadge.textContent = data.length;
+        this.updateMetric('stat-history-total', data.length);
+        this.downloadedList = Array.isArray(data) ? data : [];
 
         const tbody = document.getElementById('downloaded-tbody');
         if (!tbody) return;
 
-        // Limit to last 50 for performance if list is huge
-        const displayData = data.slice(-50).reverse();
-
-        if (displayData.length === 0) {
+        if (this.downloadedList.length === 0) {
             tbody.innerHTML = `
                 <tr>
-                    <td colspan="6" class="text-center py-12">
+                    <td colspan="7" class="text-center py-12">
                         <div class="flex flex-col items-center justify-center opacity-50">
                             <svg class="icon mb-2" style="width:48px;height:48px;" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="12" cy="12" r="10"/><path d="M8 12l2 2 4-4"/></svg>
                             <span class="text-secondary text-sm">暂无历史记录</span>
@@ -296,32 +519,18 @@ class App {
             return;
         }
 
-        const html = displayData.map(item => {
-            const icon = this.getFileIcon(item.filename);
-            // Use remote_path if available, otherwise fall back to save_path
-            const remotePath = item.remote_path || item.save_path || '-';
-            return `
-            <tr class="hover:bg-surface/50 transition-colors border-b border-border/50" data-chat="${item.chat}" data-id="${item.id}">
-                <td class="text-center text-xl py-3">${icon}</td>
-                <td class="text-secondary text-xs font-mono">${item.id}</td>
-                <td class="py-3"><div class="truncate text-text text-sm" style="max-width: 300px;" title="${item.filename}">${item.filename}</div></td>
-                <td class="text-secondary text-xs font-mono">${item.total_size}</td>
-                <td class="text-secondary text-[10px] font-mono">${item.completed_at || item.created_at || '-'}</td>
-                <td class="text-secondary text-xs truncate" style="max-width: 200px;" title="${remotePath}">${remotePath}</td>
-                <td class="text-center py-3">
-                    <button onclick="removeTask('${item.chat}', '${item.id}')" 
-                        class="text-secondary hover:text-danger transition-colors p-1 rounded hover:bg-danger/10" 
-                        title="删除此记录">
-                        <svg class="icon" style="width:16px;height:16px;" viewBox="0 0 24 24">
-                            <polyline points="3 6 5 6 21 6"></polyline>
-                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-                        </svg>
-                    </button>
-                </td>
-            </tr>
-        `}).join('');
+        const tree = this.buildHistoryTree(this.downloadedList);
+        tbody.innerHTML = this.renderHistoryTreeRows(tree);
+    }
 
-        tbody.innerHTML = html;
+    toggleHistoryFolder(path) {
+        if (this.historyCollapsedFolders.has(path)) {
+            this.historyCollapsedFolders.delete(path);
+        } else {
+            this.historyCollapsedFolders.add(path);
+        }
+
+        this.renderDownloadedTable(this.downloadedList || []);
     }
 }
 
@@ -347,6 +556,7 @@ document.addEventListener('DOMContentLoaded', () => {
             window.app.applyFilter();
         }
     };
+    window.toggleHistoryFolder = (path) => window.app.toggleHistoryFolder(path);
 });
 
 // Clear all history
@@ -401,16 +611,14 @@ async function removeTask(chatId, messageId) {
 
         const result = await response.json();
         if (result.success) {
-            // Remove the row from table
-            const row = document.querySelector(`tr[data-chat="${chatId}"][data-id="${messageId}"]`);
-            if (row) {
-                row.remove();
-            }
-            // Update count
-            const countBadge = document.getElementById('history-count');
-            if (countBadge) {
-                const current = parseInt(countBadge.textContent) || 0;
-                countBadge.textContent = Math.max(0, current - 1);
+            if (window.app) {
+                window.app.downloadedList = (window.app.downloadedList || []).filter(item => (
+                    String(item.chat) !== String(chatId) || String(item.id) !== String(messageId)
+                ));
+                window.app.renderDownloadedTable(window.app.downloadedList);
+            } else {
+                const row = document.querySelector(`tr[data-chat="${chatId}"][data-id="${messageId}"]`);
+                if (row) row.remove();
             }
         } else {
             console.error('删除失败:', result.message);

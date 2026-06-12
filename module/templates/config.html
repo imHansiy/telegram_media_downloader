@@ -1,13 +1,14 @@
 {% extends "base.html" %}
 
 {% block content %}
-<div class="max-w-4xl mx-auto">
-    <div class="flex justify-between items-center mb-6">
+<div class="settings-page">
+    <div class="page-heading flex justify-between items-center mb-6">
         <div>
-            <h1>设置</h1>
-            <p>配置机器人行为。更改需要重启应用。</p>
+            <div class="eyebrow">Sync Rules & Storage</div>
+            <h1>同步设置</h1>
+            <p>多数设置保存后会立即写入内存；连接级设置需要重新连接或重启。</p>
         </div>
-        <div class="flex gap-2">
+        <div class="actions-cluster flex gap-2">
             <button onclick="restartApp()" class="btn btn-danger">
                 <svg class="icon" viewBox="0 0 24 24">
                     <path d="M23 4v6h-6"></path>
@@ -26,13 +27,13 @@
     </div>
 
     <!-- View Toggles - Renamed function to avoid app.js conflict -->
-    <div class="flex gap-1 mb-4 border-b border-border">
+    <div class="config-tabs flex gap-1 mb-4 border-b border-border">
         <button class="nav-link active" id="tab-basic" onclick="switchConfigTab('basic')">基础设置</button>
         <button class="nav-link" id="tab-chats" onclick="switchConfigTab('chats')">监控会话</button>
         <button class="nav-link" id="tab-advanced" onclick="switchConfigTab('advanced')">高级 / JSON</button>
     </div>
 
-    <div class="card relative">
+    <div class="card settings-card relative">
         <form id="configForm">
             <textarea name="config" id="configArea" class="hidden">{{ config }}</textarea>
 

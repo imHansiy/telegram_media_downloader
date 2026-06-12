@@ -2,6 +2,7 @@
 <h1 align="center">Telegram Media Downloader</h1>
 
 <p align="center">
+<a href="https://deepwiki.com/tangyoha/telegram_media_downloader"><img alt="DeepWiki" src="https://img.shields.io/badge/DeepWiki-Documentation-blue"></a>
 <a href="https://github.com/tangyoha/telegram_media_downloader/actions"><img alt="Unittest" src="https://github.com/tangyoha/telegram_media_downloader/workflows/Unittest/badge.svg"></a>
 <a href="https://codecov.io/gh/tangyoha/telegram_media_downloader"><img alt="Coverage Status" src="https://codecov.io/gh/tangyoha/telegram_media_downloader/branch/master/graph/badge.svg"></a>
 <a href="https://github.com/tangyoha/telegram_media_downloader/blob/master/LICENSE"><img alt="License: MIT" src="https://black.readthedocs.io/en/stable/_static/license.svg"></a>
@@ -112,7 +113,6 @@ Read through our [contributing guidelines](./CONTRIBUTING.md) to learn about our
 ### Sponsor
 [PayPal](https://paypal.me/tangyoha?country.x=C2&locale.x=zh_XC)
 
-<p>
-<img alt="Alipay" style="width:30%" src="./screenshot/alipay.JPG">
-<img alt="WeChat" style="width:30%" src="./screenshot/wechat.JPG">
-</p>
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=tangyoha/telegram_media_downloader&type=Date)](https://star-history.com/#tangyoha/telegram_media_downloader&Date)

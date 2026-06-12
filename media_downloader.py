@@ -1,6 +1,7 @@
 """Downloads media from telegram."""
 
 import asyncio
+import inspect
 import logging
 import os
 import shutil
@@ -785,6 +786,7 @@ async def stop_server(client: pyrogram.Client):
 def main():
     """Main function of the downloader."""
     tasks = []
+    runtime_started = False
 
     # Try to load session from DB, but don't force it yet
     session_string = None
@@ -821,6 +823,7 @@ def main():
                 start_timeout=app.start_timeout,
                 session_string=session_string,
                 in_memory=in_memory,
+                no_updates=True,
             )
             client.loop = app.loop
         except Exception as e:
@@ -841,10 +844,133 @@ def main():
         except:
             pass
 
+    async def ensure_client_runtime_ready(runtime_client: pyrogram.Client):
+        """Bring a Web-authenticated client to the same ready state as client.start()."""
+        if not runtime_client.is_connected:
+            await start_server(runtime_client)
+            return
+
+        if not getattr(runtime_client, "me", None):
+            await runtime_client.invoke(pyrogram.raw.functions.updates.GetState())
+            runtime_client.me = await runtime_client.get_me()
+
+        if not getattr(runtime_client, "is_initialized", False):
+            await runtime_client.initialize()
+
+    async def activate_runtime(runtime_client: pyrogram.Client):
+        """Start download workers and bot without restarting the process."""
+        nonlocal client, runtime_started
+        if runtime_started:
+            if runtime_client is not client:
+                logger.info("Switching Telegram runtime client without process restart.")
+                await deactivate_runtime(stop_client=True)
+            else:
+                return {
+                    "status": "already_running",
+                    "message": "后台任务已在运行，无需重启。",
+                }
+
+        if not runtime_client:
+            raise RuntimeError("Telegram client is not initialized.")
+
+        client = runtime_client
+        await ensure_client_runtime_ready(client)
+        set_max_concurrent_transmissions(client, app.max_concurrent_transmissions)
+
+        if db.conn:
+            try:
+                session = client.export_session_string()
+                if inspect.isawaitable(session):
+                    session = await session
+                db.save_setting("session", session)
+                logger.info("Telegram session saved after runtime activation.")
+            except Exception as e:
+                logger.warning(f"Failed to export/save session string: {e}")
+
+        app.is_running = True
+        tasks.append(app.loop.create_task(download_all_chat(client)))
+        for _ in range(app.max_download_task):
+            tasks.append(app.loop.create_task(worker(client)))
+
+        if app.bot_token:
+            await start_download_bot(app, client, add_download_task, download_chat_task)
+
+        runtime_started = True
+        logger.success(_t("Successfully started (Press Ctrl+C to stop)"))
+        return {
+            "status": "started",
+            "message": "后台下载任务和 Bot 已启动，无需重启容器。",
+        }
+
+    async def deactivate_runtime(stop_client: bool = True):
+        """Stop bot, workers, and the active Telegram client without stopping Flask."""
+        nonlocal client, runtime_started
+        if not runtime_started and not client:
+            return {
+                "status": "not_running",
+                "message": "后台任务未运行。",
+            }
+
+        old_client = client
+        runtime_started = False
+        app.is_running = False
+
+        if app.bot_token:
+            try:
+                await stop_download_bot()
+            except Exception as e:
+                logger.warning(f"Failed to stop bot cleanly: {e}")
+
+        for task in list(tasks):
+            task.cancel()
+        if tasks:
+            try:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            except Exception as e:
+                logger.warning(f"Failed to cancel runtime tasks cleanly: {e}")
+        tasks.clear()
+
+        while not queue.empty():
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+        if stop_client and old_client:
+            try:
+                if getattr(old_client, "is_connected", False) or getattr(
+                    old_client, "is_initialized", False
+                ):
+                    await stop_server(old_client)
+            except ConnectionError as e:
+                logger.warning(f"Telegram client already stopped: {e}")
+            except Exception as e:
+                logger.warning(f"Failed to stop Telegram client cleanly: {e}")
+
+        if old_client is client:
+            client = None
+
+        return {
+            "status": "stopped",
+            "message": "旧 Telegram 运行态已停止。",
+        }
+
+    def start_runtime_callback(runtime_client: pyrogram.Client):
+        future = asyncio.run_coroutine_threadsafe(
+            activate_runtime(runtime_client), app.loop
+        )
+        return future.result(timeout=90)
+
+    def stop_runtime_callback():
+        future = asyncio.run_coroutine_threadsafe(
+            deactivate_runtime(stop_client=True), app.loop
+        )
+        return future.result(timeout=90)
+
     try:
         app.pre_run()
         # Initialize Web UI with client (which might be None or unauthenticated)
-        init_web(app, client, restart_callback)
+        init_web(app, client, restart_callback, start_runtime_callback, stop_runtime_callback)
 
         # If we have a valid client AND a session string, we can start downloading
         if client and session_string:
@@ -879,8 +1005,9 @@ def main():
             def save_session_to_db_sync():
                 if db.conn:
                     try:
-                        # NOTE: export_session_string() is NOT a coroutine, it's a sync method!
                         s = client.export_session_string()
+                        if inspect.isawaitable(s):
+                            s = app.loop.run_until_complete(s)
                         db.save_setting("session", s)
                         print(
                             f"DEBUG: [main] Session saved to DB, length: {len(s) if s else 0}"
@@ -890,19 +1017,7 @@ def main():
 
             save_session_to_db_sync()
 
-            logger.success(_t("Successfully started (Press Ctrl+C to stop)"))
-
-            app.loop.create_task(download_all_chat(client))
-            for _ in range(app.max_download_task):
-                task = app.loop.create_task(worker(client))
-                tasks.append(task)
-
-            if app.bot_token:
-                app.loop.run_until_complete(
-                    start_download_bot(
-                        app, client, add_download_task, download_chat_task
-                    )
-                )
+            app.loop.run_until_complete(activate_runtime(client))
 
             # Start loop
             _exec_loop()
@@ -936,7 +1051,13 @@ def main():
         if client:
             if app.bot_token:
                 app.loop.run_until_complete(stop_download_bot())
-            app.loop.run_until_complete(stop_server(client))
+            try:
+                if getattr(client, "is_connected", False) or getattr(
+                    client, "is_initialized", False
+                ):
+                    app.loop.run_until_complete(stop_server(client))
+            except ConnectionError as e:
+                logger.warning(f"Telegram client already stopped: {e}")
         for task in tasks:
             task.cancel()
         logger.info(_t("Stopped!"))

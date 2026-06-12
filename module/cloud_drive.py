@@ -63,6 +63,50 @@ class CloudDrive:
     """rclone support"""
 
     @staticmethod
+    def get_relative_upload_path(save_path: str, file_name: str) -> str:
+        """Return upload path relative to save_path while preserving subfolders."""
+        if not file_name:
+            return ""
+
+        def normalize_relative(path: str) -> str:
+            rel_path = os.path.normpath(str(path)).replace("\\", "/")
+            if rel_path == ".":
+                return ""
+            while rel_path.startswith("./"):
+                rel_path = rel_path[2:]
+            return rel_path.lstrip("/")
+
+        normalized_file = os.path.normpath(str(file_name))
+        normalized_save = os.path.normpath(str(save_path)) if save_path else ""
+
+        if normalized_save:
+            try:
+                abs_save = os.path.abspath(normalized_save)
+                abs_file = os.path.abspath(normalized_file)
+                if os.path.commonpath([abs_save, abs_file]) == abs_save:
+                    rel_path = normalize_relative(os.path.relpath(abs_file, abs_save))
+                    if rel_path:
+                        return rel_path
+            except (OSError, ValueError):
+                pass
+
+            file_rel = normalize_relative(normalized_file)
+            save_rel = normalize_relative(normalized_save).rstrip("/")
+            if save_rel and file_rel.startswith(f"{save_rel}/"):
+                return file_rel[len(save_rel) + 1 :]
+
+            save_dir = os.path.basename(save_rel)
+            if save_dir and file_rel.startswith(f"{save_dir}/"):
+                return file_rel[len(save_dir) + 1 :]
+
+        if not os.path.isabs(normalized_file):
+            rel_path = normalize_relative(normalized_file)
+            if rel_path:
+                return rel_path
+
+        return os.path.basename(normalized_file)
+
+    @staticmethod
     def init_upload_adapter(drive_config: CloudDriveConfig):
         """Initialize the upload adapter."""
         if drive_config.upload_adapter == "aligo":
@@ -295,19 +339,8 @@ class CloudDrive:
             "Expect": "",  # Disable Expect: 100-continue to avoid hangs with some WebDAV servers
         }
 
-        # Calculate relative path to preserve folder structure (e.g. ChatName/File.mp4)
-        try:
-            # handle cases where file_name might be absolute or relative
-            if os.path.isabs(file_name) and save_path:
-                rel_path = os.path.relpath(file_name, save_path)
-            else:
-                # fallback if it's already relative or save_path mismatch
-                rel_path = os.path.basename(file_name)
-        except Exception:
-            rel_path = os.path.basename(file_name)
-
-        # Normalize to forward slashes for WebDAV
-        rel_path = rel_path.replace("\\", "/")
+        # Preserve folders created by file_path_prefix under save_path.
+        rel_path = CloudDrive.get_relative_upload_path(save_path, file_name)
 
         # Construct base remote URL
         base_url = drive_config.webdav_url.rstrip("/")

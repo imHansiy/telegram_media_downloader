@@ -17,6 +17,7 @@ WORKDIR /app
 RUN apk add --no-cache libpq
 
 COPY --from=compile-image /usr/bin/rclone /usr/bin/rclone
+COPY --from=compile-image /usr/bin/rclone /app/rclone/rclone
 COPY --from=compile-image /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 
 COPY setup.py media_downloader.py /app/

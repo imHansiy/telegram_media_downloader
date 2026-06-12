@@ -25,78 +25,101 @@
 </head>
 
 <body>
-    <div class="app-container">
-        <!-- Sidebar -->
-        <aside class="sidebar">
-            <div class="nav-brand">
-                <svg class="icon" viewBox="0 0 24 24">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                    <polyline points="7 10 12 15 17 10"></polyline>
-                    <line x1="12" y1="15" x2="12" y2="3"></line>
-                </svg>
-                <span>TDL 管理器</span>
+    <div class="app-shell">
+        <header class="topbar">
+            <div class="topbar-inner">
+                <div class="brand-block">
+                    <button class="mobile-menu-btn" type="button" onclick="toggleSidebar()" title="切换导航">
+                        <svg class="icon" viewBox="0 0 24 24">
+                            <line x1="3" y1="6" x2="21" y2="6"></line>
+                            <line x1="3" y1="12" x2="21" y2="12"></line>
+                            <line x1="3" y1="18" x2="21" y2="18"></line>
+                        </svg>
+                    </button>
+                    <span class="brand-mark">
+                        <svg class="icon" viewBox="0 0 24 24">
+                            <path d="M13 2L3 14h8l-1 8 10-12h-8l1-8z"></path>
+                        </svg>
+                    </span>
+                    <div>
+                        <div class="brand-title">Telegram Media Sync</div>
+                        <div class="brand-subtitle">媒体下载、WebDAV 同步与任务控制台</div>
+                    </div>
+                </div>
+
+                <div class="topbar-actions">
+                    <div class="topbar-pill">
+                        <span class="status-dot"></span>
+                        <span>实时任务流</span>
+                    </div>
+                    <div class="topbar-pill">
+                        <span>v<span id="app-version">...</span></span>
+                    </div>
+                    <button id="theme-toggle" class="icon-button" onclick="toggleTheme()" title="切换明暗模式">
+                        <svg class="icon" viewBox="0 0 24 24" id="icon-moon">
+                            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+                        </svg>
+                        <svg class="icon hidden" viewBox="0 0 24 24" id="icon-sun">
+                            <circle cx="12" cy="12" r="5"></circle>
+                            <line x1="12" y1="1" x2="12" y2="3"></line>
+                            <line x1="12" y1="21" x2="12" y2="23"></line>
+                            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+                            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+                            <line x1="1" y1="12" x2="3" y2="12"></line>
+                            <line x1="21" y1="12" x2="23" y2="12"></line>
+                            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+                            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+                        </svg>
+                    </button>
+                </div>
             </div>
+        </header>
 
-            <nav>
-                <a href="{{ url_for('index') }}" class="nav-link {% if request.endpoint == 'index' %}active{% endif %}">
-                    <svg class="icon" viewBox="0 0 24 24">
-                        <rect x="3" y="3" width="7" height="7"></rect>
-                        <rect x="14" y="3" width="7" height="7"></rect>
-                        <rect x="14" y="14" width="7" height="7"></rect>
-                        <rect x="3" y="14" width="7" height="7"></rect>
-                    </svg>
-                    仪表盘
-                </a>
-                <a href="{{ url_for('config') }}"
-                    class="nav-link {% if request.endpoint == 'config' %}active{% endif %}">
-                    <svg class="icon" viewBox="0 0 24 24">
-                        <circle cx="12" cy="12" r="3"></circle>
-                        <path
-                            d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z">
-                        </path>
-                    </svg>
-                    设置
-                </a>
-                <a href="{{ url_for('tg_login') }}"
-                    class="nav-link {% if request.endpoint == 'tg_login' %}active{% endif %}">
-                    <svg class="icon" viewBox="0 0 24 24">
-                        <path
-                            d="M21.198 2.433a2.242 2.242 0 0 0-1.022.215l-18.66 7.464a2.27 2.27 0 0 0 0 4.188l6.39 2.195 9.873-6.224c.71-.448 1.487.323.834.928l-8.083 7.427v4.612c0 .913 1.056 1.433 1.764.87l3.185-2.54 5.397 3.987a2.27 2.27 0 0 0 3.655-1.52l3.41-19.46a2.27 2.27 0 0 0-4.743-2.142z">
-                        </path>
-                    </svg>
-                    Telegram 账号
-                </a>
-            </nav>
+        <div class="shell-body">
+            <aside class="sidebar" id="sidebar">
+                <nav class="side-nav">
+                    <a href="{{ url_for('index') }}" class="nav-link {% if request.endpoint == 'index' %}active{% endif %}">
+                        <svg class="icon" viewBox="0 0 24 24">
+                            <rect x="3" y="3" width="7" height="7"></rect>
+                            <rect x="14" y="3" width="7" height="7"></rect>
+                            <rect x="14" y="14" width="7" height="7"></rect>
+                            <rect x="3" y="14" width="7" height="7"></rect>
+                        </svg>
+                        <span>任务仪表盘</span>
+                    </a>
+                    <a href="{{ url_for('config') }}"
+                        class="nav-link {% if request.endpoint == 'config' %}active{% endif %}">
+                        <svg class="icon" viewBox="0 0 24 24">
+                            <circle cx="12" cy="12" r="3"></circle>
+                            <path d="M12 1v6m0 10v6m11-11h-6M7 12H1m18.4-7.4-4.2 4.2M8.8 15.2l-4.2 4.2m14.8 0-4.2-4.2M8.8 8.8 4.6 4.6"></path>
+                        </svg>
+                        <span>同步设置</span>
+                    </a>
+                    <a href="{{ url_for('tg_login') }}"
+                        class="nav-link {% if request.endpoint == 'tg_login' %}active{% endif %}">
+                        <svg class="icon" viewBox="0 0 24 24">
+                            <path d="M21.5 2.5 2 10l8 3 3 8 8.5-18.5z"></path>
+                            <path d="m10 13 4-4"></path>
+                        </svg>
+                        <span>Telegram 账号</span>
+                    </a>
+                </nav>
 
-            <div style="margin-top: auto; padding-top: 1rem; border-top: 1px solid var(--border);">
-                <button id="theme-toggle" class="nav-link w-full mb-2" onclick="toggleTheme()"
-                    style="justify-content: flex-start;">
-                    <!-- Moon Icon (for dark mode active) -->
-                    <svg class="icon theme-icon-dark" viewBox="0 0 24 24" id="icon-moon">
-                        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
-                    </svg>
-                    <!-- Sun Icon (for light mode active) -->
-                    <svg class="icon theme-icon-light hidden" viewBox="0 0 24 24" id="icon-sun">
-                        <circle cx="12" cy="12" r="5"></circle>
-                        <line x1="12" y1="1" x2="12" y2="3"></line>
-                        <line x1="12" y1="21" x2="12" y2="23"></line>
-                        <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
-                        <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
-                        <line x1="1" y1="12" x2="3" y2="12"></line>
-                        <line x1="21" y1="12" x2="23" y2="12"></line>
-                        <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
-                        <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
-                    </svg>
-                    <span id="theme-text">切换模式</span>
-                </button>
-                <p class="text-xs text-secondary">版本: <span id="app-version">加载中...</span></p>
-            </div>
-        </aside>
+                <div class="sidebar-footer">
+                    <div class="sidebar-status">
+                        <span class="status-dot"></span>
+                        <div>
+                            <div class="sidebar-status-title">运行中</div>
+                            <div class="sidebar-status-subtitle">Postgres + Telegram runtime</div>
+                        </div>
+                    </div>
+                </div>
+            </aside>
 
-        <!-- Main Content -->
-        <main class="main-content">
-            {% block content %}{% endblock %}
-        </main>
+            <main class="main-content">
+                {% block content %}{% endblock %}
+            </main>
+        </div>
     </div>
 
     <script src="{{ url_for('static', filename='js/app.js') }}"></script>
@@ -134,6 +157,11 @@
                 sun.classList.add('hidden');
                 // text.textContent = '夜间模式';
             }
+        }
+
+        function toggleSidebar() {
+            const sidebar = document.getElementById('sidebar');
+            if (sidebar) sidebar.classList.toggle('active');
         }
     </script>
     {% block scripts %}{% endblock %}
