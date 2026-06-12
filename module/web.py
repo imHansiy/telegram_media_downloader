@@ -26,6 +26,17 @@ from pyrogram import Client, errors
 import utils
 from module.app import Application
 from module.db import db
+from module.profiles import (
+    activate_profile,
+    clear_profile_session,
+    create_profile,
+    delete_profile,
+    get_active_profile,
+    get_profiles,
+    save_active_profile,
+    sync_active_profile_to_legacy,
+    update_profile,
+)
 from module.download_stat import (
     DownloadState,
     get_download_result,
@@ -102,6 +113,14 @@ def _render_spa():
 
 def _load_current_config() -> dict:
     """Load current config from DB or in-memory app."""
+    if db.conn:
+        try:
+            active_profile = get_active_profile()
+            if active_profile.get("config"):
+                return active_profile["config"]
+        except Exception as e:
+            print(f"DEBUG: [config] Failed to load active profile config: {e}")
+
     current_config = {}
     if db.conn:
         current_config = db.load_setting("config") or {}
@@ -118,6 +137,7 @@ def _save_current_config(new_config: dict) -> dict:
         return {"status": "error", "message": "Database not connected"}
 
     db.save_setting("config", new_config)
+    save_active_profile(config=new_config, sync_legacy=False)
 
     if _app_instance:
         print("DEBUG: [web] Updating in-memory app config from Web UI")
@@ -135,35 +155,90 @@ def _save_current_config(new_config: dict) -> dict:
     }
 
 
-def _get_telegram_account_status() -> dict:
-    """Return Telegram session state for the React UI."""
-    saved_session = db.load_setting("session") if db.conn else None
-    status = {
-        "logged_in": False,
-        "session_exists": bool(saved_session),
-        "account": None,
+def _account_payload_from_user(me) -> dict:
+    """Build a serializable Telegram account payload."""
+    first_name = getattr(me, "first_name", None) or ""
+    last_name = getattr(me, "last_name", None) or ""
+    full_name = f"{first_name} {last_name}".strip() or getattr(me, "username", None) or str(me.id)
+    return {
+        "id": str(me.id),
+        "phoneNumber": getattr(me, "phone_number", None) or "",
+        "username": f"@{me.username}" if getattr(me, "username", None) else "",
+        "firstName": full_name,
+        "isPremium": getattr(me, "is_premium", False),
     }
 
-    if _client and _client.is_connected:
+
+def _get_client_account_meta(client: Client = None) -> dict | None:
+    """Read account metadata from a connected Pyrogram client."""
+    client = client or _client
+    if not client:
+        return None
+
+    try:
+        me = getattr(client, "me", None)
+        if not me and getattr(client, "is_connected", False) and _app_instance:
+            future = asyncio.run_coroutine_threadsafe(client.get_me(), _app_instance.loop)
+            me = future.result(timeout=30)
+        if me:
+            return _account_payload_from_user(me)
+    except Exception as e:
+        print(f"DEBUG: [account_meta] Error getting user info: {e}")
+
+    return None
+
+
+def _profile_to_account(profile: dict, active_profile_id: str, connected_meta: dict | None = None) -> dict:
+    """Convert a profile into the React account card shape."""
+    is_active = profile["id"] == active_profile_id
+    account = connected_meta if is_active and connected_meta else (profile.get("account") or {})
+    profile_name = profile.get("name") or account.get("firstName") or "Telegram Profile"
+
+    return {
+        "id": profile["id"],
+        "profileId": profile["id"],
+        "profileName": profile_name,
+        "userId": str(account.get("id") or ""),
+        "phoneNumber": account.get("phoneNumber") or "",
+        "username": account.get("username") or "",
+        "firstName": account.get("firstName") or profile_name,
+        "status": "connected" if is_active and connected_meta else "disconnected",
+        "sessionName": "active_session" if is_active else "saved_session",
+        "createdAt": profile.get("created_at") or "",
+        "hasSession": bool(profile.get("session")),
+        "isActive": is_active,
+    }
+
+
+def _get_telegram_account_status() -> dict:
+    """Return Telegram session state for the React UI."""
+    active_profile = get_active_profile() if db.conn else {}
+    active_profile_id = active_profile.get("id")
+    saved_session = active_profile.get("session") if active_profile else None
+    connected_meta = _get_client_account_meta(_client) if _client and _client.is_connected else None
+
+    if connected_meta and db.conn:
         try:
-            me = _client.me
-            if me:
-                first_name = me.first_name or ""
-                last_name = me.last_name or ""
-                full_name = f"{first_name} {last_name}".strip() or me.username or str(me.id)
-                status["logged_in"] = True
-                status["account"] = {
-                    "id": str(me.id),
-                    "phoneNumber": me.phone_number or "",
-                    "username": f"@{me.username}" if me.username else "",
-                    "firstName": full_name,
-                    "status": "connected",
-                    "sessionName": "database_session",
-                    "createdAt": "",
-                    "isPremium": getattr(me, "is_premium", False),
-                }
+            profile_name = connected_meta.get("firstName") or active_profile.get("name")
+            save_active_profile(account=connected_meta, name=profile_name, sync_legacy=False)
+            active_profile = get_active_profile()
         except Exception as e:
-            print(f"DEBUG: [account_status] Error getting user info: {e}")
+            print(f"DEBUG: [account_status] Failed to save account metadata: {e}")
+
+    profiles = get_profiles() if db.conn else []
+    accounts = [
+        _profile_to_account(profile, active_profile_id, connected_meta)
+        for profile in profiles
+    ]
+    active_account = next((item for item in accounts if item["id"] == active_profile_id), None)
+
+    status = {
+        "logged_in": bool(connected_meta),
+        "session_exists": bool(saved_session),
+        "account": active_account if active_account and active_account.get("hasSession") else None,
+        "accounts": accounts,
+        "active_profile_id": active_profile_id,
+    }
 
     return status
 
@@ -384,19 +459,197 @@ def api_account_status():
     return jsonify(_get_telegram_account_status())
 
 
+@_flask_app.route("/api/profiles", methods=["POST"])
+@login_required
+def api_profiles_create():
+    """Create a Telegram account/config profile."""
+    global _client
+    try:
+        if not db.conn:
+            return jsonify({"success": False, "message": "Database not connected"}), 503
+
+        data = request.get_json(silent=True) or {}
+        active_profile = get_active_profile()
+        copy_current_config = bool(
+            data.get("copy_current_config", data.get("clone_config", True))
+        )
+        activate = bool(data.get("activate", False))
+        profile = create_profile(
+            name=data.get("name") or data.get("profile_name") or "新账户",
+            config=active_profile.get("config") if copy_current_config else {},
+            app_data=active_profile.get("app_data") if copy_current_config else {},
+            bot_setting=active_profile.get("bot_setting") if copy_current_config else {},
+            activate=activate,
+        )
+
+        runtime_result = None
+        if activate:
+            _apply_profile_to_app(profile)
+            if _stop_runtime_callback:
+                runtime_result = _stop_runtime_callback()
+            _client = None
+
+        return jsonify(
+            {
+                "success": True,
+                "message": "Profile created.",
+                "profile": profile,
+                "runtime": runtime_result,
+                "account": _get_telegram_account_status(),
+            }
+        )
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@_flask_app.route("/api/profiles/update", methods=["POST", "PATCH"])
+@_flask_app.route("/api/profiles/<profile_id>", methods=["PATCH"])
+@login_required
+def api_profiles_update(profile_id=None):
+    """Update profile metadata."""
+    try:
+        if not db.conn:
+            return jsonify({"success": False, "message": "Database not connected"}), 503
+
+        data = request.get_json(silent=True) or {}
+        profile_id = profile_id or data.get("profile_id") or data.get("profileId")
+        name = (data.get("name") or data.get("profile_name") or "").strip()
+        if not profile_id:
+            return jsonify({"success": False, "message": "profile_id is required"}), 400
+        if not name:
+            return jsonify({"success": False, "message": "name is required"}), 400
+
+        profile = update_profile(profile_id, name=name)
+        return jsonify(
+            {
+                "success": True,
+                "message": "Profile updated.",
+                "profile": profile,
+                "account": _get_telegram_account_status(),
+            }
+        )
+    except KeyError:
+        return jsonify({"success": False, "message": "Profile not found"}), 404
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@_flask_app.route("/api/profiles/delete", methods=["POST"])
+@_flask_app.route("/api/profiles/<profile_id>", methods=["DELETE"])
+@login_required
+def api_profiles_delete(profile_id=None):
+    """Delete a non-active profile."""
+    try:
+        if not db.conn:
+            return jsonify({"success": False, "message": "Database not connected"}), 503
+
+        data = request.get_json(silent=True) or {}
+        profile_id = profile_id or data.get("profile_id") or data.get("profileId")
+        if not profile_id:
+            return jsonify({"success": False, "message": "profile_id is required"}), 400
+
+        delete_profile(profile_id)
+        return jsonify(
+            {
+                "success": True,
+                "message": "Profile deleted.",
+                "account": _get_telegram_account_status(),
+            }
+        )
+    except KeyError:
+        return jsonify({"success": False, "message": "Profile not found"}), 404
+    except ValueError as e:
+        return jsonify({"success": False, "message": str(e)}), 400
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@_flask_app.route("/api/profiles/activate", methods=["POST"])
+@login_required
+def api_profiles_activate():
+    """Switch the active Telegram account/config profile."""
+    global _client
+    try:
+        if not db.conn:
+            return jsonify({"success": False, "message": "Database not connected"}), 503
+
+        data = request.get_json(silent=True) or {}
+        profile_id = data.get("profile_id") or data.get("profileId")
+        if not profile_id:
+            return jsonify({"success": False, "message": "profile_id is required"}), 400
+
+        active_profile = activate_profile(profile_id)
+        _apply_profile_to_app(active_profile)
+
+        runtime_result = {
+            "status": "not_started",
+            "message": "Profile activated. No saved Telegram session for this profile.",
+        }
+        saved_session = active_profile.get("session")
+        if saved_session:
+            config_data = active_profile.get("config") or _load_current_config()
+            api_id = config_data.get("api_id") or _app_instance.api_id
+            api_hash = config_data.get("api_hash") or _app_instance.api_hash
+            if not api_id or not api_hash:
+                return jsonify(
+                    {
+                        "success": False,
+                        "message": "Profile activated, but api_id or api_hash is missing.",
+                        "account": _get_telegram_account_status(),
+                    }
+                ), 400
+
+            _client = _create_client_from_session(
+                api_id,
+                api_hash,
+                _app_instance.proxy,
+                _app_instance.session_file_path,
+                _app_instance.loop,
+                saved_session,
+            )
+            runtime_result = (
+                _start_runtime_callback(_client)
+                if _start_runtime_callback
+                else {"status": "not_started", "message": "Runtime callback is not configured."}
+            )
+        else:
+            if _stop_runtime_callback:
+                runtime_result = _stop_runtime_callback()
+            _client = None
+
+        return jsonify(
+            {
+                "success": True,
+                "message": "Profile activated.",
+                "runtime": runtime_result,
+                "account": _get_telegram_account_status(),
+            }
+        )
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
 @_flask_app.route("/api/account/logout", methods=["POST"])
 @login_required
 def api_account_logout():
     """Disconnect runtime and clear saved Telegram session."""
     global _client
     try:
-        if _stop_runtime_callback:
+        data = request.get_json(silent=True) or {}
+        active_profile = get_active_profile() if db.conn else {}
+        profile_id = data.get("profile_id") or data.get("profileId") or active_profile.get("id")
+        is_active = profile_id == active_profile.get("id")
+
+        if is_active and _stop_runtime_callback:
             _stop_runtime_callback()
 
-        if db.conn:
-            db.save_setting("session", None)
+        if db.conn and profile_id:
+            clear_profile_session(profile_id)
 
-        if _client:
+        if is_active and _client:
             try:
                 loop = _app_instance.loop
                 if _client.is_connected:
@@ -406,7 +659,13 @@ def api_account_logout():
                 print(f"DEBUG: [api_account_logout] Error disconnecting client: {e}")
             _client = None
 
-        return jsonify({"success": True, "message": "Session disconnected."})
+        return jsonify(
+            {
+                "success": True,
+                "message": "Session disconnected.",
+                "account": _get_telegram_account_status(),
+            }
+        )
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
@@ -420,11 +679,19 @@ def api_account_connect_saved_session():
         if not db.conn:
             return jsonify({"success": False, "message": "Database not connected"}), 503
 
-        saved_session = db.load_setting("session")
+        data = request.get_json(silent=True) or {}
+        requested_profile_id = data.get("profile_id") or data.get("profileId")
+        if requested_profile_id:
+            active_profile = activate_profile(requested_profile_id)
+            _apply_profile_to_app(active_profile)
+        else:
+            active_profile = get_active_profile()
+
+        saved_session = active_profile.get("session") or db.load_setting("session")
         if not saved_session:
             return jsonify({"success": False, "message": "No saved Telegram session found."}), 404
 
-        config_data = _load_current_config()
+        config_data = active_profile.get("config") or _load_current_config()
         api_id = config_data.get("api_id") or _app_instance.api_id
         api_hash = config_data.get("api_hash") or _app_instance.api_hash
         if not api_id or not api_hash:
@@ -462,9 +729,31 @@ def api_account_send_code():
     if not phone_number:
         return jsonify({"success": False, "message": "phone_number is required"}), 400
 
+    create_profile_flag = bool(data.get("create_profile", True))
+    target_profile_id = data.get("profile_id") or data.get("profileId")
     session["phone_number"] = phone_number
+    session["login_create_profile"] = create_profile_flag
+    session["login_profile_id"] = target_profile_id
+    session["login_profile_name"] = data.get("profile_name") or data.get("profileName") or phone_number
 
     try:
+        if create_profile_flag or target_profile_id:
+            if _stop_runtime_callback:
+                _stop_runtime_callback()
+            if _client:
+                try:
+                    loop = _app_instance.loop
+                    if _client.is_connected:
+                        future = asyncio.run_coroutine_threadsafe(_client.disconnect(), loop)
+                        future.result(timeout=10)
+                except Exception as e:
+                    print(f"DEBUG: [api_account_send_code] Error disconnecting active client: {e}")
+                _client = None
+
+        if target_profile_id and not create_profile_flag:
+            target_profile = activate_profile(target_profile_id)
+            _apply_profile_to_app(target_profile)
+
         config_data = _load_current_config()
         api_id = data.get("api_id") or config_data.get("api_id") or _app_instance.api_id
         api_hash = data.get("api_hash") or config_data.get("api_hash") or _app_instance.api_hash
@@ -675,6 +964,20 @@ def _sync_web_login_secret():
         _flask_app.config["LOGIN_DISABLED"] = True
 
 
+def _apply_profile_to_app(profile: dict):
+    """Apply a profile's config/data to the in-memory application."""
+    if not _app_instance:
+        return
+
+    _app_instance.chat_download_config = {}
+    _app_instance._chat_id = ""
+    _app_instance.config = profile.get("config") or {}
+    _app_instance.assign_config(_app_instance.config)
+    _app_instance.app_data = profile.get("app_data") or {}
+    _app_instance.assign_app_data(_app_instance.app_data)
+    _sync_web_login_secret()
+
+
 def _save_session_and_start_runtime(client):
     """Persist Telegram session and start runtime tasks if a callback is available."""
     print("DEBUG: [tg_login] Calling export_session_string...")
@@ -687,12 +990,40 @@ def _save_session_and_start_runtime(client):
         f"{len(session_string) if session_string else 0}"
     )
 
+    account_meta = _get_client_account_meta(client) or {}
+    display_name = (
+        session.pop("login_profile_name", None)
+        or account_meta.get("firstName")
+        or account_meta.get("username")
+        or "Telegram Profile"
+    )
+    target_profile_id = session.pop("login_profile_id", None)
+    create_new_profile = bool(session.pop("login_create_profile", False))
+
     if db.conn:
-        print("DEBUG: [tg_login] Saving session to database...")
-        db.save_setting("session", session_string)
-        print("DEBUG: [tg_login] Session saved successfully.")
+        print("DEBUG: [tg_login] Saving session to active profile...")
+        if create_new_profile or not target_profile_id:
+            create_profile(
+                name=display_name,
+                config=_load_current_config(),
+                session=session_string,
+                account=account_meta,
+                activate=True,
+            )
+        else:
+            update_profile(
+                target_profile_id,
+                name=display_name,
+                session=session_string,
+                account=account_meta,
+            )
+            activate_profile(target_profile_id)
+        print("DEBUG: [tg_login] Profile session saved successfully.")
     else:
         print("WARNING: [tg_login] Database not connected, session NOT saved!")
+
+    if _app_instance and db.conn:
+        _apply_profile_to_app(get_active_profile())
 
     runtime_result = {"status": "not_started", "message": "Runtime callback is not configured."}
     if _start_runtime_callback:
@@ -749,7 +1080,7 @@ def tg_login():
 
             # Clear session from database
             if db.conn:
-                db.save_setting("session", None)
+                clear_profile_session(get_active_profile()["id"])
                 print("DEBUG: [tg_login] Session cleared from database")
             
             # Disconnect and clear client
@@ -776,11 +1107,12 @@ def tg_login():
             if not db.conn:
                 return "Error: Database not connected"
 
-            saved_session = db.load_setting("session")
+            active_profile = get_active_profile()
+            saved_session = active_profile.get("session")
             if not saved_session:
                 return "Error: No saved Telegram session found."
 
-            config = db.load_setting("config") or {}
+            config = active_profile.get("config") or _load_current_config()
             api_id = config.get("api_id") or _app_instance.api_id
             api_hash = config.get("api_hash") or _app_instance.api_hash
             if not api_id or not api_hash:
@@ -810,10 +1142,25 @@ def tg_login():
     if request.method == "POST" and request.form.get("phone_number"):
         phone_number = request.form.get("phone_number")
         session["phone_number"] = phone_number
+        session["login_create_profile"] = True
+        session["login_profile_id"] = None
+        session["login_profile_name"] = phone_number
 
         try:
+            if _stop_runtime_callback:
+                _stop_runtime_callback()
+            if _client:
+                try:
+                    loop = _app_instance.loop
+                    if _client.is_connected:
+                        future = asyncio.run_coroutine_threadsafe(_client.disconnect(), loop)
+                        future.result(timeout=10)
+                except Exception as e:
+                    print(f"DEBUG: [tg_login] Error disconnecting active client: {e}")
+                _client = None
+
             # 1. Ensure we have api_id and api_hash
-            config = db.load_setting("config") or {}
+            config = _load_current_config()
             api_id = config.get("api_id") or _app_instance.api_id
             api_hash = config.get("api_hash") or _app_instance.api_hash
 

@@ -87,6 +87,8 @@ upload_drive:
 web_host: 0.0.0.0
 web_port: 5000
 web_login_secret: "123456"
+bot_download_access_mode: self  # self, allowed, public
+allowed_user_ids: []  # Used when bot_download_access_mode is allowed
 language: ZH
 max_download_task: 5
 ```
@@ -106,6 +108,15 @@ By setting `upload_adapter: webdav`, the downloader will bypass local storage an
 
 ### 3. Telegram Bot
 Send commands to your bot to trigger batch downloads or check status.
+
+### 4. Multiple Account Profiles
+The Web UI can store multiple Telegram account profiles. Each profile keeps its
+own Telegram session, app config, and bot submission access settings. You can
+create blank profiles, clone the current config into a new profile, rename
+profiles, delete inactive profiles, and write a new Telegram login into a
+specific profile. The current runtime activates one profile at a time; switching
+profiles stops the old runtime and starts the selected profile with its saved
+config/session.
 
 ## 🤝 Contributing
 Read through our [contributing guidelines](./CONTRIBUTING.md) to learn about our submission process and coding rules.

@@ -26,6 +26,7 @@ from module.download_stat import (
 )
 from module.get_chat_history_v2 import get_chat_history_v2
 from module.language import _t
+from module.profiles import save_active_profile, sync_active_profile_to_legacy
 from module.pyrogram_extension import (
     HookClient,
     fetch_message,
@@ -788,6 +789,26 @@ def main():
     tasks = []
     runtime_started = False
 
+    if db.conn:
+        try:
+            active_profile = sync_active_profile_to_legacy()
+            active_config = active_profile.get("config") or {}
+            active_app_data = active_profile.get("app_data") or {}
+            if active_config:
+                app.chat_download_config = {}
+                app._chat_id = ""
+                app.config = active_config
+                app.assign_config(active_config)
+            if active_app_data:
+                app.app_data = active_app_data
+                app.assign_app_data(active_app_data)
+            logger.info(
+                f"Active profile loaded: {active_profile.get('name')} "
+                f"({active_profile.get('id')})"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to sync active profile on startup: {e}")
+
     # Try to load session from DB, but don't force it yet
     session_string = None
     print(f"DEBUG: [main] db.conn is: {db.conn}")
@@ -882,7 +903,7 @@ def main():
                 session = client.export_session_string()
                 if inspect.isawaitable(session):
                     session = await session
-                db.save_setting("session", session)
+                save_active_profile(session=session)
                 logger.info("Telegram session saved after runtime activation.")
             except Exception as e:
                 logger.warning(f"Failed to export/save session string: {e}")
@@ -985,7 +1006,7 @@ def main():
                     "Clearing session and entering Web UI mode for re-login."
                 )
                 if db.conn:
-                    db.save_setting("session", None)
+                    save_active_profile(session=None)
                     logger.info("Invalid session cleared from database.")
 
                 # Reset client
@@ -1008,7 +1029,7 @@ def main():
                         s = client.export_session_string()
                         if inspect.isawaitable(s):
                             s = app.loop.run_until_complete(s)
-                        db.save_setting("session", s)
+                        save_active_profile(session=s)
                         print(
                             f"DEBUG: [main] Session saved to DB, length: {len(s) if s else 0}"
                         )

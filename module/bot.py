@@ -28,6 +28,7 @@ from module.db import db
 from module.filter import Filter
 from module.get_chat_history_v2 import get_chat_history_v2
 from module.language import Language, _t
+from module.profiles import save_active_profile
 from module.pyrogram_extension import (
     check_user_permission,
     get_utf16_length,
@@ -72,6 +73,7 @@ class DownloadBot:
         self.download_filter: List[str] = []
         self.task_id: int = 0
         self.reply_task = None
+        self.admin_user_ids: List[Union[int, str]] = []
 
     def gen_task_id(self) -> int:
         """Gen task id"""
@@ -140,11 +142,61 @@ class DownloadBot:
 
         return True
 
+    def user_in_allowed_config(self, user: pyrogram.types.User) -> bool:
+        """Check configured allowed users without requiring a bot restart."""
+
+        user_id = str(user.id)
+        username = (user.username or "").lower().lstrip("@")
+
+        for allowed_user_id in self.allowed_user_ids:
+            if user_id == str(allowed_user_id):
+                return True
+
+        for allowed_user_id in getattr(self.app, "allowed_user_ids", []) or []:
+            value = str(allowed_user_id).strip()
+            if not value:
+                continue
+            if user_id == value:
+                return True
+            if username and username == value.lower().lstrip("@"):
+                return True
+
+        return False
+
+    def can_submit_download(self, message: pyrogram.types.Message) -> bool:
+        """Check whether a message sender can submit bot download jobs."""
+
+        if not message.from_user:
+            return False
+
+        if str(message.from_user.id) in {str(item) for item in self.admin_user_ids}:
+            return True
+
+        if not message.chat or message.chat.type != pyrogram.enums.ChatType.PRIVATE:
+            return False
+
+        access_mode = getattr(self.app, "bot_download_access_mode", "self")
+        if access_mode == "public":
+            return True
+        if access_mode == "allowed":
+            return self.user_in_allowed_config(message.from_user)
+
+        return False
+
+    def download_submitter_filter(self):
+        """Allow permitted users to submit direct media and link downloads."""
+
+        def check(_, __, message: pyrogram.types.Message):
+            return self.can_submit_download(message)
+
+        return pyrogram.filters.create(check, "DownloadSubmitterFilter")
+
     def update_config(self):
         """Update config to database."""
         self.config["download_filter"] = self.download_filter
         if db.conn:
             db.save_setting("bot_setting", self.config)
+            save_active_profile(bot_setting=self.config, sync_legacy=False)
         else:
             # Fallback to file if DB is not available (though user said it is PG now)
             try:
@@ -163,6 +215,7 @@ class DownloadBot:
         """Start bot"""
         self.is_running = True
         self.allowed_user_ids = []
+        self.admin_user_ids = []
         self.monitor_task = None
         self.bot = pyrogram.Client(
             app.application_name + "_bot",
@@ -274,80 +327,83 @@ class DownloadBot:
                 logger.warning(f"set allowed_user_ids error: {e}")
 
         admin = await self.client.get_me()
-        self.allowed_user_ids.append(admin.id)
+        self.admin_user_ids.append(admin.id)
         logger.info(f"Admin user added: {admin.first_name} (ID: {admin.id})")
-        logger.info(f"Total allowed user IDs: {self.allowed_user_ids}")
+        logger.info(f"Configured allowed user IDs: {self.allowed_user_ids}")
+        logger.info(f"Bot download access mode: {self.app.bot_download_access_mode}")
 
         await self.bot.set_bot_commands(commands)
+
+        admin_filter = pyrogram.filters.user(self.admin_user_ids)
+        download_submitter_filter = self.download_submitter_filter()
 
         self.bot.add_handler(
             MessageHandler(
                 download_from_bot,
                 filters=pyrogram.filters.command(["download"])
-                & pyrogram.filters.user(self.allowed_user_ids),
+                & admin_filter,
             )
         )
         self.bot.add_handler(
             MessageHandler(
                 forward_messages,
                 filters=pyrogram.filters.command(["forward"])
-                & pyrogram.filters.user(self.allowed_user_ids),
+                & admin_filter,
             )
         )
         self.bot.add_handler(
             MessageHandler(
                 download_forward_media,
-                filters=pyrogram.filters.media
-                & pyrogram.filters.user(self.allowed_user_ids),
+                filters=pyrogram.filters.media & download_submitter_filter,
             )
         )
         self.bot.add_handler(
             MessageHandler(
                 download_from_link,
                 filters=pyrogram.filters.regex(r"^https://t.me.*")
-                & pyrogram.filters.user(self.allowed_user_ids),
+                & download_submitter_filter,
             )
         )
         self.bot.add_handler(
             MessageHandler(
                 set_listen_forward_msg,
                 filters=pyrogram.filters.command(["listen_forward"])
-                & pyrogram.filters.user(self.allowed_user_ids),
+                & admin_filter,
             )
         )
         self.bot.add_handler(
             MessageHandler(
                 help_command,
                 filters=pyrogram.filters.command(["help"])
-                & pyrogram.filters.user(self.allowed_user_ids),
+                & admin_filter,
             )
         )
         self.bot.add_handler(
             MessageHandler(
                 get_info,
                 filters=pyrogram.filters.command(["get_info"])
-                & pyrogram.filters.user(self.allowed_user_ids),
+                & admin_filter,
             )
         )
         self.bot.add_handler(
             MessageHandler(
                 help_command,
                 filters=pyrogram.filters.command(["start"])
-                & pyrogram.filters.user(self.allowed_user_ids),
+                & admin_filter,
             )
         )
         self.bot.add_handler(
             MessageHandler(
                 set_language,
                 filters=pyrogram.filters.command(["set_language"])
-                & pyrogram.filters.user(self.allowed_user_ids),
+                & admin_filter,
             )
         )
         self.bot.add_handler(
             MessageHandler(
                 add_filter,
                 filters=pyrogram.filters.command(["add_filter"])
-                & pyrogram.filters.user(self.allowed_user_ids),
+                & admin_filter,
             )
         )
 
@@ -355,7 +411,7 @@ class DownloadBot:
             MessageHandler(
                 stop,
                 filters=pyrogram.filters.command(["stop"])
-                & pyrogram.filters.user(self.allowed_user_ids),
+                & admin_filter,
             )
         )
 
@@ -363,14 +419,12 @@ class DownloadBot:
             MessageHandler(
                 system_status,
                 filters=pyrogram.filters.command(["status"])
-                & pyrogram.filters.user(self.allowed_user_ids),
+                & admin_filter,
             )
         )
 
         self.bot.add_handler(
-            CallbackQueryHandler(
-                on_query_handler, filters=pyrogram.filters.user(self.allowed_user_ids)
-            )
+            CallbackQueryHandler(on_query_handler, filters=admin_filter)
         )
 
         try:
@@ -384,7 +438,7 @@ class DownloadBot:
             MessageHandler(
                 forward_to_comments,
                 filters=pyrogram.filters.command(["forward_to_comments"])
-                & pyrogram.filters.user(self.allowed_user_ids),
+                & admin_filter,
             )
         )
 
@@ -1065,11 +1119,20 @@ async def download_from_link(client: pyrogram.Client, message: pyrogram.types.Me
             message.from_user.id, msg, parse_mode=pyrogram.enums.ParseMode.HTML
         )
 
-    chat_id, message_id, _ = await parse_link(_bot.client, text[0])
+    try:
+        chat_id, message_id, _ = await parse_link(_bot.client, text[0])
+        entity = None
+        if chat_id:
+            entity = await _bot.client.get_chat(chat_id)
+    except Exception as e:
+        logger.warning(f"[download_from_link] Failed to read link {text[0]}: {e}")
+        await client.send_message(
+            message.from_user.id,
+            f"{_t('download')} {_t('error')}: {e}",
+            reply_to_message_id=message.id,
+        )
+        return
 
-    entity = None
-    if chat_id:
-        entity = await _bot.client.get_chat(chat_id)
     if entity:
         if message_id:
             download_message = await retry(
@@ -1107,7 +1170,7 @@ async def download_from_link(client: pyrogram.Client, message: pyrogram.types.Me
                     # Single message, download directly
                     await direct_download(_bot, entity.id, message, download_message)
             else:
-                client.send_message(
+                await client.send_message(
                     message.from_user.id,
                     f"{_t('From')} {entity.title} {_t('download')} {message_id} {_t('error')}!",
                     reply_to_message_id=message.id,

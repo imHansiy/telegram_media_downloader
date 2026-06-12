@@ -25,6 +25,7 @@ import { ConfigPanel } from './components/ConfigPanel';
 import { FileManager } from './components/FileManager';
 import { TaskTable } from './components/TaskTable';
 import {
+  BotAccessConfig,
   CloudStorageConfig,
   CompletedFile,
   MediaType,
@@ -62,6 +63,8 @@ interface BootstrapPayload {
     logged_in: boolean;
     session_exists: boolean;
     account: TelegramAccount | null;
+    accounts?: TelegramAccount[];
+    active_profile_id?: string;
   };
 }
 
@@ -85,6 +88,11 @@ const defaultRule: SyncRule = {
   savePathPattern: 'channel_date',
   autoSync: true,
   dateThreshold: new Date(new Date().getFullYear(), 0, 1).toISOString().slice(0, 10),
+};
+
+const defaultBotAccess: BotAccessConfig = {
+  mode: 'self',
+  allowedUsers: [],
 };
 
 function parseHumanBytes(value?: string): number {
@@ -196,6 +204,25 @@ function ruleFromConfig(config: Record<string, any>): SyncRule {
   };
 }
 
+function botAccessFromConfig(config: Record<string, any>): BotAccessConfig {
+  const configuredMode = config.bot_download_access_mode;
+  let mode: BotAccessConfig['mode'] = 'self';
+  const allowedUsers = Array.isArray(config.allowed_user_ids) ? config.allowed_user_ids.map(String) : [];
+
+  if (configuredMode === 'self' || configuredMode === 'allowed' || configuredMode === 'public') {
+    mode = configuredMode;
+  } else if (config.bot_allow_public_download) {
+    mode = 'public';
+  } else if (allowedUsers.length > 0) {
+    mode = 'allowed';
+  }
+
+  return {
+    mode,
+    allowedUsers,
+  };
+}
+
 function applyUiConfig(
   currentConfig: Record<string, any>,
   cloud: CloudStorageConfig,
@@ -222,6 +249,18 @@ function applyUiConfig(
   }
 
   return next;
+}
+
+function applyBotAccessConfig(
+  currentConfig: Record<string, any>,
+  botAccess: BotAccessConfig,
+): Record<string, any> {
+  return {
+    ...currentConfig,
+    bot_download_access_mode: botAccess.mode,
+    bot_allow_public_download: botAccess.mode === 'public',
+    allowed_user_ids: botAccess.allowedUsers,
+  };
 }
 
 function tabFromPath(): ActiveTab {
@@ -257,6 +296,7 @@ export default function App() {
   const [rawConfig, setRawConfig] = useState<Record<string, any>>({});
   const [cloudConfig, setCloudConfig] = useState<CloudStorageConfig>(defaultCloudConfig);
   const [syncRule, setSyncRule] = useState<SyncRule>(defaultRule);
+  const [botAccess, setBotAccess] = useState<BotAccessConfig>(defaultBotAccess);
   const [tasks, setTasks] = useState<SyncTask[]>([]);
   const [completedFiles, setCompletedFiles] = useState<CompletedFile[]>([]);
   const [accounts, setAccounts] = useState<TelegramAccount[]>([]);
@@ -284,11 +324,15 @@ export default function App() {
   }, [isSidebarCollapsed]);
 
   const applyAccountStatus = (accountStatus: BootstrapPayload['account']) => {
+    const accountList = Array.isArray(accountStatus.accounts) ? accountStatus.accounts : [];
     const account = accountStatus.account;
     setSessionExists(accountStatus.session_exists);
-    if (account) {
+    if (accountList.length > 0) {
+      setAccounts(accountList);
+      setActiveAccountId(accountStatus.active_profile_id || accountList.find((item) => item.isActive)?.id || accountList[0].id);
+    } else if (account) {
       setAccounts([account]);
-      setActiveAccountId(account.id);
+      setActiveAccountId(accountStatus.active_profile_id || account.id);
     } else {
       setAccounts([]);
       setActiveAccountId(null);
@@ -303,6 +347,7 @@ export default function App() {
     setRawConfig(payload.config || {});
     setCloudConfig(cloudFromConfig(payload.config || {}));
     setSyncRule(ruleFromConfig(payload.config || {}));
+    setBotAccess(botAccessFromConfig(payload.config || {}));
     applyAccountStatus(payload.account);
   };
 
@@ -327,13 +372,23 @@ export default function App() {
   }, []);
 
   const saveConfig = async (cloud: CloudStorageConfig, rule: SyncRule) => {
-    const next = applyUiConfig(rawConfig, cloud, rule);
+    const next = applyBotAccessConfig(applyUiConfig(rawConfig, cloud, rule), botAccess);
     const result = await postJson<{ status: string; message: string; config?: Record<string, any> }>('/api/config', {
       config: next,
     });
     setRawConfig(next);
     setCloudConfig(cloud);
     setSyncRule(rule);
+    setStatusMessage(result.message || '配置已保存。');
+  };
+
+  const saveBotAccess = async (nextBotAccess: BotAccessConfig) => {
+    const next = applyBotAccessConfig(rawConfig, nextBotAccess);
+    const result = await postJson<{ status: string; message: string; config?: Record<string, any> }>('/api/config', {
+      config: next,
+    });
+    setRawConfig(next);
+    setBotAccess(nextBotAccess);
     setStatusMessage(result.message || '配置已保存。');
   };
 
@@ -352,26 +407,77 @@ export default function App() {
     applyAccountStatus(data);
   };
 
-  const handleConnectSaved = async () => {
-    const data = await postJson<{ account: BootstrapPayload['account']; runtime?: any }>('/api/account/connect_saved_session', {});
+  const handleSelectAccount = async (profileId: string) => {
+    const data = await postJson<{ account: BootstrapPayload['account']; runtime?: any }>('/api/profiles/activate', {
+      profile_id: profileId,
+    });
     applyAccountStatus(data.account);
+    await loadBootstrap();
+    setStatusMessage(data.runtime?.message || '账户档案已切换。');
+  };
+
+  const handleCreateProfile = async (name: string, copyCurrentConfig: boolean, activate = false) => {
+    const data = await postJson<{ account: BootstrapPayload['account']; runtime?: any }>('/api/profiles', {
+      name,
+      copy_current_config: copyCurrentConfig,
+      activate,
+    });
+    applyAccountStatus(data.account);
+    if (activate) await loadBootstrap();
+    setStatusMessage(copyCurrentConfig ? '已复制当前配置创建账号档案。' : '已创建空账号档案。');
+  };
+
+  const handleRenameProfile = async (profileId: string, name: string) => {
+    const data = await postJson<{ account: BootstrapPayload['account'] }>('/api/profiles/update', {
+      profile_id: profileId,
+      name,
+    });
+    applyAccountStatus(data.account);
+    setStatusMessage('账号档案已重命名。');
+  };
+
+  const handleDeleteProfile = async (profileId: string) => {
+    const data = await postJson<{ account: BootstrapPayload['account'] }>('/api/profiles/delete', {
+      profile_id: profileId,
+    });
+    applyAccountStatus(data.account);
+    setStatusMessage('账号档案已删除。');
+  };
+
+  const handleConnectSaved = async (profileId?: string) => {
+    const data = await postJson<{ account: BootstrapPayload['account']; runtime?: any }>('/api/account/connect_saved_session', {
+      profile_id: profileId,
+    });
+    applyAccountStatus(data.account);
+    await loadBootstrap();
     setStatusMessage(data.runtime?.message || '已连接保存的 Telegram session。');
   };
 
-  const handleLogout = async () => {
-    await postJson('/api/account/logout', {});
-    setAccounts([]);
-    setActiveAccountId(null);
-    setSessionExists(false);
+  const handleLogout = async (profileId?: string) => {
+    const data = await postJson<{ account: BootstrapPayload['account'] }>('/api/account/logout', {
+      profile_id: profileId,
+    });
+    applyAccountStatus(data.account);
     setStatusMessage('Telegram session 已断开。');
   };
 
-  const handleSendCode = async (phoneNumber: string, apiId?: string, apiHash?: string) => {
+  const handleSendCode = async (
+    phoneNumber: string,
+    apiId?: string,
+    apiHash?: string,
+    profileId?: string,
+    createProfile = true,
+    profileName?: string,
+  ) => {
     await postJson('/api/account/send_code', {
       phone_number: phoneNumber,
       api_id: apiId,
       api_hash: apiHash,
+      profile_id: profileId,
+      create_profile: createProfile,
+      profile_name: profileName || phoneNumber,
     });
+    if (profileId) await loadBootstrap();
   };
 
   const handleVerifyCode = async (code: string) => {
@@ -381,6 +487,7 @@ export default function App() {
     );
     if (data.needs_password) return { needsPassword: true };
     if (data.account) applyAccountStatus(data.account);
+    await loadBootstrap();
     setStatusMessage(data.runtime?.message || 'Telegram 登录成功。');
     return { needsPassword: false };
   };
@@ -390,6 +497,7 @@ export default function App() {
       password,
     });
     applyAccountStatus(data.account);
+    await loadBootstrap();
     setStatusMessage(data.runtime?.message || 'Telegram 登录成功。');
   };
 
@@ -619,13 +727,18 @@ export default function App() {
                 accounts={accounts}
                 activeAccountId={activeAccountId}
                 sessionExists={sessionExists}
-                onSelectAccount={setActiveAccountId}
+                onSelectAccount={handleSelectAccount}
+                onCreateProfile={handleCreateProfile}
+                onRenameProfile={handleRenameProfile}
+                onDeleteProfile={handleDeleteProfile}
                 onDisconnectAccount={handleLogout}
                 onConnectSavedSession={handleConnectSaved}
                 onSendCode={handleSendCode}
                 onVerifyCode={handleVerifyCode}
                 onVerifyPassword={handleVerifyPassword}
                 onRefresh={handleAccountRefresh}
+                botAccess={botAccess}
+                onSaveBotAccess={saveBotAccess}
               />
             </div>
           )}

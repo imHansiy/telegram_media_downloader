@@ -18,7 +18,6 @@ import {
   AlertTriangle, 
   Lock, 
   Key, 
-  Terminal, 
   CheckCircle2, 
   HelpCircle,
   FolderSync

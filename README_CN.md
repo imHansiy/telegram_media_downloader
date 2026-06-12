@@ -86,6 +86,8 @@ upload_drive:
 web_host: 0.0.0.0
 web_port: 5000
 web_login_secret: "123456"
+bot_download_access_mode: self  # self 仅自己, allowed 指定用户, public 全部用户
+allowed_user_ids: []  # bot_download_access_mode 为 allowed 时生效
 language: ZH
 max_download_task: 5
 ```
@@ -104,6 +106,12 @@ max_download_task: 5
 
 ### 3. 电报机器人操作
 直接向您的机器人发送命令进行批量下载或状态查询。
+
+### 4. 多账户与多配置档案
+Web UI 的“Telegram 接入管理”支持保存多个 Telegram 账户档案。每个档案保存独立的
+Telegram session、应用配置和 Bot 投递权限。可以创建空档案、复制当前配置新建档案、
+重命名档案、删除非活跃档案，也可以把一次新的 Telegram 登录写入指定档案。当前版本一次
+只运行一个激活档案，切换档案时会停止旧运行态并使用目标档案的配置与 session 热启动。
 
 ## 🤝 贡献
 请阅读 [贡献指南](./CONTRIBUTING.md) 以了解我们的开发规范。

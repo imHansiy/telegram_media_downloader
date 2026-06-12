@@ -5,12 +5,17 @@
 
 export interface TelegramAccount {
   id: string;
+  profileId?: string;
+  profileName?: string;
+  userId?: string;
   phoneNumber: string;
   username: string;
   firstName: string;
   status: 'connected' | 'disconnected' | 'connecting';
   sessionName: string;
   createdAt: string;
+  hasSession?: boolean;
+  isActive?: boolean;
 }
 
 export type MediaType = 'photo' | 'video' | 'document' | 'audio' | 'voice';
@@ -36,6 +41,13 @@ export interface CloudStorageConfig {
   remoteDir: string;
   downloadRateLimitKb: number; // 0 for unlimited
   uploadRateLimitKb: number; // 0 for unlimited
+}
+
+export type BotAccessMode = 'self' | 'allowed' | 'public';
+
+export interface BotAccessConfig {
+  mode: BotAccessMode;
+  allowedUsers: string[];
 }
 
 export interface SyncTask {

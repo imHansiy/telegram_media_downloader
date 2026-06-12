@@ -18,6 +18,7 @@ from module.cloud_drive import CloudDrive, CloudDriveConfig
 from module.db import db
 from module.filter import Filter
 from module.language import Language, set_language
+from module.profiles import save_active_profile
 from utils.format import replace_date_time, validate_title
 from utils.meta_data import MetaData
 
@@ -450,6 +451,8 @@ class Application:
         self.debug_web: bool = False
         self.log_level: str = "INFO"
         self.start_timeout: int = 60
+        self.bot_allow_public_download: bool = False
+        self.bot_download_access_mode: str = "self"
         self.allowed_user_ids: yaml.comments.CommentedSeq = yaml.comments.CommentedSeq(
             []
         )
@@ -604,12 +607,34 @@ class Application:
             _config, "start_timeout", self.start_timeout, int
         )
 
-        self.allowed_user_ids = get_config(
+        self.bot_allow_public_download = get_config(
             _config,
-            "allowed_user_ids",
-            self.allowed_user_ids,
-            yaml.comments.CommentedSeq,
+            "bot_allow_public_download",
+            self.bot_allow_public_download,
+            bool,
         )
+
+        access_mode = _config.get("bot_download_access_mode")
+        if access_mode in ("self", "allowed", "public"):
+            self.bot_download_access_mode = access_mode
+        elif self.bot_allow_public_download:
+            self.bot_download_access_mode = "public"
+        elif _config.get("allowed_user_ids"):
+            self.bot_download_access_mode = "allowed"
+        else:
+            self.bot_download_access_mode = "self"
+        self.bot_allow_public_download = self.bot_download_access_mode == "public"
+
+        allowed_user_ids = _config.get("allowed_user_ids", self.allowed_user_ids)
+        if isinstance(allowed_user_ids, list):
+            self.allowed_user_ids = yaml.comments.CommentedSeq(allowed_user_ids)
+        else:
+            self.allowed_user_ids = get_config(
+                _config,
+                "allowed_user_ids",
+                self.allowed_user_ids,
+                yaml.comments.CommentedSeq,
+            )
 
         self.date_format = get_config(
             _config,
@@ -964,6 +989,9 @@ class Application:
 
         self.config["save_path"] = self.save_path
         self.config["file_path_prefix"] = self.file_path_prefix
+        self.config["allowed_user_ids"] = self.allowed_user_ids
+        self.config["bot_download_access_mode"] = self.bot_download_access_mode
+        self.config["bot_allow_public_download"] = self.bot_allow_public_download
 
         if self.config.get("ids_to_retry"):
             self.config.pop("ids_to_retry")
@@ -991,6 +1019,11 @@ class Application:
             if db.conn:
                 db.save_setting("config", self.config)
                 db.save_setting("data", self.app_data)
+                save_active_profile(
+                    config=self.config,
+                    app_data=self.app_data,
+                    sync_legacy=False,
+                )
 
             try:
                 with open(self.config_file, "w", encoding="utf-8") as yaml_file:
