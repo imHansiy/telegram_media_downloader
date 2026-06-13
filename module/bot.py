@@ -336,6 +336,7 @@ class DownloadBot:
 
         admin_filter = pyrogram.filters.user(self.admin_user_ids)
         download_submitter_filter = self.download_submitter_filter()
+        non_admin_submitter_filter = download_submitter_filter & ~admin_filter
 
         self.bot.add_handler(
             MessageHandler(
@@ -390,6 +391,22 @@ class DownloadBot:
                 help_command,
                 filters=pyrogram.filters.command(["start"])
                 & admin_filter,
+            )
+        )
+        self.bot.add_handler(
+            MessageHandler(
+                public_help_command,
+                filters=pyrogram.filters.command(["start", "help"])
+                & non_admin_submitter_filter,
+            )
+        )
+        self.bot.add_handler(
+            MessageHandler(
+                public_text_hint,
+                filters=pyrogram.filters.private
+                & pyrogram.filters.text
+                & ~pyrogram.filters.regex(r"^https://t.me.*")
+                & non_admin_submitter_filter,
             )
         )
         self.bot.add_handler(
@@ -551,6 +568,30 @@ async def help_command(client: pyrogram.Client, message: pyrogram.types.Message)
     """
 
     await send_help_str(client, message.chat.id)
+
+
+async def public_help_command(client: pyrogram.Client, message: pyrogram.types.Message):
+    """Send usage help for non-admin users allowed to submit downloads."""
+
+    await client.send_message(
+        message.chat.id,
+        "Bot 已开放给你使用。\n\n"
+        "请在私聊中发送以下内容之一：\n"
+        "1. Telegram 消息链接，例如 https://t.me/channel/123\n"
+        "2. 直接发送或转发包含媒体的消息\n\n"
+        "管理员命令不会对普通用户开放。",
+        reply_to_message_id=message.id,
+    )
+
+
+async def public_text_hint(client: pyrogram.Client, message: pyrogram.types.Message):
+    """Tell public users what kind of messages can trigger downloads."""
+
+    await client.send_message(
+        message.chat.id,
+        "请发送 Telegram 消息链接，或直接发送/转发包含媒体的消息。",
+        reply_to_message_id=message.id,
+    )
 
 
 async def set_language(client: pyrogram.Client, message: pyrogram.types.Message):

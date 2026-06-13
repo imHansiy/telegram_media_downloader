@@ -1030,6 +1030,18 @@ def main():
 
             if runtime_app.bot_token:
                 if bot_owner_profile_id and bot_owner_profile_id != profile_id:
+                    owner_state = runtimes.get(bot_owner_profile_id)
+                    if (
+                        owner_state
+                        and owner_state.app.bot_token
+                        and owner_state.app.bot_token == runtime_app.bot_token
+                    ):
+                        apply_bot_access_config(owner_state.app, runtime_app.config)
+                        logger.info(
+                            "Bot access config synced from profile {} to bot owner {}.",
+                            profile_id,
+                            bot_owner_profile_id,
+                        )
                     state.message = (
                         "后台下载任务已启动；Bot 已由其它账号运行，当前账号跳过 Bot。"
                     )
@@ -1213,9 +1225,48 @@ def main():
         )
         return future.result(timeout=120)
 
+    def apply_bot_access_config(target_app: Application, config: dict):
+        allowed_user_ids = (config or {}).get("allowed_user_ids", [])
+        if not isinstance(allowed_user_ids, list):
+            allowed_user_ids = []
+
+        access_mode = (config or {}).get("bot_download_access_mode")
+        if access_mode not in ("self", "allowed", "public"):
+            if (config or {}).get("bot_allow_public_download"):
+                access_mode = "public"
+            elif allowed_user_ids:
+                access_mode = "allowed"
+            else:
+                access_mode = "self"
+
+        target_app.allowed_user_ids = copy.deepcopy(allowed_user_ids)
+        target_app.bot_download_access_mode = access_mode
+        target_app.bot_allow_public_download = access_mode == "public"
+
     async def update_runtime_config(profile_id: str, config: dict):
         state = runtimes.get(profile_id)
+        source_bot_token = _clean_telegram_api_value((config or {}).get("bot_token", ""))
         if not state:
+            owner_state = runtimes.get(bot_owner_profile_id) if bot_owner_profile_id else None
+            if (
+                owner_state
+                and source_bot_token
+                and owner_state.app.bot_token
+                and source_bot_token == owner_state.app.bot_token
+            ):
+                apply_bot_access_config(owner_state.app, config)
+                logger.info(
+                    "Bot access config synced from profile {} to bot owner {}.",
+                    profile_id,
+                    bot_owner_profile_id,
+                )
+                return {
+                    "status": "applied",
+                    "message": "Bot 权限已同步到当前 Bot 运行账户。",
+                    "profile_id": profile_id,
+                    "bot_owner_profile_id": bot_owner_profile_id,
+                }
+
             return {
                 "status": "not_running",
                 "message": "账号运行态未启动，配置已保存待下次启动生效。",
@@ -1224,10 +1275,24 @@ def main():
 
         state.app.config = copy.deepcopy(config or {})
         state.app.assign_config(state.app.config)
+        owner_state = runtimes.get(bot_owner_profile_id) if bot_owner_profile_id else None
+        if (
+            owner_state
+            and source_bot_token
+            and owner_state.app.bot_token
+            and source_bot_token == owner_state.app.bot_token
+        ):
+            apply_bot_access_config(owner_state.app, config)
+            logger.info(
+                "Bot access config synced from profile {} to bot owner {}.",
+                profile_id,
+                bot_owner_profile_id,
+            )
         return {
             "status": "applied",
             "message": "账号运行态配置已热更新。",
             "profile_id": profile_id,
+            "bot_owner_profile_id": bot_owner_profile_id,
         }
 
     def update_runtime_config_callback(profile_id: str, config: dict):
