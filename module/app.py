@@ -515,12 +515,14 @@ class Application:
         # Override from Env if exists
         self.save_path = os.getenv("SAVE_PATH", self.save_path)
 
-        self.api_id = _clean_config_value(os.getenv("API_ID", _config.get("api_id", "")))
+        # Account credentials are profile-scoped in multi-account mode. Env vars
+        # remain a deployment fallback for legacy profiles without saved values.
+        self.api_id = _clean_config_value(_config.get("api_id") or os.getenv("API_ID", ""))
         self.api_hash = _clean_config_value(
-            os.getenv("API_HASH", _config.get("api_hash", ""))
+            _config.get("api_hash") or os.getenv("API_HASH", "")
         )
         self.bot_token = _clean_config_value(
-            os.getenv("BOT_TOKEN", _config.get("bot_token", ""))
+            _config.get("bot_token") or os.getenv("BOT_TOKEN", "")
         )
 
         self.web_host = os.getenv("WEB_HOST", _config.get("web_host", self.web_host))
