@@ -79,6 +79,7 @@ class DownloadBot:
         self.admin_user_ids: List[Union[int, str]] = []
         self.bot_api_poll_task = None
         self.bot_api_poll_offset = None
+        self.bot_api_poll_error = None
 
     def gen_task_id(self) -> int:
         """Gen task id"""
@@ -121,6 +122,7 @@ class DownloadBot:
     async def update_reply_message(self):
         """Update reply message"""
         while self.is_running:
+            self.ensure_bot_api_polling()
             for key, value in self.task_node.copy().items():
                 if value.is_running:
                     await report_bot_status(self, value)
@@ -195,6 +197,28 @@ class DownloadBot:
             return self.can_submit_download(message)
 
         return pyrogram.filters.create(check, "DownloadSubmitterFilter")
+
+    def ensure_bot_api_polling(self):
+        """Keep the Bot API polling fallback alive while the bot is running."""
+
+        if not self.is_running or not self.app or not self.app.bot_token:
+            return
+
+        if self.bot_api_poll_task and not self.bot_api_poll_task.done():
+            return
+
+        if self.bot_api_poll_task and self.bot_api_poll_task.done():
+            error = None
+            if not self.bot_api_poll_task.cancelled():
+                error = self.bot_api_poll_task.exception()
+            if error:
+                self.bot_api_poll_error = f"{error.__class__.__name__}: {error}"
+                logger.warning(
+                    "Bot API polling fallback stopped; restarting: {}",
+                    error.__class__.__name__,
+                )
+
+        self.bot_api_poll_task = self.app.loop.create_task(self.poll_bot_api_updates())
 
     def bot_api_user_in_allowed_config(self, user: dict) -> bool:
         """Check Bot API user dictionaries against allowed user config."""
@@ -719,7 +743,7 @@ class DownloadBot:
 
         self.reply_task = _bot.app.loop.create_task(_bot.update_reply_message())
         self.bot_api_poll_offset = None
-        self.bot_api_poll_task = _bot.app.loop.create_task(_bot.poll_bot_api_updates())
+        self.ensure_bot_api_polling()
 
         self.bot.add_handler(
             MessageHandler(
@@ -860,6 +884,9 @@ async def public_help_command(client: pyrogram.Client, message: pyrogram.types.M
 
 async def public_text_hint(client: pyrogram.Client, message: pyrogram.types.Message):
     """Tell public users what kind of messages can trigger downloads."""
+
+    if message.text and message.text.startswith("/"):
+        return
 
     await client.send_message(
         message.chat.id,
