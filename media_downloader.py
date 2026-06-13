@@ -854,6 +854,16 @@ def _clean_telegram_api_value(value) -> str:
     return str(value).strip()
 
 
+def _effective_bot_token(config: dict = None, runtime_app: Application = None) -> str:
+    """Return the bot token that Application.assign_config will actually use."""
+    env_bot_token = _clean_telegram_api_value(os.getenv("BOT_TOKEN", ""))
+    if env_bot_token:
+        return env_bot_token
+    if runtime_app is not None:
+        return _clean_telegram_api_value(getattr(runtime_app, "bot_token", ""))
+    return _clean_telegram_api_value((config or {}).get("bot_token", ""))
+
+
 def _build_runtime_app(profile: dict) -> Application:
     """Build an isolated Application object for a profile."""
     runtime_app = Application(CONFIG_NAME, DATA_FILE_NAME, APPLICATION_NAME)
@@ -1031,10 +1041,14 @@ def main():
             if runtime_app.bot_token:
                 if bot_owner_profile_id and bot_owner_profile_id != profile_id:
                     owner_state = runtimes.get(bot_owner_profile_id)
+                    owner_bot_token = _effective_bot_token(
+                        runtime_app=owner_state.app
+                    ) if owner_state else ""
+                    runtime_bot_token = _effective_bot_token(runtime_app=runtime_app)
                     if (
                         owner_state
-                        and owner_state.app.bot_token
-                        and owner_state.app.bot_token == runtime_app.bot_token
+                        and owner_bot_token
+                        and owner_bot_token == runtime_bot_token
                     ):
                         apply_bot_access_config(owner_state.app, runtime_app.config)
                         logger.info(
@@ -1245,14 +1259,13 @@ def main():
 
     async def update_runtime_config(profile_id: str, config: dict):
         state = runtimes.get(profile_id)
-        source_bot_token = _clean_telegram_api_value((config or {}).get("bot_token", ""))
+        source_bot_token = _effective_bot_token(config)
         if not state:
             owner_state = runtimes.get(bot_owner_profile_id) if bot_owner_profile_id else None
             if (
                 owner_state
                 and source_bot_token
-                and owner_state.app.bot_token
-                and source_bot_token == owner_state.app.bot_token
+                and source_bot_token == _effective_bot_token(runtime_app=owner_state.app)
             ):
                 apply_bot_access_config(owner_state.app, config)
                 logger.info(
@@ -1279,8 +1292,7 @@ def main():
         if (
             owner_state
             and source_bot_token
-            and owner_state.app.bot_token
-            and source_bot_token == owner_state.app.bot_token
+            and source_bot_token == _effective_bot_token(runtime_app=owner_state.app)
         ):
             apply_bot_access_config(owner_state.app, config)
             logger.info(
