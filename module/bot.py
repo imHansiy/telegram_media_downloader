@@ -1,11 +1,14 @@
 """Bot for media downloader"""
 
 import asyncio
+import json
 import os
 import platform
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Callable, List, Union
 
+import aiohttp
 import pyrogram
 from loguru import logger
 from pyrogram import types
@@ -74,6 +77,8 @@ class DownloadBot:
         self.task_id: int = 0
         self.reply_task = None
         self.admin_user_ids: List[Union[int, str]] = []
+        self.bot_api_poll_task = None
+        self.bot_api_poll_offset = None
 
     def gen_task_id(self) -> int:
         """Gen task id"""
@@ -118,7 +123,7 @@ class DownloadBot:
         while self.is_running:
             for key, value in self.task_node.copy().items():
                 if value.is_running:
-                    await report_bot_status(self.bot, value)
+                    await report_bot_status(self, value)
 
             for key, value in self.task_node.copy().items():
                 if value.is_running and value.is_finish():
@@ -190,6 +195,268 @@ class DownloadBot:
             return self.can_submit_download(message)
 
         return pyrogram.filters.create(check, "DownloadSubmitterFilter")
+
+    def bot_api_user_in_allowed_config(self, user: dict) -> bool:
+        """Check Bot API user dictionaries against allowed user config."""
+
+        user_id = str(user.get("id") or "")
+        username = str(user.get("username") or "").lower().lstrip("@")
+
+        for allowed_user_id in self.allowed_user_ids:
+            if user_id == str(allowed_user_id):
+                return True
+
+        for allowed_user_id in getattr(self.app, "allowed_user_ids", []) or []:
+            value = str(allowed_user_id).strip()
+            if not value:
+                continue
+            if user_id == value:
+                return True
+            if username and username == value.lower().lstrip("@"):
+                return True
+
+        return False
+
+    def can_submit_bot_api_message(self, message: dict) -> bool:
+        """Check whether a Bot API update sender can submit download jobs."""
+
+        user = message.get("from") or {}
+        chat = message.get("chat") or {}
+        if not user.get("id"):
+            return False
+
+        if str(user.get("id")) in {str(item) for item in self.admin_user_ids}:
+            return True
+
+        if chat.get("type") != "private":
+            return False
+
+        access_mode = getattr(self.app, "bot_download_access_mode", "self")
+        if access_mode == "public":
+            return True
+        if access_mode == "allowed":
+            return self.bot_api_user_in_allowed_config(user)
+
+        return False
+
+    async def bot_api_request(
+        self,
+        method: str,
+        payload: dict = None,
+        *,
+        request_method: str = "post",
+        timeout: int = 20,
+    ):
+        """Call Telegram Bot API without exposing the token in logs."""
+
+        if not self.app or not self.app.bot_token:
+            raise RuntimeError("Bot token is not configured.")
+
+        url = f"https://api.telegram.org/bot{self.app.bot_token}/{method}"
+        client_timeout = aiohttp.ClientTimeout(total=timeout)
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            if request_method == "get":
+                response = await session.get(url, params=payload or {})
+            else:
+                response = await session.post(url, json=payload or {})
+            data = await response.json(content_type=None)
+
+        if not data.get("ok"):
+            description = data.get("description") or "unknown error"
+            raise RuntimeError(f"Telegram Bot API {method} failed: {description}")
+        return data.get("result")
+
+    @staticmethod
+    def _bot_api_parse_mode(parse_mode):
+        if parse_mode == pyrogram.enums.ParseMode.HTML:
+            return "HTML"
+        if parse_mode == pyrogram.enums.ParseMode.MARKDOWN:
+            return "Markdown"
+        markdown_v2 = getattr(pyrogram.enums.ParseMode, "MARKDOWN_V2", None)
+        if markdown_v2 is not None and parse_mode == markdown_v2:
+            return "MarkdownV2"
+        if isinstance(parse_mode, str):
+            return parse_mode
+        return None
+
+    async def send_message(
+        self,
+        chat_id,
+        text: str,
+        *,
+        reply_to_message_id=None,
+        parse_mode=None,
+        **_,
+    ):
+        """Send a message through Bot API and return a Pyrogram-like object."""
+
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "disable_web_page_preview": True,
+        }
+        if reply_to_message_id:
+            payload["reply_to_message_id"] = reply_to_message_id
+            payload["allow_sending_without_reply"] = True
+        api_parse_mode = self._bot_api_parse_mode(parse_mode)
+        if api_parse_mode:
+            payload["parse_mode"] = api_parse_mode
+
+        result = await self.bot_api_request("sendMessage", payload)
+        return SimpleNamespace(id=result.get("message_id"))
+
+    async def edit_message_text(
+        self, chat_id, message_id, text: str, parse_mode=None, **_
+    ):
+        """Edit a Bot API message, matching the Pyrogram method used by tasks."""
+
+        payload = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "disable_web_page_preview": True,
+        }
+        api_parse_mode = self._bot_api_parse_mode(parse_mode)
+        if api_parse_mode:
+            payload["parse_mode"] = api_parse_mode
+
+        result = await self.bot_api_request("editMessageText", payload)
+        return SimpleNamespace(id=result.get("message_id"))
+
+    @staticmethod
+    def _bot_api_adapter_message(message: dict, text: str = None):
+        user = message.get("from") or {}
+        chat = message.get("chat") or {}
+        return SimpleNamespace(
+            id=message.get("message_id"),
+            text=text if text is not None else message.get("text"),
+            caption=message.get("caption"),
+            media=None,
+            from_user=SimpleNamespace(
+                id=user.get("id"),
+                username=user.get("username"),
+                first_name=user.get("first_name"),
+                last_name=user.get("last_name"),
+            ),
+            chat=SimpleNamespace(id=chat.get("id"), type=chat.get("type")),
+        )
+
+    async def handle_bot_api_message(self, message: dict):
+        """Route private Bot API messages when Pyrogram updates are not delivered."""
+
+        if not message:
+            return
+
+        chat = message.get("chat") or {}
+        user = message.get("from") or {}
+        text = message.get("text") or message.get("caption") or ""
+        chat_id = chat.get("id")
+        message_id = message.get("message_id")
+
+        if chat.get("type") != "private" or not chat_id:
+            return
+
+        logger.info(
+            "Bot API update received: user={} username={} message_id={} text={}",
+            user.get("id"),
+            user.get("username"),
+            message_id,
+            text[:80],
+        )
+
+        if not self.can_submit_bot_api_message(message):
+            if text.startswith("/start") or text.startswith("/help"):
+                await self.send_message(
+                    chat_id,
+                    "当前 Bot 未向你的账号开放。",
+                    reply_to_message_id=message_id,
+                )
+            logger.info(
+                "Bot API update ignored by access policy: user={} mode={}",
+                user.get("id"),
+                getattr(self.app, "bot_download_access_mode", "self"),
+            )
+            return
+
+        if text.startswith("/start") or text.startswith("/help"):
+            await self.send_message(
+                chat_id,
+                "Bot 已开放给你使用。\n\n"
+                "请在私聊中发送以下内容之一：\n"
+                "1. Telegram 消息链接，例如 https://t.me/channel/123\n"
+                "2. 直接发送或转发包含媒体的消息\n\n"
+                "管理员命令不会对普通用户开放。",
+                reply_to_message_id=message_id,
+            )
+            return
+
+        if text.startswith("https://t.me"):
+            adapter_message = self._bot_api_adapter_message(message, text.split()[0])
+            await download_from_link(self, adapter_message)
+            return
+
+        if any(
+            key in message
+            for key in ("photo", "video", "document", "audio", "voice", "video_note")
+        ):
+            await self.send_message(
+                chat_id,
+                "已收到媒体消息。当前线上兜底通道先支持 Telegram 消息链接下载，请发送对应消息链接。",
+                reply_to_message_id=message_id,
+            )
+            return
+
+        await self.send_message(
+            chat_id,
+            "请发送 Telegram 消息链接，或直接发送/转发包含媒体的消息。",
+            reply_to_message_id=message_id,
+        )
+
+    async def poll_bot_api_updates(self):
+        """Poll Bot API updates as a fallback for hosted bot message delivery."""
+
+        logger.info("Bot API polling fallback started.")
+        timeout = aiohttp.ClientTimeout(total=40)
+        url = f"https://api.telegram.org/bot{self.app.bot_token}/getUpdates"
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            while self.is_running:
+                try:
+                    params = {
+                        "timeout": 25,
+                        "allowed_updates": json.dumps(["message"]),
+                    }
+                    if self.bot_api_poll_offset is not None:
+                        params["offset"] = self.bot_api_poll_offset
+
+                    response = await session.get(url, params=params)
+                    data = await response.json(content_type=None)
+                    if not data.get("ok"):
+                        logger.warning(
+                            "Bot API polling failed: {}",
+                            data.get("description") or "unknown error",
+                        )
+                        await asyncio.sleep(5)
+                        continue
+
+                    for update in data.get("result") or []:
+                        update_id = update.get("update_id")
+                        if update_id is not None:
+                            self.bot_api_poll_offset = update_id + 1
+                        try:
+                            await self.handle_bot_api_message(update.get("message"))
+                        except Exception as e:
+                            logger.exception(
+                                "Failed to handle Bot API update {}: {}",
+                                update_id,
+                                e,
+                            )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning(
+                        "Bot API polling error: {}", e.__class__.__name__
+                    )
+                    await asyncio.sleep(5)
 
     def update_config(self):
         """Update config to database."""
@@ -405,6 +672,7 @@ class DownloadBot:
                 public_text_hint,
                 filters=pyrogram.filters.private
                 & pyrogram.filters.text
+                & ~pyrogram.filters.regex(r"^/")
                 & ~pyrogram.filters.regex(r"^https://t.me.*")
                 & non_admin_submitter_filter,
             )
@@ -450,6 +718,8 @@ class DownloadBot:
             pass
 
         self.reply_task = _bot.app.loop.create_task(_bot.update_reply_message())
+        self.bot_api_poll_offset = None
+        self.bot_api_poll_task = _bot.app.loop.create_task(_bot.poll_bot_api_updates())
 
         self.bot.add_handler(
             MessageHandler(
@@ -479,6 +749,10 @@ async def stop_download_bot():
     _bot.is_running = False
     if _bot.reply_task:
         _bot.reply_task.cancel()
+        _bot.reply_task = None
+    if _bot.bot_api_poll_task:
+        _bot.bot_api_poll_task.cancel()
+        _bot.bot_api_poll_task = None
     _bot.stop_task("all")
     if _bot.bot:
         try:
@@ -1079,7 +1353,7 @@ async def direct_download(
     """Direct Download"""
 
     replay_message = "Direct download..."
-    last_reply_message = await download_bot.bot.send_message(
+    last_reply_message = await download_bot.send_message(
         message.from_user.id, replay_message, reply_to_message_id=message.id
     )
 
@@ -1089,7 +1363,7 @@ async def direct_download(
         reply_message_id=last_reply_message.id,
         replay_message=replay_message,
         limit=1,
-        bot=download_bot.bot,
+        bot=download_bot,
         task_id=_bot.gen_task_id(),
     )
 
