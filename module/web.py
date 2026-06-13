@@ -26,7 +26,11 @@ from flask_login import LoginManager, UserMixin, login_required, login_user
 from pyrogram import Client, errors
 import utils
 from module.app import Application
-from module.bot import get_download_bot_diagnostics
+from module.bot import (
+    get_download_bot_diagnostics,
+    get_download_bot_webhook_secret,
+    handle_download_bot_webhook_update,
+)
 from module.db import db
 from module.profiles import (
     activate_profile,
@@ -577,6 +581,20 @@ def api_config():
 def api_account_status():
     """Return Telegram account/session status."""
     return jsonify(_get_telegram_account_status())
+
+
+@_flask_app.route("/api/telegram/webhook/<secret>", methods=["POST"])
+def api_telegram_webhook(secret):
+    """Receive Telegram Bot API webhook updates."""
+
+    if not secret or secret != get_download_bot_webhook_secret():
+        return jsonify({"ok": False}), 404
+
+    payload = request.get_json(silent=True) or {}
+    response_payload = handle_download_bot_webhook_update(payload)
+    if response_payload:
+        return jsonify(response_payload)
+    return Response(status=204)
 
 
 @_flask_app.route("/api/profiles", methods=["POST"])

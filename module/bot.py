@@ -1,6 +1,7 @@
 """Bot for media downloader"""
 
 import asyncio
+import hashlib
 import json
 import os
 import platform
@@ -518,6 +519,96 @@ class DownloadBot:
             reply_to_message_id=message_id,
         )
 
+    @staticmethod
+    def bot_api_webhook_send_payload(chat_id, text: str, reply_to_message_id=None):
+        payload = {
+            "method": "sendMessage",
+            "chat_id": chat_id,
+            "text": text,
+            "disable_web_page_preview": True,
+        }
+        if reply_to_message_id:
+            payload["reply_to_message_id"] = reply_to_message_id
+            payload["allow_sending_without_reply"] = True
+        return payload
+
+    def handle_bot_api_webhook_update(self, update: dict):
+        """Handle Telegram webhook updates and return a Bot API method payload."""
+
+        message = (update or {}).get("message")
+        if not message:
+            return None
+
+        chat = message.get("chat") or {}
+        user = message.get("from") or {}
+        text = message.get("text") or message.get("caption") or ""
+        chat_id = chat.get("id")
+        message_id = message.get("message_id")
+
+        if chat.get("type") != "private" or not chat_id:
+            return None
+        if not self.mark_private_message_processed(chat_id, message_id):
+            return None
+
+        logger.info(
+            "Bot API webhook received: user={} username={} message_id={} text={}",
+            user.get("id"),
+            user.get("username"),
+            message_id,
+            text[:80],
+        )
+
+        if not self.can_submit_bot_api_message(message):
+            if text.startswith("/start") or text.startswith("/help"):
+                return self.bot_api_webhook_send_payload(
+                    chat_id,
+                    "当前 Bot 未向你的账号开放。",
+                    reply_to_message_id=message_id,
+                )
+            return None
+
+        if text.startswith("/start") or text.startswith("/help"):
+            return self.bot_api_webhook_send_payload(
+                chat_id,
+                "Bot 已开放给你使用。\n\n"
+                "请在私聊中发送以下内容之一：\n"
+                "1. Telegram 消息链接，例如 https://t.me/channel/123\n"
+                "2. 直接发送或转发包含媒体的消息\n\n"
+                "管理员命令不会对普通用户开放。",
+                reply_to_message_id=message_id,
+            )
+
+        if text.startswith("/"):
+            return None
+
+        if text.startswith("https://t.me"):
+            adapter_message = self._bot_api_adapter_message(message, text.split()[0])
+            asyncio.run_coroutine_threadsafe(
+                download_from_link(self, adapter_message),
+                self.app.loop,
+            )
+            return self.bot_api_webhook_send_payload(
+                chat_id,
+                "已收到链接，开始处理下载任务。",
+                reply_to_message_id=message_id,
+            )
+
+        if any(
+            key in message
+            for key in ("photo", "video", "document", "audio", "voice", "video_note")
+        ):
+            return self.bot_api_webhook_send_payload(
+                chat_id,
+                "已收到媒体消息。当前线上通道先支持 Telegram 消息链接下载，请发送对应消息链接。",
+                reply_to_message_id=message_id,
+            )
+
+        return self.bot_api_webhook_send_payload(
+            chat_id,
+            "请发送 Telegram 消息链接，或直接发送/转发包含媒体的消息。",
+            reply_to_message_id=message_id,
+        )
+
     def poll_bot_api_updates(self):
         """Poll Bot API updates as a fallback for hosted bot message delivery."""
 
@@ -882,6 +973,25 @@ def get_download_bot_diagnostics(ensure_polling: bool = False):
         "pollError": _bot.bot_api_poll_error,
         "processedCount": len(_bot.processed_private_messages),
     }
+
+
+def get_download_bot_webhook_secret():
+    """Return a stable path secret derived from the active bot token."""
+
+    token = ""
+    if _bot.app and _bot.app.bot_token:
+        token = _bot.app.bot_token
+    else:
+        token = os.getenv("BOT_TOKEN", "")
+    if not token:
+        return ""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:32]
+
+
+def handle_download_bot_webhook_update(update: dict):
+    """Handle one Telegram webhook update through the active DownloadBot."""
+
+    return _bot.handle_bot_api_webhook_update(update)
 
 
 async def send_help_str(client: pyrogram.Client, chat_id):
