@@ -865,6 +865,25 @@ async def stop_download_bot():
     _bot.client = None
 
 
+def get_download_bot_diagnostics(ensure_polling: bool = False):
+    """Return Bot receiver diagnostics for Web/runtime status."""
+
+    if ensure_polling:
+        _bot.ensure_bot_api_polling()
+
+    return {
+        "receiverVersion": "bot-api-thread-sync-v2",
+        "isRunning": bool(_bot.is_running),
+        "botConfigured": bool(_bot.app and _bot.app.bot_token),
+        "pollThreadAlive": bool(
+            _bot.bot_api_poll_thread and _bot.bot_api_poll_thread.is_alive()
+        ),
+        "pollOffset": _bot.bot_api_poll_offset,
+        "pollError": _bot.bot_api_poll_error,
+        "processedCount": len(_bot.processed_private_messages),
+    }
+
+
 async def send_help_str(client: pyrogram.Client, chat_id):
     """
     Sends a help string to the specified chat ID using the provided client.

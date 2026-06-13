@@ -26,6 +26,7 @@ from flask_login import LoginManager, UserMixin, login_required, login_user
 from pyrogram import Client, errors
 import utils
 from module.app import Application
+from module.bot import get_download_bot_diagnostics
 from module.db import db
 from module.profiles import (
     activate_profile,
@@ -350,6 +351,7 @@ def _get_telegram_account_status() -> dict:
         "account": active_account if active_account and active_account.get("hasSession") else None,
         "accounts": accounts,
         "active_profile_id": active_profile_id,
+        "botReceiver": get_download_bot_diagnostics(ensure_polling=True),
     }
 
     return status
