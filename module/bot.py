@@ -4,12 +4,13 @@ import asyncio
 import json
 import os
 import platform
+import threading
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Callable, List, Union
 
-import aiohttp
 import pyrogram
+import requests
 from loguru import logger
 from pyrogram import types
 from pyrogram.handlers import CallbackQueryHandler, MessageHandler
@@ -77,9 +78,13 @@ class DownloadBot:
         self.task_id: int = 0
         self.reply_task = None
         self.admin_user_ids: List[Union[int, str]] = []
-        self.bot_api_poll_task = None
+        self.bot_api_poll_thread = None
+        self.bot_api_poll_stop = threading.Event()
         self.bot_api_poll_offset = None
         self.bot_api_poll_error = None
+        self.processed_private_messages = []
+        self.processed_private_message_set = set()
+        self.processed_private_message_lock = threading.Lock()
 
     def gen_task_id(self) -> int:
         """Gen task id"""
@@ -204,21 +209,41 @@ class DownloadBot:
         if not self.is_running or not self.app or not self.app.bot_token:
             return
 
-        if self.bot_api_poll_task and not self.bot_api_poll_task.done():
+        if self.bot_api_poll_thread and self.bot_api_poll_thread.is_alive():
             return
 
-        if self.bot_api_poll_task and self.bot_api_poll_task.done():
-            error = None
-            if not self.bot_api_poll_task.cancelled():
-                error = self.bot_api_poll_task.exception()
-            if error:
-                self.bot_api_poll_error = f"{error.__class__.__name__}: {error}"
-                logger.warning(
-                    "Bot API polling fallback stopped; restarting: {}",
-                    error.__class__.__name__,
-                )
+        if self.bot_api_poll_error:
+            logger.warning(
+                "Bot API polling fallback stopped; restarting: {}",
+                self.bot_api_poll_error,
+            )
 
-        self.bot_api_poll_task = self.app.loop.create_task(self.poll_bot_api_updates())
+        self.bot_api_poll_stop.clear()
+        self.bot_api_poll_thread = threading.Thread(
+            target=self.poll_bot_api_updates,
+            name="bot-api-polling",
+            daemon=True,
+        )
+        self.bot_api_poll_thread.start()
+
+    def mark_private_message_processed(self, chat_id, message_id) -> bool:
+        """Return False when another bot receive path already handled a message."""
+
+        if chat_id is None or message_id is None:
+            return True
+
+        key = (str(chat_id), int(message_id))
+        with self.processed_private_message_lock:
+            if key in self.processed_private_message_set:
+                return False
+
+            self.processed_private_messages.append(key)
+            self.processed_private_message_set.add(key)
+            while len(self.processed_private_messages) > 1000:
+                old_key = self.processed_private_messages.pop(0)
+                self.processed_private_message_set.discard(old_key)
+
+        return True
 
     def bot_api_user_in_allowed_config(self, user: dict) -> bool:
         """Check Bot API user dictionaries against allowed user config."""
@@ -273,17 +298,33 @@ class DownloadBot:
     ):
         """Call Telegram Bot API without exposing the token in logs."""
 
+        return await asyncio.to_thread(
+            self.bot_api_request_sync,
+            method,
+            payload,
+            request_method=request_method,
+            timeout=timeout,
+        )
+
+    def bot_api_request_sync(
+        self,
+        method: str,
+        payload: dict = None,
+        *,
+        request_method: str = "post",
+        timeout: int = 20,
+    ):
+        """Synchronous Bot API call used by polling threads and async wrappers."""
+
         if not self.app or not self.app.bot_token:
             raise RuntimeError("Bot token is not configured.")
 
         url = f"https://api.telegram.org/bot{self.app.bot_token}/{method}"
-        client_timeout = aiohttp.ClientTimeout(total=timeout)
-        async with aiohttp.ClientSession(timeout=client_timeout) as session:
-            if request_method == "get":
-                response = await session.get(url, params=payload or {})
-            else:
-                response = await session.post(url, json=payload or {})
-            data = await response.json(content_type=None)
+        if request_method == "get":
+            response = requests.get(url, params=payload or {}, timeout=timeout)
+        else:
+            response = requests.post(url, json=payload or {}, timeout=timeout)
+        data = response.json()
 
         if not data.get("ok"):
             description = data.get("description") or "unknown error"
@@ -363,6 +404,7 @@ class DownloadBot:
                 last_name=user.get("last_name"),
             ),
             chat=SimpleNamespace(id=chat.get("id"), type=chat.get("type")),
+            bot_api_processed=True,
         )
 
     async def handle_bot_api_message(self, message: dict):
@@ -378,6 +420,14 @@ class DownloadBot:
         message_id = message.get("message_id")
 
         if chat.get("type") != "private" or not chat_id:
+            return
+
+        if not self.mark_private_message_processed(chat_id, message_id):
+            logger.info(
+                "Bot API update skipped because message was already handled: chat={} message_id={}",
+                chat_id,
+                message_id,
+            )
             return
 
         logger.info(
@@ -414,6 +464,9 @@ class DownloadBot:
             )
             return
 
+        if text.startswith("/"):
+            return
+
         if text.startswith("https://t.me"):
             adapter_message = self._bot_api_adapter_message(message, text.split()[0])
             await download_from_link(self, adapter_message)
@@ -436,51 +489,47 @@ class DownloadBot:
             reply_to_message_id=message_id,
         )
 
-    async def poll_bot_api_updates(self):
+    def poll_bot_api_updates(self):
         """Poll Bot API updates as a fallback for hosted bot message delivery."""
 
         logger.info("Bot API polling fallback started.")
-        timeout = aiohttp.ClientTimeout(total=40)
-        url = f"https://api.telegram.org/bot{self.app.bot_token}/getUpdates"
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            while self.is_running:
-                try:
-                    params = {
-                        "timeout": 25,
-                        "allowed_updates": json.dumps(["message"]),
-                    }
-                    if self.bot_api_poll_offset is not None:
-                        params["offset"] = self.bot_api_poll_offset
+        self.bot_api_poll_error = None
+        while self.is_running and not self.bot_api_poll_stop.is_set():
+            try:
+                params = {
+                    "timeout": 25,
+                    "allowed_updates": json.dumps(["message"]),
+                }
+                if self.bot_api_poll_offset is not None:
+                    params["offset"] = self.bot_api_poll_offset
 
-                    response = await session.get(url, params=params)
-                    data = await response.json(content_type=None)
-                    if not data.get("ok"):
-                        logger.warning(
-                            "Bot API polling failed: {}",
-                            data.get("description") or "unknown error",
+                data = self.bot_api_request_sync(
+                    "getUpdates",
+                    params,
+                    request_method="get",
+                    timeout=35,
+                )
+
+                for update in data or []:
+                    update_id = update.get("update_id")
+                    if update_id is not None:
+                        self.bot_api_poll_offset = update_id + 1
+                    try:
+                        future = asyncio.run_coroutine_threadsafe(
+                            self.handle_bot_api_message(update.get("message")),
+                            self.app.loop,
                         )
-                        await asyncio.sleep(5)
-                        continue
-
-                    for update in data.get("result") or []:
-                        update_id = update.get("update_id")
-                        if update_id is not None:
-                            self.bot_api_poll_offset = update_id + 1
-                        try:
-                            await self.handle_bot_api_message(update.get("message"))
-                        except Exception as e:
-                            logger.exception(
-                                "Failed to handle Bot API update {}: {}",
-                                update_id,
-                                e,
-                            )
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    logger.warning(
-                        "Bot API polling error: {}", e.__class__.__name__
-                    )
-                    await asyncio.sleep(5)
+                        future.result(timeout=60)
+                    except Exception as e:
+                        logger.exception(
+                            "Failed to handle Bot API update {}: {}",
+                            update_id,
+                            e.__class__.__name__,
+                        )
+            except Exception as e:
+                self.bot_api_poll_error = e.__class__.__name__
+                logger.warning("Bot API polling error: {}", e.__class__.__name__)
+                self.bot_api_poll_stop.wait(5)
 
     def update_config(self):
         """Update config to database."""
@@ -774,9 +823,10 @@ async def stop_download_bot():
     if _bot.reply_task:
         _bot.reply_task.cancel()
         _bot.reply_task = None
-    if _bot.bot_api_poll_task:
-        _bot.bot_api_poll_task.cancel()
-        _bot.bot_api_poll_task = None
+    _bot.bot_api_poll_stop.set()
+    if _bot.bot_api_poll_thread and _bot.bot_api_poll_thread.is_alive():
+        _bot.bot_api_poll_thread.join(timeout=2)
+    _bot.bot_api_poll_thread = None
     _bot.stop_task("all")
     if _bot.bot:
         try:
@@ -871,6 +921,9 @@ async def help_command(client: pyrogram.Client, message: pyrogram.types.Message)
 async def public_help_command(client: pyrogram.Client, message: pyrogram.types.Message):
     """Send usage help for non-admin users allowed to submit downloads."""
 
+    if not _bot.mark_private_message_processed(message.chat.id, message.id):
+        return
+
     await client.send_message(
         message.chat.id,
         "Bot 已开放给你使用。\n\n"
@@ -886,6 +939,8 @@ async def public_text_hint(client: pyrogram.Client, message: pyrogram.types.Mess
     """Tell public users what kind of messages can trigger downloads."""
 
     if message.text and message.text.startswith("/"):
+        return
+    if not _bot.mark_private_message_processed(message.chat.id, message.id):
         return
 
     await client.send_message(
@@ -1420,6 +1475,9 @@ async def download_forward_media(
         None
     """
 
+    if not _bot.mark_private_message_processed(message.chat.id, message.id):
+        return
+
     if message.media and getattr(message, message.media.value):
         await direct_download(_bot, message.from_user.id, message, message, client)
         return
@@ -1445,6 +1503,10 @@ async def download_from_link(client: pyrogram.Client, message: pyrogram.types.Me
     logger.info(
         f"[download_from_link] Received message from user {message.from_user.id}: {message.text}"
     )
+
+    if not getattr(message, "bot_api_processed", False):
+        if not _bot.mark_private_message_processed(message.chat.id, message.id):
+            return
 
     if not message.text or not message.text.startswith("https://t.me"):
         logger.warning(f"[download_from_link] Invalid link format: {message.text}")
