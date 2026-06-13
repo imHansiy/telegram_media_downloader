@@ -463,6 +463,8 @@ class Application:
         self.debug_web: bool = False
         self.log_level: str = "INFO"
         self.start_timeout: int = 60
+        self.bot_startup_notification_mode: str = "off"
+        self.bot_status_chat_id: str = ""
         self.bot_allow_public_download: bool = False
         self.bot_download_access_mode: str = "self"
         self.allowed_user_ids: yaml.comments.CommentedSeq = yaml.comments.CommentedSeq(
@@ -623,6 +625,35 @@ class Application:
 
         self.start_timeout = get_config(
             _config, "start_timeout", self.start_timeout, int
+        )
+
+        startup_notification_mode = _clean_config_value(
+            _config.get(
+                "bot_startup_notification_mode",
+                self.bot_startup_notification_mode,
+            )
+        ).lower()
+        env_startup_notification_mode = _clean_config_value(
+            os.getenv("BOT_STARTUP_NOTIFICATION_MODE", "")
+        ).lower()
+        if env_startup_notification_mode:
+            startup_notification_mode = env_startup_notification_mode
+        startup_notification_mode = {
+            "none": "off",
+            "disabled": "off",
+            "disable": "off",
+            "owner": "admin",
+            "chat": "status_chat",
+            "status": "status_chat",
+        }.get(startup_notification_mode, startup_notification_mode)
+        if startup_notification_mode in ("off", "admin", "status_chat"):
+            self.bot_startup_notification_mode = startup_notification_mode
+        else:
+            self.bot_startup_notification_mode = "off"
+
+        env_status_chat_id = _clean_config_value(os.getenv("BOT_STATUS_CHAT_ID", ""))
+        self.bot_status_chat_id = env_status_chat_id or _clean_config_value(
+            _config.get("bot_status_chat_id", self.bot_status_chat_id)
         )
 
         self.bot_allow_public_download = get_config(
@@ -1010,6 +1041,10 @@ class Application:
         self.config["allowed_user_ids"] = self.allowed_user_ids
         self.config["bot_download_access_mode"] = self.bot_download_access_mode
         self.config["bot_allow_public_download"] = self.bot_allow_public_download
+        self.config["bot_startup_notification_mode"] = (
+            self.bot_startup_notification_mode
+        )
+        self.config["bot_status_chat_id"] = self.bot_status_chat_id
 
         if self.config.get("ids_to_retry"):
             self.config.pop("ids_to_retry")

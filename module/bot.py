@@ -686,6 +686,54 @@ class DownloadBot:
             except Exception as e:
                 logger.error(f"Failed to save config to file: {e}")
 
+    async def send_startup_notification(self, admin: pyrogram.types.User):
+        """Send the optional startup status message."""
+
+        mode = str(
+            getattr(self.app, "bot_startup_notification_mode", "off") or "off"
+        ).strip().lower()
+        if mode == "off":
+            return
+
+        if mode == "admin":
+            chat_id = admin.id
+        elif mode == "status_chat":
+            chat_id = str(getattr(self.app, "bot_status_chat_id", "") or "").strip()
+            if not chat_id:
+                logger.warning(
+                    "Bot startup notification mode is status_chat, but no chat id is configured."
+                )
+                return
+        else:
+            logger.warning("Unknown bot startup notification mode: {}", mode)
+            return
+
+        bot_name = (
+            f"@{self.bot_info.username}"
+            if getattr(self.bot_info, "username", None)
+            else str(getattr(self.bot_info, "id", "unknown"))
+        )
+        admin_name = getattr(admin, "first_name", None) or str(admin.id)
+        message = (
+            "Telegram Media Downloader 已启动\n"
+            f"Bot: {bot_name}\n"
+            f"账户: {admin_name} ({admin.id})\n"
+            f"时间: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
+        )
+
+        try:
+            await self.bot.send_message(
+                chat_id,
+                message,
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to send bot startup notification to {}: {}",
+                chat_id,
+                e.__class__.__name__,
+            )
+
     async def start(
         self,
         app: Application,
@@ -928,10 +976,7 @@ class DownloadBot:
             CallbackQueryHandler(on_query_handler, filters=admin_filter)
         )
 
-        try:
-            await send_help_str(self.bot, admin.id)
-        except Exception:
-            pass
+        await self.send_startup_notification(admin)
 
         self.reply_task = _bot.app.loop.create_task(_bot.update_reply_message())
         self.bot_api_poll_offset = None

@@ -56,6 +56,13 @@ export interface BotAccessConfig {
   allowedUsers: string[];
 }
 
+export type BotStartupNotificationMode = 'off' | 'admin' | 'status_chat';
+
+export interface BotStatusConfig {
+  startupNotificationMode: BotStartupNotificationMode;
+  statusChatId: string;
+}
+
 export interface SyncTask {
   id: string;
   profileId?: string;

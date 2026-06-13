@@ -5,11 +5,14 @@
 
 import React, { useEffect, useState } from 'react';
 import { 
+  BotStatusConfig,
+  BotStartupNotificationMode,
   CloudStorageConfig, 
   SyncRule, 
   MediaType 
 } from '../types';
 import { 
+  Bell,
   Save, 
   RefreshCw, 
   Check, 
@@ -26,14 +29,16 @@ import {
 interface ConfigPanelProps {
   config: CloudStorageConfig;
   rule: SyncRule;
+  statusConfig: BotStatusConfig;
   onSaveConfig: (config: CloudStorageConfig) => void;
   onSaveRule: (rule: SyncRule) => void;
-  onSaveAll?: (config: CloudStorageConfig, rule: SyncRule) => void;
+  onSaveAll?: (config: CloudStorageConfig, rule: SyncRule, statusConfig: BotStatusConfig) => void;
 }
 
 export function ConfigPanel({ 
   config, 
   rule, 
+  statusConfig,
   onSaveConfig, 
   onSaveRule,
   onSaveAll,
@@ -53,6 +58,8 @@ export function ConfigPanel({
   const [savePathPattern, setSavePathPattern] = useState(rule.savePathPattern);
   const [autoSync, setAutoSync] = useState(rule.autoSync);
   const [dateThreshold, setDateThreshold] = useState(rule.dateThreshold);
+  const [startupNotificationMode, setStartupNotificationMode] = useState<BotStartupNotificationMode>(statusConfig.startupNotificationMode);
+  const [statusChatId, setStatusChatId] = useState(statusConfig.statusChatId);
 
   // Connection testing state
   const [testState, setTestState] = useState<'idle' | 'checking' | 'success' | 'failed'>('idle');
@@ -78,6 +85,11 @@ export function ConfigPanel({
     setAutoSync(rule.autoSync);
     setDateThreshold(rule.dateThreshold);
   }, [rule]);
+
+  useEffect(() => {
+    setStartupNotificationMode(statusConfig.startupNotificationMode || 'off');
+    setStatusChatId(statusConfig.statusChatId || '');
+  }, [statusConfig]);
 
   const handleTestConnection = async (e: React.MouseEvent) => {
     e.preventDefault();
@@ -140,8 +152,13 @@ export function ConfigPanel({
       dateThreshold
     } as SyncRule;
 
+    const nextStatusConfig = {
+      startupNotificationMode,
+      statusChatId: statusChatId.trim(),
+    } as BotStatusConfig;
+
     if (onSaveAll) {
-      onSaveAll(nextConfig, nextRule);
+      onSaveAll(nextConfig, nextRule, nextStatusConfig);
     } else {
       onSaveConfig(nextConfig);
       onSaveRule(nextRule);
@@ -473,6 +490,59 @@ export function ConfigPanel({
               </span>
             </div>
 
+          </div>
+        </div>
+
+        <div className="lg:col-span-2 space-y-4 bg-slate-900 border border-slate-800 p-5 rounded-xl">
+          <div className="flex items-center gap-2 border-b border-slate-800 pb-3">
+            <Bell className="w-4 h-4 text-indigo-400" />
+            <div>
+              <h3 className="text-xs font-semibold text-slate-200">Bot 启动状态通知</h3>
+              <p className="text-[10px] text-slate-500">控制 Render 重启后 Bot 状态消息发送到哪里</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-[1.1fr_1fr] gap-4 text-xs">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              {[
+                { key: 'off', label: '关闭', desc: '不发送启动消息' },
+                { key: 'admin', label: 'Bot Owner', desc: '发给当前 Telegram 账号' },
+                { key: 'status_chat', label: '状态聊天', desc: '发到指定 chat_id' },
+              ].map((item) => {
+                const active = startupNotificationMode === item.key;
+                return (
+                  <button
+                    key={item.key}
+                    type="button"
+                    onClick={() => setStartupNotificationMode(item.key as BotStartupNotificationMode)}
+                    className={`p-3 rounded-lg border text-left transition-all cursor-pointer ${
+                      active
+                        ? 'bg-indigo-950/50 border-indigo-500/50 text-indigo-300'
+                        : 'bg-slate-950/50 border-slate-800 text-slate-500 hover:text-slate-350 hover:border-slate-700'
+                    }`}
+                  >
+                    <span className="block text-[11px] font-semibold">{item.label}</span>
+                    <span className="block text-[10px] mt-1">{item.desc}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="block text-slate-400 font-medium">状态聊天 ID</label>
+              <input
+                type="text"
+                disabled={startupNotificationMode !== 'status_chat'}
+                required={startupNotificationMode === 'status_chat'}
+                className="w-full bg-slate-950/70 disabled:bg-slate-950/30 disabled:text-slate-650 border border-slate-800 focus:border-indigo-500 rounded-lg p-2.5 text-slate-300 font-mono focus:outline-none"
+                placeholder="-1001234567890 或 @status_channel"
+                value={statusChatId}
+                onChange={(e) => setStatusChatId(e.target.value)}
+              />
+              <span className="text-[10px] text-slate-500 block">
+                Bot 需要在该群组或频道内，并拥有发消息权限
+              </span>
+            </div>
           </div>
         </div>
 

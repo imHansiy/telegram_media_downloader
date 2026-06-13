@@ -26,6 +26,7 @@ import { FileManager } from './components/FileManager';
 import { TaskTable } from './components/TaskTable';
 import {
   BotAccessConfig,
+  BotStatusConfig,
   CloudStorageConfig,
   CompletedFile,
   MediaType,
@@ -104,6 +105,11 @@ const defaultRule: SyncRule = {
 const defaultBotAccess: BotAccessConfig = {
   mode: 'self',
   allowedUsers: [],
+};
+
+const defaultBotStatus: BotStatusConfig = {
+  startupNotificationMode: 'off',
+  statusChatId: '',
 };
 
 function parseHumanBytes(value?: string): number {
@@ -236,6 +242,18 @@ function botAccessFromConfig(config: Record<string, any>): BotAccessConfig {
   };
 }
 
+function botStatusFromConfig(config: Record<string, any>): BotStatusConfig {
+  const configuredMode = config.bot_startup_notification_mode;
+  const mode = configuredMode === 'admin' || configuredMode === 'status_chat' || configuredMode === 'off'
+    ? configuredMode
+    : defaultBotStatus.startupNotificationMode;
+
+  return {
+    startupNotificationMode: mode,
+    statusChatId: config.bot_status_chat_id ? String(config.bot_status_chat_id) : '',
+  };
+}
+
 function applyUiConfig(
   currentConfig: Record<string, any>,
   cloud: CloudStorageConfig,
@@ -276,6 +294,17 @@ function applyBotAccessConfig(
   };
 }
 
+function applyBotStatusConfig(
+  currentConfig: Record<string, any>,
+  statusConfig: BotStatusConfig,
+): Record<string, any> {
+  return {
+    ...currentConfig,
+    bot_startup_notification_mode: statusConfig.startupNotificationMode,
+    bot_status_chat_id: statusConfig.statusChatId.trim(),
+  };
+}
+
 function tabFromPath(): ActiveTab {
   if (window.location.pathname.includes('config')) return 'config';
   if (window.location.pathname.includes('tg_login') || window.location.pathname.includes('accounts')) return 'accounts';
@@ -310,6 +339,7 @@ export default function App() {
   const [cloudConfig, setCloudConfig] = useState<CloudStorageConfig>(defaultCloudConfig);
   const [syncRule, setSyncRule] = useState<SyncRule>(defaultRule);
   const [botAccess, setBotAccess] = useState<BotAccessConfig>(defaultBotAccess);
+  const [botStatus, setBotStatus] = useState<BotStatusConfig>(defaultBotStatus);
   const [tasks, setTasks] = useState<SyncTask[]>([]);
   const [completedFiles, setCompletedFiles] = useState<CompletedFile[]>([]);
   const [accounts, setAccounts] = useState<TelegramAccount[]>([]);
@@ -361,6 +391,7 @@ export default function App() {
     setCloudConfig(cloudFromConfig(payload.config || {}));
     setSyncRule(ruleFromConfig(payload.config || {}));
     setBotAccess(botAccessFromConfig(payload.config || {}));
+    setBotStatus(botStatusFromConfig(payload.config || {}));
     applyAccountStatus(payload.account);
   };
 
@@ -384,14 +415,18 @@ export default function App() {
     return () => source.close();
   }, []);
 
-  const saveConfig = async (cloud: CloudStorageConfig, rule: SyncRule) => {
-    const next = applyBotAccessConfig(applyUiConfig(rawConfig, cloud, rule), botAccess);
+  const saveConfig = async (cloud: CloudStorageConfig, rule: SyncRule, statusConfig: BotStatusConfig) => {
+    const next = applyBotStatusConfig(
+      applyBotAccessConfig(applyUiConfig(rawConfig, cloud, rule), botAccess),
+      statusConfig,
+    );
     const result = await postJson<{ status: string; message: string; config?: Record<string, any> }>('/api/config', {
       config: next,
     });
     setRawConfig(next);
     setCloudConfig(cloud);
     setSyncRule(rule);
+    setBotStatus(statusConfig);
     setStatusMessage(result.message || '配置已保存。');
   };
 
@@ -751,6 +786,7 @@ export default function App() {
               <ConfigPanel
                 config={cloudConfig}
                 rule={syncRule}
+                statusConfig={botStatus}
                 onSaveConfig={setCloudConfig}
                 onSaveRule={setSyncRule}
                 onSaveAll={saveConfig}
