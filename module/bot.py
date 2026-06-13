@@ -71,6 +71,7 @@ class DownloadBot:
         self.is_running = True
         self.allowed_user_ids: List[Union[int, str]] = []
         self.monitor_task = None
+        self.download_runtime_resolver: Callable = None
 
         meta = MetaData(datetime(2022, 8, 5, 14, 35, 12), 0, "", 0, 0, 0, "", 0)
         self.filter.set_meta_data(meta)
@@ -195,6 +196,30 @@ class DownloadBot:
             return self.user_in_allowed_config(message.from_user)
 
         return False
+
+    def get_download_runtime_for_submitter(self, submitter_user_id) -> dict:
+        """Resolve which Telegram user runtime should read submitted links."""
+
+        runtime = None
+        if self.download_runtime_resolver:
+            try:
+                runtime = self.download_runtime_resolver(str(submitter_user_id or ""))
+            except Exception as e:
+                logger.warning(
+                    "Failed to resolve download runtime for submitter {}: {}",
+                    submitter_user_id,
+                    e,
+                )
+
+        runtime = runtime or {}
+        return {
+            "client": runtime.get("client") or self.client,
+            "add_download_task": runtime.get("add_download_task")
+            or self.add_download_task,
+            "profile_id": runtime.get("profile_id") or getattr(self.app, "profile_id", None),
+            "profile_name": runtime.get("profile_name") or "Bot owner",
+            "matched_submitter": bool(runtime.get("matched_submitter")),
+        }
 
     def download_submitter_filter(self):
         """Allow permitted users to submit direct media and link downloads."""
@@ -667,6 +692,7 @@ class DownloadBot:
         client: pyrogram.Client,
         add_download_task: Callable,
         download_chat_task: Callable,
+        download_runtime_resolver: Callable = None,
     ):
         """Start bot"""
         self.is_running = True
@@ -712,6 +738,7 @@ class DownloadBot:
         self.client = client
         self.add_download_task = add_download_task
         self.download_chat_task = download_chat_task
+        self.download_runtime_resolver = download_runtime_resolver
 
         # load config
         if db.conn:
@@ -927,9 +954,16 @@ async def start_download_bot(
     client: pyrogram.Client,
     add_download_task: Callable,
     download_chat_task: Callable,
+    download_runtime_resolver: Callable = None,
 ):
     """Start download bot"""
-    await _bot.start(app, client, add_download_task, download_chat_task)
+    await _bot.start(
+        app,
+        client,
+        add_download_task,
+        download_chat_task,
+        download_runtime_resolver,
+    )
 
 
 async def stop_download_bot():
@@ -1585,6 +1619,8 @@ async def direct_download(
     message: pyrogram.types.Message,
     download_message: pyrogram.types.Message,
     client: pyrogram.Client = None,
+    add_download_task: Callable = None,
+    profile_id: str = None,
 ):
     """Direct Download"""
 
@@ -1601,13 +1637,15 @@ async def direct_download(
         limit=1,
         bot=download_bot,
         task_id=_bot.gen_task_id(),
+        profile_id=profile_id,
     )
 
     node.client = client
 
     _bot.add_task_node(node)
 
-    await _bot.add_download_task(
+    enqueue_download_task = add_download_task or _bot.add_download_task
+    await enqueue_download_task(
         download_message,
         node,
     )
@@ -1677,11 +1715,28 @@ async def download_from_link(client: pyrogram.Client, message: pyrogram.types.Me
             message.from_user.id, msg, parse_mode=pyrogram.enums.ParseMode.HTML
         )
 
+    runtime = _bot.get_download_runtime_for_submitter(message.from_user.id)
+    download_client = runtime["client"]
+    enqueue_download_task = runtime["add_download_task"]
+    profile_id = runtime["profile_id"]
+    if runtime["matched_submitter"]:
+        logger.info(
+            "[download_from_link] Routed submitter {} to profile {}.",
+            message.from_user.id,
+            profile_id,
+        )
+    else:
+        logger.info(
+            "[download_from_link] No submitter runtime for {}; using profile {}.",
+            message.from_user.id,
+            profile_id,
+        )
+
     try:
-        chat_id, message_id, _ = await parse_link(_bot.client, text[0])
+        chat_id, message_id, _ = await parse_link(download_client, text[0])
         entity = None
         if chat_id:
-            entity = await _bot.client.get_chat(chat_id)
+            entity = await download_client.get_chat(chat_id)
     except Exception as e:
         logger.warning(f"[download_from_link] Failed to read link {text[0]}: {e}")
         await client.send_message(
@@ -1694,7 +1749,7 @@ async def download_from_link(client: pyrogram.Client, message: pyrogram.types.Me
     if entity:
         if message_id:
             download_message = await retry(
-                _bot.client.get_messages, args=(chat_id, message_id)
+                download_client.get_messages, args=(chat_id, message_id)
             )
             if download_message:
                 # Check if this message belongs to a media group
@@ -1704,7 +1759,7 @@ async def download_from_link(client: pyrogram.Client, message: pyrogram.types.Me
                     )
                     # Get all messages in the media group
                     try:
-                        media_group_messages = await _bot.client.get_media_group(
+                        media_group_messages = await download_client.get_media_group(
                             chat_id, message_id
                         )
                         logger.info(
@@ -1716,17 +1771,39 @@ async def download_from_link(client: pyrogram.Client, message: pyrogram.types.Me
                             logger.info(
                                 f"[download_from_link] Downloading {idx+1}/{len(media_group_messages)}: msg_id={group_msg.id}"
                             )
-                            await direct_download(_bot, entity.id, message, group_msg)
+                            await direct_download(
+                                _bot,
+                                entity.id,
+                                message,
+                                group_msg,
+                                client=download_client,
+                                add_download_task=enqueue_download_task,
+                                profile_id=profile_id,
+                            )
                     except Exception as e:
                         logger.warning(
                             f"[download_from_link] Failed to get media group: {e}, downloading single message"
                         )
                         await direct_download(
-                            _bot, entity.id, message, download_message
+                            _bot,
+                            entity.id,
+                            message,
+                            download_message,
+                            client=download_client,
+                            add_download_task=enqueue_download_task,
+                            profile_id=profile_id,
                         )
                 else:
                     # Single message, download directly
-                    await direct_download(_bot, entity.id, message, download_message)
+                    await direct_download(
+                        _bot,
+                        entity.id,
+                        message,
+                        download_message,
+                        client=download_client,
+                        add_download_task=enqueue_download_task,
+                        profile_id=profile_id,
+                    )
             else:
                 await client.send_message(
                     message.from_user.id,

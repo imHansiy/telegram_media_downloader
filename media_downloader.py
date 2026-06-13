@@ -966,6 +966,38 @@ def main():
             if tick % 10 == 0:
                 state.app.update_config()
 
+    def _runtime_download_payload(state: ProfileRuntime, matched_submitter: bool):
+        async def enqueue_download_task(message, node):
+            node.profile_id = state.profile_id
+            return await add_download_task(message, node, state.queue)
+
+        return {
+            "client": state.client,
+            "add_download_task": enqueue_download_task,
+            "profile_id": state.profile_id,
+            "profile_name": state.profile_name,
+            "matched_submitter": matched_submitter,
+        }
+
+    def resolve_bot_download_runtime(submitter_user_id: str):
+        """Prefer the Telegram account session that matches the bot submitter."""
+
+        submitter_user_id = str(submitter_user_id or "")
+        for state in runtimes.values():
+            me = getattr(state.client, "me", None)
+            if (
+                state.running
+                and me
+                and submitter_user_id
+                and str(getattr(me, "id", "")) == submitter_user_id
+            ):
+                return _runtime_download_payload(state, matched_submitter=True)
+
+        owner_state = runtimes.get(bot_owner_profile_id) if bot_owner_profile_id else None
+        if owner_state and owner_state.running:
+            return _runtime_download_payload(owner_state, matched_submitter=False)
+        return None
+
     async def activate_runtime(runtime_client: pyrogram.Client = None, profile=None):
         """Start one profile runtime without stopping other running profiles."""
         nonlocal bot_owner_profile_id
@@ -1066,6 +1098,7 @@ def main():
                             runtime_client,
                             runtime_add_download_task,
                             runtime_download_chat_task,
+                            resolve_bot_download_runtime,
                         )
                         state.bot_started = True
                         bot_owner_profile_id = profile_id
