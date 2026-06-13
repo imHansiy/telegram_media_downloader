@@ -370,6 +370,31 @@ class DownloadBot:
         result = await self.bot_api_request("sendMessage", payload)
         return SimpleNamespace(id=result.get("message_id"))
 
+    def send_message_sync(
+        self,
+        chat_id,
+        text: str,
+        *,
+        reply_to_message_id=None,
+        parse_mode=None,
+    ):
+        """Synchronous Bot API send used by the polling thread."""
+
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "disable_web_page_preview": True,
+        }
+        if reply_to_message_id:
+            payload["reply_to_message_id"] = reply_to_message_id
+            payload["allow_sending_without_reply"] = True
+        api_parse_mode = self._bot_api_parse_mode(parse_mode)
+        if api_parse_mode:
+            payload["parse_mode"] = api_parse_mode
+
+        result = self.bot_api_request_sync("sendMessage", payload)
+        return SimpleNamespace(id=result.get("message_id"))
+
     async def edit_message_text(
         self, chat_id, message_id, text: str, parse_mode=None, **_
     ):
@@ -407,7 +432,7 @@ class DownloadBot:
             bot_api_processed=True,
         )
 
-    async def handle_bot_api_message(self, message: dict):
+    def handle_bot_api_message(self, message: dict):
         """Route private Bot API messages when Pyrogram updates are not delivered."""
 
         if not message:
@@ -440,7 +465,7 @@ class DownloadBot:
 
         if not self.can_submit_bot_api_message(message):
             if text.startswith("/start") or text.startswith("/help"):
-                await self.send_message(
+                self.send_message_sync(
                     chat_id,
                     "当前 Bot 未向你的账号开放。",
                     reply_to_message_id=message_id,
@@ -453,7 +478,7 @@ class DownloadBot:
             return
 
         if text.startswith("/start") or text.startswith("/help"):
-            await self.send_message(
+            self.send_message_sync(
                 chat_id,
                 "Bot 已开放给你使用。\n\n"
                 "请在私聊中发送以下内容之一：\n"
@@ -469,21 +494,25 @@ class DownloadBot:
 
         if text.startswith("https://t.me"):
             adapter_message = self._bot_api_adapter_message(message, text.split()[0])
-            await download_from_link(self, adapter_message)
+            future = asyncio.run_coroutine_threadsafe(
+                download_from_link(self, adapter_message),
+                self.app.loop,
+            )
+            future.result(timeout=60)
             return
 
         if any(
             key in message
             for key in ("photo", "video", "document", "audio", "voice", "video_note")
         ):
-            await self.send_message(
+            self.send_message_sync(
                 chat_id,
                 "已收到媒体消息。当前线上兜底通道先支持 Telegram 消息链接下载，请发送对应消息链接。",
                 reply_to_message_id=message_id,
             )
             return
 
-        await self.send_message(
+        self.send_message_sync(
             chat_id,
             "请发送 Telegram 消息链接，或直接发送/转发包含媒体的消息。",
             reply_to_message_id=message_id,
@@ -515,11 +544,7 @@ class DownloadBot:
                     if update_id is not None:
                         self.bot_api_poll_offset = update_id + 1
                     try:
-                        future = asyncio.run_coroutine_threadsafe(
-                            self.handle_bot_api_message(update.get("message")),
-                            self.app.loop,
-                        )
-                        future.result(timeout=60)
+                        self.handle_bot_api_message(update.get("message"))
                     except Exception as e:
                         logger.exception(
                             "Failed to handle Bot API update {}: {}",
