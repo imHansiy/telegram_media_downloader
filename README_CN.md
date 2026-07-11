@@ -107,13 +107,12 @@ max_download_task: 5
 ### 3. 电报机器人操作
 直接向您的机器人发送命令进行批量下载或状态查询。
 
-### 4. 多账户与多配置档案
-Web UI 的“Telegram 接入管理”支持保存多个 Telegram 账户档案。每个档案保存独立的
-Telegram session、应用配置和 Bot 投递权限。可以创建空档案、复制当前配置新建档案、
-重命名档案、删除非活跃档案，也可以把一次新的 Telegram 登录写入指定档案。多个已保存
-session 的档案可以同时启动，每个档案拥有独立 Telegram client、下载队列、worker 和配置。
-Bot 是进程级单实例；当多个运行中的档案都配置了 Bot token 时，只会由第一个成功启动的档案
-持有 Bot，避免同一个 bot token 多实例抢更新。
+### 4. 多账户并行运行
+Web UI 的“Telegram 接入管理”支持保存多个 Telegram 账户。每个账户独立保存 Telegram
+Session、身份信息、下载进度和运行状态；下载规则、云盘、Telegram API 凭据和 Bot 设置由
+下载器全局共享。所有保存了 Session 且已启用的账户会同时启动，各自拥有独立 Telegram
+client、下载队列和 worker，不需要设置“当前账户”。Bot 仍是进程级单实例，任务会优先路由
+给与提交者身份匹配的运行账户。
 
 ## 🤝 贡献
 请阅读 [贡献指南](./CONTRIBUTING.md) 以了解我们的开发规范。

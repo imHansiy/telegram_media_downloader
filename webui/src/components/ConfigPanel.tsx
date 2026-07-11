@@ -506,7 +506,7 @@ export function ConfigPanel({
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
               {[
                 { key: 'off', label: '关闭', desc: '不发送启动消息' },
-                { key: 'admin', label: 'Bot Owner', desc: '发给当前 Telegram 账号' },
+                { key: 'admin', label: 'Bot Owner', desc: '发给 Bot 运行账号' },
                 { key: 'status_chat', label: '状态聊天', desc: '发到指定 chat_id' },
               ].map((item) => {
                 const active = startupNotificationMode === item.key;

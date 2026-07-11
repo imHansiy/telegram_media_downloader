@@ -268,13 +268,14 @@ async def update_download_status(
         _download_result[chat_id] = {}
 
     if _download_result[chat_id].get(message_id):
-        last_download_byte = _download_result[chat_id][message_id]["down_byte"]
-        last_time = _download_result[chat_id][message_id]["end_time"]
-        download_speed = _download_result[chat_id][message_id]["download_speed"]
-        each_second_total_download = _download_result[chat_id][message_id][
-            "each_second_total_download"
-        ]
-        end_time = _download_result[chat_id][message_id]["end_time"]
+        record = _download_result[chat_id][message_id]
+        # 旧版完成记录和流式上传记录没有完整的瞬时速度字段；续传时就地升级，
+        # 避免历史数据让已经识别成功的媒体任务在首次进度回调中失败。
+        last_download_byte = record.get("down_byte", 0)
+        last_time = record.get("end_time", cur_time)
+        download_speed = record.get("download_speed", 0)
+        each_second_total_download = record.get("each_second_total_download", 0)
+        end_time = record.get("end_time", cur_time)
 
         _total_download_size += down_byte - last_download_byte
         each_second_total_download += down_byte - last_download_byte
@@ -286,13 +287,23 @@ async def update_download_status(
 
         download_speed = max(download_speed, 0)
 
-        _download_result[chat_id][message_id]["down_byte"] = down_byte
-        _download_result[chat_id][message_id]["end_time"] = end_time
-        _download_result[chat_id][message_id]["download_speed"] = download_speed
-        _download_result[chat_id][message_id]["profile_id"] = node.profile_id
-        _download_result[chat_id][message_id][
-            "each_second_total_download"
-        ] = each_second_total_download
+        record.update(
+            {
+                "down_byte": down_byte,
+                "total_size": total_size,
+                "file_name": file_name,
+                "start_time": record.get("start_time", start_time),
+                "created_at": record.get("created_at", start_time),
+                "end_time": end_time,
+                "download_speed": download_speed,
+                "each_second_total_download": each_second_total_download,
+                "task_id": node.task_id,
+                "profile_id": node.profile_id,
+                # 失败任务重新开始传输后回到活动态，旧错误不再污染当前状态。
+                "state": "downloading",
+                "error": "",
+            }
+        )
     else:
         each_second_total_download = down_byte
         _download_result[chat_id][message_id] = {
@@ -306,6 +317,8 @@ async def update_download_status(
             "each_second_total_download": each_second_total_download,
             "task_id": node.task_id,
             "profile_id": node.profile_id,
+            "state": "downloading",
+            "error": "",
         }
         _total_download_size += down_byte
 
@@ -369,6 +382,8 @@ def verify_and_save_download(
                 "end_time": time.time(),
                 "task_id": task_id,
                 "profile_id": profile_id or (u_info or {}).get("profile_id"),
+                "state": "completed",
+                "error": "",
             }
             print(
                 f"DEBUG: [stat] Created new history record for chat={chat_id}, msg={message_id}, file={file_name}, size={total_size}"
@@ -385,6 +400,8 @@ def verify_and_save_download(
             if "task_id" not in item:
                 item["task_id"] = task_id
             item["profile_id"] = profile_id or item.get("profile_id")
+            item["state"] = "completed"
+            item["error"] = ""
             print(
                 f"DEBUG: [stat] Updated existing record for chat={chat_id}, msg={message_id}"
             )
@@ -414,6 +431,76 @@ def verify_and_save_download(
         print(f"Error saving download history: {e}")
 
 
+def mark_download_failed(
+    chat_id: int,
+    message_id: int,
+    file_name: str = "",
+    total_size: int = 0,
+    task_id: int = 0,
+    profile_id: str = None,
+    error: str = "",
+):
+    """Persist a terminal failure so the dashboard can show and explain it."""
+    global _download_result
+
+    now = time.time()
+    chat_tasks = _download_result.setdefault(chat_id, {})
+    item = chat_tasks.setdefault(
+        message_id,
+        {
+            "down_byte": 0,
+            "total_size": total_size,
+            "file_name": file_name or f"message-{message_id}",
+            "download_speed": 0,
+            "start_time": now,
+            "created_at": now,
+        },
+    )
+
+    # 下载或云盘上传最终失败后保留最后进度和文件信息，用户才能在失败筛选中定位任务。
+    if file_name:
+        item["file_name"] = file_name
+    if total_size:
+        item["total_size"] = total_size
+    item.update(
+        {
+            "end_time": now,
+            "download_speed": 0,
+            "task_id": task_id or item.get("task_id", 0),
+            "profile_id": profile_id or item.get("profile_id"),
+            "state": "failed",
+            "error": error or item.get("error") or "下载或上传失败",
+        }
+    )
+
+    if db.conn:
+        db.save_setting("download_history", _download_result)
+
+
+def prepare_download_retry(
+    chat_id: int, message_id: int, profile_id: str = None
+) -> dict:
+    """Move one failed task back to the queue without discarding its local file."""
+    chat_tasks = _download_result.get(chat_id, {})
+    item = chat_tasks.get(message_id)
+    if not item:
+        raise KeyError("任务不存在")
+    if profile_id and item.get("profile_id") not in (profile_id, None):
+        raise PermissionError("任务不属于当前账号")
+    if item.get("state") != "failed":
+        raise ValueError("只有失败任务可以重置上传")
+
+    # 重置只清理失败终态；已下载字节数和本地文件继续保留，重新入队后优先复用完整文件。
+    item["state"] = "pending"
+    item["error"] = ""
+    item["download_speed"] = 0
+    item["end_time"] = time.time()
+    if db.conn:
+        db.save_setting("download_history", _download_result)
+    set_task_state(chat_id, message_id, "running", profile_id)
+    return item
+
+
 def init_stat():
     """Initialize statistics from database"""
     global _download_result
@@ -430,9 +517,11 @@ def init_stat():
                     restored[chat_id] = {}
                     for msg_id_str, info in messages.items():
                         msg_id = int(msg_id_str)
-                        # Only keep completed downloads (100%)
-                        # Incomplete downloads are cleared since they can't be resumed after restart
-                        if info.get("down_byte", 0) >= info.get("total_size", 1):
+                        # 成功记录和失败终态都要跨重启保留；普通未完成进度由 pending_downloads 负责续传。
+                        if (
+                            info.get("down_byte", 0) >= info.get("total_size", 1)
+                            or info.get("state") == "failed"
+                        ):
                             restored[chat_id][msg_id] = info
                         else:
                             incomplete_count += 1

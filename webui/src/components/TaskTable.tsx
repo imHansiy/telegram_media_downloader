@@ -23,13 +23,15 @@ import {
   Video, 
   Music, 
   Mic, 
-  Loader2 
+  Loader2,
+  RotateCcw,
 } from 'lucide-react';
 
 interface TaskTableProps {
   tasks: SyncTask[];
   onPauseTask: (id: string) => void;
   onResumeTask: (id: string) => void;
+  onResetUpload: (id: string) => void;
   onDeleteTask: (id: string) => void;
   onAddTask: (channel: string, filename: string, type: MediaType, sizeMb: number) => void;
 }
@@ -38,6 +40,7 @@ export function TaskTable({
   tasks, 
   onPauseTask, 
   onResumeTask, 
+  onResetUpload,
   onDeleteTask, 
   onAddTask 
 }: TaskTableProps) {
@@ -170,6 +173,7 @@ export function TaskTable({
               { id: 'all', label: '全部任务' },
               { id: 'syncing', label: '传输中' },
               { id: 'paused', label: '已暂停' },
+              { id: 'completed', label: '成功' },
               { id: 'failed', label: '失败' }
             ].map(tab => (
               <button
@@ -283,8 +287,8 @@ export function TaskTable({
           {filteredTasks.length === 0 ? (
             <div className="py-12 text-center space-y-2">
               <AlertCircle className="w-8 h-8 text-slate-600 mx-auto" />
-              <p className="text-xs text-slate-400">暂无符合条件的同步传输任务</p>
-              <p className="text-[11px] text-slate-600">可以点击上方“创建手动同步”模拟一个下载任务</p>
+              <p className="text-xs text-slate-400">暂无符合当前筛选条件的任务记录</p>
+              <p className="text-[11px] text-slate-600">新的下载、上传、成功和失败状态会自动显示在这里</p>
             </div>
           ) : (
             <>
@@ -444,6 +448,16 @@ export function TaskTable({
                                 <Pause className="w-3.5 h-3.5" />
                               </button>
                             )}
+                            {task.status === 'failed' && (
+                              <button
+                                id={`btn-reset-upload-${task.id}`}
+                                onClick={() => onResetUpload(task.id)}
+                                className="p-1 text-indigo-400 hover:text-indigo-300 hover:bg-slate-800 rounded transition-colors cursor-pointer"
+                                title="删除云端异常文件并重新上传"
+                              >
+                                <RotateCcw className="w-3.5 h-3.5" />
+                              </button>
+                            )}
                             <button
                               id={`btn-delete-${task.id}`}
                               onClick={() => onDeleteTask(task.id)}
@@ -582,6 +596,17 @@ export function TaskTable({
                               <span className="text-[10px] ml-0.5 font-bold">暂停</span>
                             </button>
                           )}
+                          {task.status === 'failed' && (
+                            <button
+                              id={`btn-reset-upload-mobile-${task.id}`}
+                              onClick={() => onResetUpload(task.id)}
+                              className="p-1 px-2.5 text-indigo-400 hover:text-indigo-300 active:bg-slate-800 rounded transition-colors"
+                              title="重置上传"
+                            >
+                              <RotateCcw className="w-4 h-4 inline" />
+                              <span className="text-[10px] ml-0.5 font-bold">重传</span>
+                            </button>
+                          )}
                           <button
                             id={`btn-delete-mobile-${task.id}`}
                             onClick={() => onDeleteTask(task.id)}
@@ -605,6 +630,8 @@ export function TaskTable({
             <span>正在传输: <strong className="text-indigo-400">{tasks.filter(t => t.status === 'downloading' || t.status === 'uploading').length}</strong></span>
             <span>已暂停: <strong className="text-yellow-500">{tasks.filter(t => t.status === 'paused').length}</strong></span>
             <span>排队等候: <strong className="text-slate-300">{tasks.filter(t => t.status === 'pending').length}</strong></span>
+            <span>成功: <strong className="text-emerald-500">{tasks.filter(t => t.status === 'completed').length}</strong></span>
+            <span>失败: <strong className="text-rose-500">{tasks.filter(t => t.status === 'failed').length}</strong></span>
           </div>
           <span className="text-slate-500">双端协议: Telegram Client API & WebDAV Protocol</span>
         </div>

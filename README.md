@@ -109,16 +109,14 @@ By setting `upload_adapter: webdav`, the downloader will bypass local storage an
 ### 3. Telegram Bot
 Send commands to your bot to trigger batch downloads or check status.
 
-### 4. Multiple Account Profiles
-The Web UI can store multiple Telegram account profiles. Each profile keeps its
-own Telegram session, app config, and bot submission access settings. You can
-create blank profiles, clone the current config into a new profile, rename
-profiles, delete inactive profiles, and write a new Telegram login into a
-specific profile. Multiple profiles with saved sessions can run at the same
-time; each profile gets its own Telegram client, download queue, workers, and
-config. The Bot runner remains process-wide: if multiple running profiles define
-a bot token, the first successfully started profile owns the Bot so the same
-token is not consumed by multiple update loops.
+### 4. Multiple Accounts Running Concurrently
+The Web UI can store multiple Telegram accounts. Each account keeps its own
+Telegram session, identity, download progress, and runtime state. Download
+rules, cloud storage, Telegram API credentials, and Bot settings are shared by
+the downloader. Every enabled account with a saved session starts concurrently
+with its own Telegram client, queue, and workers; there is no "current account."
+The Bot runner remains process-wide and routes work to a matching running
+account whenever the submitter is one of the logged-in Telegram accounts.
 
 ## 🤝 Contributing
 Read through our [contributing guidelines](./CONTRIBUTING.md) to learn about our submission process and coding rules.

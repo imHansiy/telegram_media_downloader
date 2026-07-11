@@ -171,7 +171,7 @@ class DB:
     def get_heartbeat_status(self):
         """Get heartbeat status"""
         is_alive = self._heartbeat_thread and self._heartbeat_thread.is_alive()
-        is_connected = self.conn is not None
+        is_connected = bool(self.conn and not getattr(self.conn, "closed", False))
         return {
             "heartbeat_active": is_alive,
             "connected": is_connected,
@@ -187,18 +187,42 @@ class DB:
             "last_keepalive_error": self.last_keepalive_error,
         }
 
-    def load_setting(self, key):
-        if not self.conn:
-            return None
+    def _rollback_safely(self):
+        """Rollback only while PostgreSQL still exposes a usable connection."""
+        if not self.conn or getattr(self.conn, "closed", False):
+            return
         try:
-            with self.conn.cursor() as cur:
-                cur.execute("SELECT value FROM settings WHERE key = %s", (key,))
-                result = cur.fetchone()
-                if result:
-                    return result[0]
-        except Exception as e:
-            logger.error(f"Failed to load setting {key}: {e}")
             self.conn.rollback()
+        except Exception as e:
+            logger.warning(f"Failed to rollback database transaction: {e}")
+
+    def _ensure_connection(self) -> bool:
+        """Reconnect an expired managed-PostgreSQL connection before a request."""
+        if self.conn and not getattr(self.conn, "closed", False):
+            return True
+        if not self.dsn:
+            return False
+        self._reconnect()
+        return bool(self.conn and not getattr(self.conn, "closed", False))
+
+    def load_setting(self, key):
+        # 托管 PostgreSQL 可能回收空闲连接；第一次读取失败后重连并重试一次，
+        # 避免 Web 状态接口因为对关闭连接 rollback 而返回 500。
+        for attempt in range(2):
+            if not self._ensure_connection():
+                return None
+            try:
+                with self.conn.cursor() as cur:
+                    cur.execute("SELECT value FROM settings WHERE key = %s", (key,))
+                    result = cur.fetchone()
+                    if result:
+                        return result[0]
+                return None
+            except Exception as e:
+                logger.error(f"Failed to load setting {key}: {e}")
+                self._rollback_safely()
+                if attempt == 0:
+                    self._reconnect()
         return None
 
     def save_setting(self, key, value):

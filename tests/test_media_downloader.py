@@ -993,14 +993,25 @@ class MediaDownloaderTestCase(unittest.TestCase):
             )
         )
 
-        self.assertEqual(res, (DownloadStatus.SkipDownload, None))
+        # 已落盘文件仍返回成功，让 WebDAV 阶段可以复用本地文件继续上传。
+        self.assertEqual(
+            res,
+            (
+                DownloadStatus.SuccessDownload,
+                platform_generic_path(
+                    "/root/project/-123/0/313 - sucess_exist_down.mp4"
+                ),
+            ),
+        )
 
     @mock.patch("media_downloader.HookClient", new=MockClient)
     @mock.patch("media_downloader.RETRY_TIME_OUT", new=1)
+    @mock.patch("media_downloader.init_web")
     @mock.patch("media_downloader.logger")
-    def test_main_with_bot(self, mock_logger):
+    def test_main_with_bot(self, mock_logger, _init_web):
         rest_app(MOCK_CONF)
 
+        app.loop.call_soon(app.loop.stop)
         main()
 
         mock_logger.success.assert_called_with(

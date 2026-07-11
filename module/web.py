@@ -7,7 +7,10 @@ import threading
 import asyncio
 import inspect
 import json
+import mimetypes
+import re
 import time
+import urllib.parse
 from datetime import datetime, timezone, timedelta
 from flask import (
     Flask,
@@ -24,6 +27,7 @@ from flask import (
 )
 from flask_login import LoginManager, UserMixin, login_required, login_user
 from pyrogram import Client, errors
+import requests
 import utils
 from module.app import Application
 from module.bot import (
@@ -33,14 +37,11 @@ from module.bot import (
 )
 from module.db import db
 from module.profiles import (
-    activate_profile,
     clear_profile_session,
     create_profile,
     delete_profile,
-    get_active_profile,
+    get_profile,
     get_profiles,
-    save_active_profile,
-    sync_active_profile_to_legacy,
     update_profile,
 )
 from module.download_stat import (
@@ -77,6 +78,7 @@ _start_runtime_callback = None
 _stop_runtime_callback = None
 _runtime_status_callback = None
 _update_runtime_config_callback = None
+_retry_upload_callback = None
 
 
 class User(UserMixin):
@@ -147,15 +149,7 @@ def _resolve_api_credentials(data: dict | None = None, config_data: dict | None 
 
 
 def _load_current_config() -> dict:
-    """Load current config from DB or in-memory app."""
-    if db.conn:
-        try:
-            active_profile = get_active_profile()
-            if active_profile.get("config"):
-                return active_profile["config"]
-        except Exception as e:
-            print(f"DEBUG: [config] Failed to load active profile config: {e}")
-
+    """Load the downloader configuration shared by every Telegram account."""
     current_config = {}
     if db.conn:
         current_config = db.load_setting("config") or {}
@@ -167,23 +161,22 @@ def _load_current_config() -> dict:
 
 
 def _save_current_config(new_config: dict) -> dict:
-    """Persist config and apply immediately where supported."""
+    """Persist the shared downloader config and apply it to every runtime."""
     if not db.conn:
         return {"status": "error", "message": "Database not connected"}
 
-    active_profile = get_active_profile()
-    active_profile_id = active_profile.get("id")
     db.save_setting("config", new_config)
-    save_active_profile(config=new_config, sync_legacy=False)
 
     if _app_instance:
-        print("DEBUG: [web] Updating in-memory app config from Web UI")
+        print("DEBUG: [web] Updating shared in-memory config from Web UI")
         _app_instance.config = new_config
         _app_instance.assign_config(new_config)
         _sync_web_login_secret()
 
-    if _update_runtime_config_callback and active_profile_id:
-        _update_runtime_config_callback(active_profile_id, new_config)
+    if _update_runtime_config_callback:
+        # 运行中的账号全部热更新；未运行账号会在下次启动时读取同一份全局配置。
+        for profile in get_profiles():
+            _update_runtime_config_callback(profile["id"], new_config)
 
     return {
         "status": "success",
@@ -229,23 +222,9 @@ def _apply_bot_access_to_config(
 
 
 def _save_profile_config(profile_id: str, new_config: dict) -> dict:
-    """Persist config for one profile and apply it to a running runtime if present."""
-    if not db.conn:
-        return {"status": "error", "message": "Database not connected"}
-
-    active_profile = get_active_profile()
-    active_profile_id = active_profile.get("id")
-    if profile_id == active_profile_id:
-        return _save_current_config(new_config)
-
-    update_profile(profile_id, config=new_config)
-    if _update_runtime_config_callback:
-        _update_runtime_config_callback(profile_id, new_config)
-
-    return {
-        "status": "success",
-        "message": "Profile config saved.",
-    }
+    """Compatibility adapter: former profile settings now update shared config."""
+    get_profile(profile_id)
+    return _save_current_config(new_config)
 
 
 def _account_payload_from_user(me) -> dict:
@@ -283,19 +262,13 @@ def _get_client_account_meta(client: Client = None) -> dict | None:
 
 def _profile_to_account(
     profile: dict,
-    active_profile_id: str,
-    connected_meta: dict | None = None,
     runtime_info: dict | None = None,
+    shared_config: dict | None = None,
 ) -> dict:
     """Convert a profile into the React account card shape."""
-    is_active = profile["id"] == active_profile_id
     runtime_info = runtime_info or {}
     runtime_account = runtime_info.get("account") or {}
-    account = (
-        runtime_account
-        or (connected_meta if is_active and connected_meta else None)
-        or (profile.get("account") or {})
-    )
+    account = runtime_account or (profile.get("account") or {})
     profile_name = profile.get("name") or account.get("firstName") or "Telegram Profile"
     is_running = bool(runtime_info.get("running"))
 
@@ -311,50 +284,36 @@ def _profile_to_account(
         "sessionName": "running_session" if is_running else "saved_session",
         "createdAt": profile.get("created_at") or "",
         "hasSession": bool(profile.get("session")),
-        "isActive": is_active,
         "isRunning": is_running,
         "runtimeStatus": runtime_info.get("status") or "stopped",
         "runtimeMessage": runtime_info.get("message") or "",
         "botRunning": bool(runtime_info.get("bot_started")),
         "runtimeEnabled": bool(profile.get("runtime_enabled")),
-        "botAccess": _bot_access_from_config(profile.get("config") or {}),
+        "botAccess": _bot_access_from_config(shared_config),
     }
 
 
 def _get_telegram_account_status() -> dict:
     """Return Telegram session state for the React UI."""
-    active_profile = get_active_profile() if db.conn else {}
-    active_profile_id = active_profile.get("id")
-    saved_session = active_profile.get("session") if active_profile else None
-    connected_meta = _get_client_account_meta(_client) if _client and _client.is_connected else None
-
-    if connected_meta and db.conn:
-        try:
-            profile_name = connected_meta.get("firstName") or active_profile.get("name")
-            save_active_profile(account=connected_meta, name=profile_name, sync_legacy=False)
-            active_profile = get_active_profile()
-        except Exception as e:
-            print(f"DEBUG: [account_status] Failed to save account metadata: {e}")
-
     profiles = get_profiles() if db.conn else []
+    shared_config = _load_current_config()
     runtime_status = _runtime_status_callback() if _runtime_status_callback else {}
     accounts = [
         _profile_to_account(
             profile,
-            active_profile_id,
-            connected_meta,
             runtime_status.get(profile["id"]),
+            shared_config,
         )
         for profile in profiles
     ]
-    active_account = next((item for item in accounts if item["id"] == active_profile_id), None)
+    running_accounts = [item for item in accounts if item["isRunning"]]
+    representative_account = (running_accounts or accounts or [None])[0]
 
     status = {
-        "logged_in": bool(connected_meta),
-        "session_exists": bool(saved_session),
-        "account": active_account if active_account and active_account.get("hasSession") else None,
+        "logged_in": bool(running_accounts),
+        "session_exists": any(item.get("hasSession") for item in accounts),
+        "account": representative_account,
         "accounts": accounts,
-        "active_profile_id": active_profile_id,
         "botReceiver": get_download_bot_diagnostics(ensure_polling=True),
     }
 
@@ -380,6 +339,7 @@ def init_web(
     stop_runtime_callback=None,
     runtime_status_callback=None,
     update_runtime_config_callback=None,
+    retry_upload_callback=None,
 ):
     """
     Set the value of the users variable.
@@ -397,6 +357,7 @@ def init_web(
     global _stop_runtime_callback
     global _runtime_status_callback
     global _update_runtime_config_callback
+    global _retry_upload_callback
     global _app_instance
     _client = client
     _restart_callback = restart_callback
@@ -404,6 +365,7 @@ def init_web(
     _stop_runtime_callback = stop_runtime_callback
     _runtime_status_callback = runtime_status_callback
     _update_runtime_config_callback = update_runtime_config_callback
+    _retry_upload_callback = retry_upload_callback
     _app_instance = app
 
     if app.web_login_secret:
@@ -583,6 +545,161 @@ def api_account_status():
     return jsonify(_get_telegram_account_status())
 
 
+_WEBDAV_PREVIEW_RESPONSE_HEADERS = (
+    "Content-Length",
+    "Content-Range",
+    "Accept-Ranges",
+    "ETag",
+    "Last-Modified",
+)
+_WEBDAV_INLINE_IMAGE_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "image/avif",
+    "image/bmp",
+}
+_WEBDAV_PREVIEW_RANGE_CHUNK_SIZE = 4 * 1024 * 1024
+
+
+def _bounded_webdav_preview_range(range_header: str) -> str:
+    """Cap open-ended preview ranges so browsers can quickly request MP4 tail metadata."""
+    match = re.fullmatch(r"bytes=(\d+)-", (range_header or "").strip())
+    if not match:
+        return range_header
+    start = int(match.group(1))
+    end = start + _WEBDAV_PREVIEW_RANGE_CHUNK_SIZE - 1
+    return f"bytes={start}-{end}"
+
+
+def _is_webdav_inline_type(content_type: str) -> bool:
+    """Only render media types that cannot execute same-origin page scripts."""
+    normalized_type = (content_type or "").split(";", 1)[0].strip().lower()
+    return (
+        normalized_type in _WEBDAV_INLINE_IMAGE_TYPES
+        or normalized_type.startswith("video/")
+        or normalized_type.startswith("audio/")
+        or normalized_type in {"application/pdf", "text/plain"}
+    )
+
+
+@_flask_app.route("/api/webdav/preview", methods=["GET", "HEAD"])
+@login_required
+def api_webdav_preview():
+    """Proxy an authenticated WebDAV object for same-origin browser preview."""
+    if not _app_instance or not getattr(_app_instance, "cloud_drive_config", None):
+        return jsonify({"success": False, "message": "WebDAV 未初始化"}), 503
+
+    drive_config = _app_instance.cloud_drive_config
+    remote_path = request.args.get("path", "")
+    try:
+        remote_url = CloudDrive.build_webdav_remote_url(
+            drive_config, remote_path
+        )
+    except ValueError as error:
+        return jsonify({"success": False, "message": str(error)}), 400
+
+    upstream_headers = {
+        "Accept-Encoding": "identity",
+        "User-Agent": "TelegramMediaDownloader/1.0",
+    }
+    # 视频拖动、断点读取和浏览器缓存校验都由 WebDAV 源站决定，代理只透传必要请求头。
+    for header_name in (
+        "Range",
+        "If-Range",
+        "If-None-Match",
+        "If-Modified-Since",
+    ):
+        if request.headers.get(header_name):
+            upstream_headers[header_name] = request.headers[header_name]
+    if request.args.get("download") != "1" and upstream_headers.get("Range"):
+        # MP4 的 moov 常位于文件尾部；有限分块促使浏览器尽快请求尾部元数据，而非先下载整部视频。
+        upstream_headers["Range"] = _bounded_webdav_preview_range(
+            upstream_headers["Range"]
+        )
+
+    auth = None
+    if drive_config.webdav_username:
+        auth = (
+            drive_config.webdav_username,
+            drive_config.webdav_password,
+        )
+
+    upstream = None
+    try:
+        upstream = requests.request(
+            request.method,
+            remote_url,
+            headers=upstream_headers,
+            auth=auth,
+            stream=True,
+            allow_redirects=True,
+            timeout=(10, 3600),
+        )
+    except requests.RequestException as error:
+        return jsonify(
+            {"success": False, "message": f"WebDAV 预览连接失败: {error}"}
+        ), 502
+
+    if upstream.status_code not in (200, 206, 304):
+        status_code = upstream.status_code
+        upstream.close()
+        if status_code == 401:
+            message = "WebDAV 鉴权失败"
+        elif status_code == 404:
+            message = "WebDAV 文件不存在"
+        elif status_code == 416:
+            message = "WebDAV 不接受该字节范围"
+        else:
+            message = f"WebDAV 返回状态 {status_code}"
+        return jsonify({"success": False, "message": message}), status_code
+
+    guessed_type = mimetypes.guess_type(remote_path)[0]
+    content_type = upstream.headers.get("Content-Type") or guessed_type or "application/octet-stream"
+    force_download = request.args.get("download") == "1" or not _is_webdav_inline_type(
+        content_type
+    )
+    filename = remote_path.replace("\\", "/").rstrip("/").split("/")[-1] or "download"
+    disposition = "attachment" if force_download else "inline"
+
+    response_headers = {
+        "Content-Type": content_type if not force_download else "application/octet-stream",
+        "Content-Disposition": (
+            f"{disposition}; filename*=UTF-8''{urllib.parse.quote(filename, safe='')}"
+        ),
+        "Cache-Control": "private, max-age=3600",
+        "X-Content-Type-Options": "nosniff",
+    }
+    for header_name in _WEBDAV_PREVIEW_RESPONSE_HEADERS:
+        if upstream.headers.get(header_name):
+            response_headers[header_name] = upstream.headers[header_name]
+    if upstream.status_code == 206 and "Accept-Ranges" not in response_headers:
+        response_headers["Accept-Ranges"] = "bytes"
+
+    if request.method == "HEAD" or upstream.status_code == 304:
+        upstream.close()
+        return Response(
+            status=upstream.status_code,
+            headers=response_headers,
+        )
+
+    def generate_webdav_content():
+        try:
+            for chunk in upstream.iter_content(chunk_size=256 * 1024):
+                if chunk:
+                    yield chunk
+        finally:
+            upstream.close()
+
+    return Response(
+        stream_with_context(generate_webdav_content()),
+        status=upstream.status_code,
+        headers=response_headers,
+        direct_passthrough=True,
+    )
+
+
 @_flask_app.route("/api/telegram/webhook/<secret>", methods=["POST"])
 def api_telegram_webhook(secret):
     """Receive Telegram Bot API webhook updates."""
@@ -606,33 +723,15 @@ def api_profiles_create():
             return jsonify({"success": False, "message": "Database not connected"}), 503
 
         data = request.get_json(silent=True) or {}
-        active_profile = get_active_profile()
-        copy_current_config = bool(
-            data.get("copy_current_config", data.get("clone_config", True))
-        )
-        activate = bool(data.get("activate", False))
         profile = create_profile(
             name=data.get("name") or data.get("profile_name") or "新账户",
-            config=active_profile.get("config") if copy_current_config else {},
-            app_data=active_profile.get("app_data") if copy_current_config else {},
-            bot_setting=active_profile.get("bot_setting") if copy_current_config else {},
-            activate=activate,
         )
-
-        runtime_result = None
-        if activate:
-            _apply_profile_to_app(profile)
-            runtime_result = {
-                "status": "selected",
-                "message": "账号档案已设为当前编辑档案。",
-            }
 
         return jsonify(
             {
                 "success": True,
                 "message": "Profile created.",
                 "profile": profile,
-                "runtime": runtime_result,
                 "account": _get_telegram_account_status(),
             }
         )
@@ -714,7 +813,7 @@ def api_profiles_delete(profile_id=None):
 @_flask_app.route("/api/profiles/activate", methods=["POST"])
 @login_required
 def api_profiles_activate():
-    """Switch the active profile used for editing/config pages."""
+    """Compatibility endpoint for old clients; account selection is now local UI state."""
     try:
         if not db.conn:
             return jsonify({"success": False, "message": "Database not connected"}), 503
@@ -724,16 +823,15 @@ def api_profiles_activate():
         if not profile_id:
             return jsonify({"success": False, "message": "profile_id is required"}), 400
 
-        active_profile = activate_profile(profile_id)
-        _apply_profile_to_app(active_profile)
+        get_profile(profile_id)
 
         return jsonify(
             {
                 "success": True,
-                "message": "Profile activated.",
+                "message": "Account selection no longer changes backend state.",
                 "runtime": {
                     "status": "selected",
-                    "message": "账号档案已设为当前编辑档案。",
+                    "message": "账号选择仅用于当前页面操作。",
                 },
                 "account": _get_telegram_account_status(),
             }
@@ -783,17 +881,16 @@ def api_profiles_start():
 
 @_flask_app.route("/api/profiles/bot_access", methods=["POST"])
 @_flask_app.route("/api/profiles/<profile_id>/bot_access", methods=["POST", "PATCH"])
+@_flask_app.route("/api/bot/access", methods=["POST", "PATCH"])
 @login_required
 def api_profiles_bot_access(profile_id=None):
-    """Save Bot submitter access settings for one profile."""
+    """Save process-wide Bot submitter access settings."""
     try:
         if not db.conn:
             return jsonify({"success": False, "message": "Database not connected"}), 503
 
         data = request.get_json(silent=True) or {}
         profile_id = profile_id or data.get("profile_id") or data.get("profileId")
-        if not profile_id:
-            return jsonify({"success": False, "message": "profile_id is required"}), 400
 
         mode = data.get("mode") or data.get("bot_download_access_mode") or "self"
         if mode not in ("self", "allowed", "public"):
@@ -804,14 +901,17 @@ def api_profiles_bot_access(profile_id=None):
             allowed_users = []
         allowed_users = [str(item).strip() for item in allowed_users if str(item).strip()]
 
-        profile = next((item for item in get_profiles() if item["id"] == profile_id), None)
-        if not profile:
-            return jsonify({"success": False, "message": "Profile not found"}), 404
+        if profile_id:
+            get_profile(profile_id)
 
         next_config = _apply_bot_access_to_config(
-            profile.get("config") or {}, mode, allowed_users
+            _load_current_config(), mode, allowed_users
         )
-        result = _save_profile_config(profile_id, next_config)
+        result = (
+            _save_profile_config(profile_id, next_config)
+            if profile_id
+            else _save_current_config(next_config)
+        )
         if result.get("status") == "error":
             return jsonify({"success": False, **result}), 500
 
@@ -868,27 +968,19 @@ def api_account_logout():
     global _client
     try:
         data = request.get_json(silent=True) or {}
-        active_profile = get_active_profile() if db.conn else {}
-        profile_id = data.get("profile_id") or data.get("profileId") or active_profile.get("id")
-        is_active = profile_id == active_profile.get("id")
+        profile_id = data.get("profile_id") or data.get("profileId")
+        if not profile_id and db.conn:
+            saved_profiles = get_profiles()
+            if len(saved_profiles) == 1:
+                profile_id = saved_profiles[0]["id"]
+        if not profile_id:
+            return jsonify({"success": False, "message": "profile_id is required"}), 400
 
-        if is_active and _stop_runtime_callback:
-            _stop_runtime_callback(profile_id)
-        elif _stop_runtime_callback and profile_id:
+        if _stop_runtime_callback:
             _stop_runtime_callback(profile_id)
 
-        if db.conn and profile_id:
+        if db.conn:
             clear_profile_session(profile_id)
-
-        if is_active and _client:
-            try:
-                loop = _app_instance.loop
-                if _client.is_connected:
-                    future = asyncio.run_coroutine_threadsafe(_client.disconnect(), loop)
-                    future.result(timeout=10)
-            except Exception as e:
-                print(f"DEBUG: [api_account_logout] Error disconnecting client: {e}")
-            _client = None
 
         return jsonify(
             {
@@ -913,17 +1005,15 @@ def api_account_connect_saved_session():
 
         data = request.get_json(silent=True) or {}
         requested_profile_id = data.get("profile_id") or data.get("profileId")
-        if requested_profile_id:
-            active_profile = activate_profile(requested_profile_id)
-            _apply_profile_to_app(active_profile)
-        else:
-            active_profile = get_active_profile()
+        if not requested_profile_id:
+            return jsonify({"success": False, "message": "profile_id is required"}), 400
+        profile = get_profile(requested_profile_id)
 
-        saved_session = active_profile.get("session") or db.load_setting("session")
+        saved_session = profile.get("session")
         if not saved_session:
             return jsonify({"success": False, "message": "No saved Telegram session found."}), 404
 
-        runtime_result = _start_runtime_callback(None, active_profile)
+        runtime_result = _start_runtime_callback(None, profile)
         return jsonify({"success": True, "runtime": runtime_result, "account": _get_telegram_account_status()})
     except Exception as e:
         import traceback
@@ -964,8 +1054,7 @@ def api_account_send_code():
                 _client = None
 
         if target_profile_id and not create_profile_flag:
-            target_profile = activate_profile(target_profile_id)
-            _apply_profile_to_app(target_profile)
+            get_profile(target_profile_id)
 
         config_data = _load_current_config()
         api_id, api_hash, request_api_supplied = _resolve_api_credentials(data, config_data)
@@ -1179,20 +1268,6 @@ def _sync_web_login_secret():
         _flask_app.config["LOGIN_DISABLED"] = True
 
 
-def _apply_profile_to_app(profile: dict):
-    """Apply a profile's config/data to the in-memory application."""
-    if not _app_instance:
-        return
-
-    _app_instance.chat_download_config = {}
-    _app_instance._chat_id = ""
-    _app_instance.config = profile.get("config") or {}
-    _app_instance.assign_config(_app_instance.config)
-    _app_instance.app_data = profile.get("app_data") or {}
-    _app_instance.assign_app_data(_app_instance.app_data)
-    _sync_web_login_secret()
-
-
 def _save_session_and_start_runtime(client):
     """Persist Telegram session and start runtime tasks if a callback is available."""
     print("DEBUG: [tg_login] Calling export_session_string...")
@@ -1216,43 +1291,38 @@ def _save_session_and_start_runtime(client):
     create_new_profile = bool(session.pop("login_create_profile", False))
     login_api_id = session.pop("login_api_id", None)
     login_api_hash = session.pop("login_api_hash", None)
-    profile = get_active_profile() if db.conn else None
     profile_config = _load_current_config()
     if login_api_id and login_api_hash:
         profile_config = dict(profile_config)
         profile_config["api_id"] = login_api_id
         profile_config["api_hash"] = login_api_hash
+        # Telegram API 凭据属于下载器部署，新增账号时更新全局配置供所有 runtime 使用。
+        _save_current_config(profile_config)
 
+    profile = None
     if db.conn:
-        print("DEBUG: [tg_login] Saving session to active profile...")
+        print("DEBUG: [tg_login] Saving session to target profile...")
         if create_new_profile or not target_profile_id:
             profile = create_profile(
                 name=display_name,
-                config=profile_config,
                 session=session_string,
                 account=account_meta,
                 runtime_enabled=True,
-                activate=True,
             )
         else:
             profile = update_profile(
                 target_profile_id,
                 name=display_name,
-                config=profile_config,
                 session=session_string,
                 account=account_meta,
                 runtime_enabled=True,
             )
-            activate_profile(target_profile_id)
         print("DEBUG: [tg_login] Profile session saved successfully.")
     else:
         print("WARNING: [tg_login] Database not connected, session NOT saved!")
 
-    if _app_instance and db.conn:
-        _apply_profile_to_app(get_active_profile())
-
     runtime_result = {"status": "not_started", "message": "Runtime callback is not configured."}
-    if _start_runtime_callback:
+    if _start_runtime_callback and profile:
         try:
             runtime_result = _start_runtime_callback(client, profile)
         except Exception as e:
@@ -1297,16 +1367,19 @@ def tg_login():
     if request.method == "POST" and request.form.get("action") == "logout":
         print("DEBUG: [tg_login] Logout requested")
         try:
+            profile_id = request.form.get("profile_id")
+            if not profile_id:
+                return "Error: profile_id is required"
             if _stop_runtime_callback:
                 try:
-                    stop_result = _stop_runtime_callback(get_active_profile()["id"])
+                    stop_result = _stop_runtime_callback(profile_id)
                     print(f"DEBUG: [tg_login] Runtime stop result: {stop_result}")
                 except Exception as e:
                     print(f"DEBUG: [tg_login] Error stopping runtime: {e}")
 
             # Clear session from database
             if db.conn:
-                clear_profile_session(get_active_profile()["id"])
+                clear_profile_session(profile_id)
                 print("DEBUG: [tg_login] Session cleared from database")
             
             # Disconnect and clear client
@@ -1333,12 +1406,15 @@ def tg_login():
             if not db.conn:
                 return "Error: Database not connected"
 
-            active_profile = get_active_profile()
-            saved_session = active_profile.get("session")
+            profile_id = request.form.get("profile_id")
+            if not profile_id:
+                return "Error: profile_id is required"
+            profile = get_profile(profile_id)
+            saved_session = profile.get("session")
             if not saved_session:
                 return "Error: No saved Telegram session found."
 
-            config = active_profile.get("config") or _load_current_config()
+            config = _load_current_config()
             api_id, api_hash, _ = _resolve_api_credentials(config_data=config)
             if not api_id or not api_hash:
                 return "Error: api_id or api_hash not found. Please set them in Config page first."
@@ -1352,7 +1428,7 @@ def tg_login():
                 loop,
                 saved_session,
             )
-            runtime_result = _start_runtime_callback(_client, active_profile) if _start_runtime_callback else {
+            runtime_result = _start_runtime_callback(_client, profile) if _start_runtime_callback else {
                 "status": "not_started",
                 "message": "Runtime callback is not configured.",
             }
@@ -1641,6 +1717,10 @@ def _get_formatted_list(already_down=False):
         profile_id = (d_item or {}).get("profile_id") or (u_item or {}).get(
             "profile_id"
         )
+        task_record_state = (u_item or {}).get("state") or (d_item or {}).get(
+            "state"
+        )
+        is_failed = task_record_state == "failed"
 
         # Extract basic info
         file_name = base_item.get("file_name", "Unknown")
@@ -1687,28 +1767,34 @@ def _get_formatted_list(already_down=False):
                 upload_progress = min(download_progress, 99.9)
 
         # --- Activity/Completion Check ---
-        # A task is ONLY "Completed" if it exists in download_result AND is 100%
-        # (This confirms verify_and_save_download was called after WebDAV confirmed success)
-        is_truly_finished = False
-        if d_item:
-            if d_item.get("down_byte", 0) >= d_item.get("total_size", 1):
-                is_truly_finished = True
+        download_complete = bool(
+            d_item
+            and d_item.get("down_byte", 0) >= d_item.get("total_size", 1)
+        )
+        upload_complete = bool(
+            not u_item
+            or (
+                upload_total > 0
+                and upload_processed >= upload_total
+            )
+        )
+        # WebDAV 上传是下载任务的第二阶段；下载到 100% 但上传未完成时仍属于活动任务。
+        is_truly_finished = download_complete and upload_complete
         
         # If it's effectively 100% data transfer but NOT yet marked finished in history,
         # it means it's "Finishing" (waiting for server to close the stream/confirm receipt)
         is_finishing = False
-        raw_progress = (down_byte / total_size * 100) if total_size > 0 else 0
-        if not is_truly_finished and raw_progress >= 99.9:
+        if download_complete and is_uploading and upload_progress >= 99.9:
             is_finishing = True
 
         # Filter based on requested list type
         if already_down:
-            # Asking for History -> Show only truly physically finished
-            if not is_truly_finished:
+            # 云盘归档只包含成功完成的记录；失败记录留在任务仪表盘供重试或删除。
+            if not is_truly_finished or is_failed:
                 continue
         else:
-            # Asking for Active -> Show only NOT finished
-            if is_truly_finished:
+            # 活动接口同时承载失败终态，让仪表盘能够展示失败原因和后续操作。
+            if is_truly_finished and not is_failed:
                 continue
 
         # --- Strings Formatting ---
@@ -1748,12 +1834,14 @@ def _get_formatted_list(already_down=False):
 
         # Determine status text
         status_text = ""
-        if is_truly_finished:
+        if is_failed:
+            status_text = "失败"
+        elif is_truly_finished:
             status_text = "已完成"
-        elif is_finishing:
-            status_text = "正在完成..."
         elif is_uploading:
-            if upload_progress > 0:
+            if is_finishing:
+                status_text = "正在完成..."
+            elif upload_progress > 0:
                 status_text = "上传中"
             else:
                 status_text = "准备上传"
@@ -1780,10 +1868,15 @@ def _get_formatted_list(already_down=False):
             "completed_ts": completed_ts if is_truly_finished else None,
             "profile_id": profile_id,
             "profileId": profile_id,
-            "state": get_task_state(chat_id, idx, profile_id)
-            if not already_down
-            else 'finished',
-            "status": status_text
+            "state": "failed"
+            if is_failed
+            else (
+                get_task_state(chat_id, idx, profile_id)
+                if not already_down
+                else "finished"
+            ),
+            "status": status_text,
+            "error": (u_item or {}).get("error") or (d_item or {}).get("error") or "",
         }
         data.append(item)
     return data
@@ -1792,7 +1885,7 @@ def _get_formatted_list(already_down=False):
 @_flask_app.route("/task_control", methods=["POST"])
 @login_required
 def api_task_control():
-    """Control an individual task (pause, resume, delete)"""
+    """Control an individual task (pause, resume, reset upload, delete)."""
     try:
         data = request.get_json()
         if not data:
@@ -1801,11 +1894,62 @@ def api_task_control():
         chat_id = int(data.get("chat_id", 0))
         message_id = int(data.get("message_id", 0))
         profile_id = data.get("profile_id") or data.get("profileId")
-        action = data.get("action") # 'pause', 'resume', 'delete'
+        action = data.get("action") # 'pause', 'resume', 'reset_upload', 'delete'
         
         if not chat_id or not message_id or not action:
             return jsonify({"success": False, "message": "参数不齐全"}), 400
         
+        if action == "reset_upload":
+            task_record = get_download_result().get(chat_id, {}).get(message_id)
+            if not task_record:
+                return jsonify({"success": False, "message": "任务不存在"}), 404
+            if task_record.get("state") != "failed":
+                return jsonify(
+                    {"success": False, "message": "只有失败任务可以重置上传"}
+                ), 409
+            if profile_id and task_record.get("profile_id") not in (profile_id, None):
+                return jsonify({"success": False, "message": "任务不属于当前账号"}), 403
+            if not _retry_upload_callback:
+                return jsonify(
+                    {"success": False, "message": "下载运行态尚未就绪"}
+                ), 503
+
+            matched_task = next(
+                (
+                    item
+                    for item in _get_formatted_list(already_down=False)
+                    if int(item["chat"]) == chat_id
+                    and int(item["id"]) == message_id
+                    and (
+                        not profile_id
+                        or item.get("profile_id") in (profile_id, None)
+                    )
+                ),
+                None,
+            )
+            if not matched_task:
+                return jsonify({"success": False, "message": "失败任务不可用"}), 409
+
+            effective_profile_id = profile_id or task_record.get("profile_id")
+            result = _retry_upload_callback(
+                chat_id,
+                message_id,
+                effective_profile_id,
+                matched_task["remote_path"],
+                task_record.get("file_name") or matched_task["filename"],
+                int(task_record.get("total_size") or 0),
+            )
+            if result.get("status") == "error":
+                return jsonify({"success": False, "message": result["message"]}), 409
+            return jsonify(
+                {
+                    "success": True,
+                    "message": result.get("message")
+                    or "云端异常文件已重置，任务已重新入队。",
+                    "reset": result,
+                }
+            )
+
         state_map = {
             'pause': 'paused',
             'resume': 'running',

@@ -24,6 +24,7 @@ import { AccountManager } from './components/AccountManager';
 import { ConfigPanel } from './components/ConfigPanel';
 import { FileManager } from './components/FileManager';
 import { TaskTable } from './components/TaskTable';
+import { buildDashboardTasks, statusFromBackendState } from './taskModel';
 import {
   BotAccessConfig,
   BotStatusConfig,
@@ -57,6 +58,7 @@ interface BackendTask {
   completed_ts?: number | null;
   state?: string;
   status?: string;
+  error?: string;
 }
 
 function backendTaskProfile(item: BackendTask): string | null {
@@ -76,7 +78,6 @@ interface BootstrapPayload {
     session_exists: boolean;
     account: TelegramAccount | null;
     accounts?: TelegramAccount[];
-    active_profile_id?: string;
   };
 }
 
@@ -143,12 +144,7 @@ function mediaTypeFromFilename(filename: string): MediaType {
 }
 
 function statusFromBackend(item: BackendTask): SyncTask['status'] {
-  if (item.state === 'paused' || item.status === '已暂停') return 'paused';
-  if (item.status === '上传中' || Number(item.upload_progress) > 0) return 'uploading';
-  if (item.status === '正在完成...') return 'syncing';
-  if (item.status === '已完成') return 'completed';
-  if (item.status === '等待中') return 'pending';
-  return 'downloading';
+  return statusFromBackendState(item);
 }
 
 function backendDateToIso(text?: string | null, ts?: number | null): string {
@@ -176,6 +172,7 @@ function taskFromBackend(item: BackendTask): SyncTask {
     status: statusFromBackend(item),
     speedKb: Math.max(parseSpeedKb(item.download_speed), parseSpeedKb(item.upload_speed)),
     remotePath: item.remote_path || item.save_path || '',
+    errorMsg: item.error || undefined,
   };
 }
 
@@ -326,9 +323,7 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
 }
 
 export default function App() {
-  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
-    return (localStorage.getItem('tg_sync_theme') as 'dark' | 'light') || 'dark';
-  });
+  const [theme, setTheme] = useState<'dark' | 'light'>('light');
   const [activeTab, setActiveTab] = useState<ActiveTab>(() => tabFromPath());
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(() => {
@@ -340,10 +335,10 @@ export default function App() {
   const [syncRule, setSyncRule] = useState<SyncRule>(defaultRule);
   const [botAccess, setBotAccess] = useState<BotAccessConfig>(defaultBotAccess);
   const [botStatus, setBotStatus] = useState<BotStatusConfig>(defaultBotStatus);
-  const [tasks, setTasks] = useState<SyncTask[]>([]);
+  const [liveTasks, setLiveTasks] = useState<SyncTask[]>([]);
+  const [terminalTasks, setTerminalTasks] = useState<SyncTask[]>([]);
   const [completedFiles, setCompletedFiles] = useState<CompletedFile[]>([]);
   const [accounts, setAccounts] = useState<TelegramAccount[]>([]);
-  const [activeAccountId, setActiveAccountId] = useState<string | null>(null);
   const [sessionExists, setSessionExists] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
   const sidebarRef = useRef<HTMLElement>(null);
@@ -372,13 +367,10 @@ export default function App() {
     setSessionExists(accountStatus.session_exists);
     if (accountList.length > 0) {
       setAccounts(accountList);
-      setActiveAccountId(accountStatus.active_profile_id || accountList.find((item) => item.isActive)?.id || accountList[0].id);
     } else if (account) {
       setAccounts([account]);
-      setActiveAccountId(accountStatus.active_profile_id || account.id);
     } else {
       setAccounts([]);
-      setActiveAccountId(null);
     }
   };
 
@@ -400,14 +392,26 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // Web 服务会先于 Telegram runtime 就绪；定时刷新让账号卡片自动收敛到真实运行状态。
+    const intervalId = window.setInterval(() => {
+      fetch('/api/account/status')
+        .then((response) => response.json())
+        .then(applyAccountStatus)
+        .catch(() => undefined);
+    }, 5000);
+    return () => window.clearInterval(intervalId);
+  }, []);
+
+  useEffect(() => {
     const source = new EventSource('/stream');
     source.onmessage = (event) => {
       const payload = JSON.parse(event.data);
       if (payload.type !== 'update') return;
       if (Array.isArray(payload.tasks)) {
-        setTasks(payload.tasks.map(taskFromBackend));
+        setLiveTasks(payload.tasks.map(taskFromBackend));
       }
       if (Array.isArray(payload.history)) {
+        setTerminalTasks(payload.history.map(taskFromBackend));
         setCompletedFiles(payload.history.map(completedFromBackend));
       }
     };
@@ -430,35 +434,38 @@ export default function App() {
     setStatusMessage(result.message || '配置已保存。');
   };
 
-  const saveBotAccess = async (profileId: string, nextBotAccess: BotAccessConfig) => {
+  const saveBotAccess = async (nextBotAccess: BotAccessConfig) => {
     const result = await postJson<{
       account: BootstrapPayload['account'];
       message?: string;
       config?: Record<string, any>;
-    }>(`/api/profiles/${encodeURIComponent(profileId)}/bot_access`, {
+    }>('/api/bot/access', {
       mode: nextBotAccess.mode,
       allowedUsers: nextBotAccess.allowedUsers,
     });
     applyAccountStatus(result.account);
-    if (profileId === activeAccountId && result.config) {
+    if (result.config) {
       setRawConfig(result.config);
       setBotAccess(botAccessFromConfig(result.config));
     }
     setStatusMessage(result.message || '配置已保存。');
   };
 
-  const handleTaskAction = async (id: string, action: 'pause' | 'resume' | 'delete') => {
+  const handleTaskAction = async (id: string, action: 'pause' | 'resume' | 'reset_upload' | 'delete') => {
     const parts = id.split(':');
     const hasProfile = parts.length >= 3;
     const profileId = hasProfile ? parts[0] : undefined;
     const chatId = hasProfile ? parts[1] : parts[0];
     const messageId = hasProfile ? parts[2] : parts[1];
-    await postJson('/task_control', {
+    const result = await postJson<{ message?: string }>('/task_control', {
       chat_id: chatId,
       message_id: messageId,
       profile_id: profileId,
       action,
     });
+    if (action === 'reset_upload') {
+      setStatusMessage(result.message || '云端异常文件已重置，任务已重新入队。');
+    }
   };
 
   const handleAccountRefresh = async () => {
@@ -467,24 +474,12 @@ export default function App() {
     applyAccountStatus(data);
   };
 
-  const handleSelectAccount = async (profileId: string) => {
-    const data = await postJson<{ account: BootstrapPayload['account']; runtime?: any }>('/api/profiles/activate', {
-      profile_id: profileId,
-    });
-    applyAccountStatus(data.account);
-    await loadBootstrap();
-    setStatusMessage(data.runtime?.message || '账户档案已切换。');
-  };
-
-  const handleCreateProfile = async (name: string, copyCurrentConfig: boolean, activate = false) => {
-    const data = await postJson<{ account: BootstrapPayload['account']; runtime?: any }>('/api/profiles', {
+  const handleCreateProfile = async (name: string) => {
+    const data = await postJson<{ account: BootstrapPayload['account'] }>('/api/profiles', {
       name,
-      copy_current_config: copyCurrentConfig,
-      activate,
     });
     applyAccountStatus(data.account);
-    if (activate) await loadBootstrap();
-    setStatusMessage(copyCurrentConfig ? '已复制当前配置创建账号档案。' : '已创建空账号档案。');
+    setStatusMessage('已创建账号档案。');
   };
 
   const handleRenameProfile = async (profileId: string, name: string) => {
@@ -577,10 +572,11 @@ export default function App() {
     setStatusMessage(data.runtime?.message || 'Telegram 登录成功。');
   };
 
-  const currentActiveAccount = useMemo(
-    () => accounts.find((account) => account.id === activeAccountId),
-    [accounts, activeAccountId],
+  const runningAccounts = useMemo(
+    () => accounts.filter((account) => account.isRunning || account.status === 'connected'),
+    [accounts],
   );
+  const representativeAccount = runningAccounts[0] || accounts[0];
 
   const navigate = (tab: ActiveTab) => {
     setActiveTab(tab);
@@ -609,6 +605,76 @@ export default function App() {
     </button>
   );
 
+  const tasks = useMemo(
+    () => buildDashboardTasks(liveTasks, terminalTasks),
+    [liveTasks, terminalTasks],
+  );
+  const activeTasks = tasks.filter((task) => !['completed', 'failed'].includes(task.status));
+  const downloadingCount = tasks.filter((task) => task.status === 'downloading').length;
+  const uploadingCount = tasks.filter((task) => task.status === 'uploading').length;
+  const pendingCount = tasks.filter((task) => task.status === 'pending').length;
+  const failedCount = tasks.filter((task) => task.status === 'failed').length;
+  const totalSpeed = tasks.reduce((sum, task) => sum + (task.speedKb || 0), 0);
+
+  // 总览稿保留为设计参照；正式界面按模块使用独立页面，避免把四个工作区挤在一起。
+  if (false) {
+    return (
+      <div className="light-mode min-h-screen bg-[#f7faff] text-slate-900 font-sans antialiased lg:h-screen lg:overflow-hidden">
+        <header className="sticky top-0 z-40 border-b border-[#dbe5f1] bg-white/95 px-5 py-3 shadow-[0_1px_8px_rgba(30,75,120,0.06)] backdrop-blur">
+          <div className="mx-auto flex max-w-[1880px] items-center justify-between gap-5">
+            <div className="flex items-center gap-3">
+              <span className="grid h-10 w-10 place-items-center rounded-xl bg-gradient-to-br from-[#32a7ef] to-[#157bd5] text-white shadow-[0_6px_18px_rgba(24,137,218,0.24)]"><CloudLightning className="h-5 w-5" /></span>
+              <div><div className="flex items-center gap-2"><h1 className="text-[17px] font-bold tracking-tight text-[#14233b]">Telegram 媒体同步管理后台</h1><span className="rounded bg-[#eaf4ff] px-1.5 py-0.5 text-[9px] font-semibold text-[#187fe0]">v{version}</span></div><p className="mt-0.5 text-[10px] text-[#7a8aa0]">专业的媒体同步与存储管理平台</p></div>
+            </div>
+            <nav className="hidden items-center gap-6 text-[11px] font-semibold text-[#4e627c] md:flex">
+              <a href="#accounts" className="flex items-center gap-1.5 hover:text-[#1683e6]"><Users className="h-4 w-4 text-[#1683e6]" />多账号管理</a>
+              <a href="#settings" className="flex items-center gap-1.5 hover:text-[#1683e6]"><Sliders className="h-4 w-4 text-[#1683e6]" />自动同步</a>
+              <span className="flex items-center gap-1.5"><CheckCircle2 className="h-4 w-4 text-[#1683e6]" />安全可靠</span>
+              <a href="#tasks" className="flex items-center gap-1.5 hover:text-[#1683e6]"><Tv className="h-4 w-4 text-[#1683e6]" />实时监控</a>
+            </nav>
+          </div>
+        </header>
+
+        <main className="mx-auto grid max-w-[1880px] grid-cols-1 gap-3 p-3 lg:h-[calc(100vh-65px)] lg:grid-cols-2 lg:grid-rows-[minmax(0,1.12fr)_minmax(0,0.92fr)_88px] lg:overflow-hidden">
+          {statusMessage && <div className="col-span-full flex items-center gap-2 rounded-lg border border-[#b9dcff] bg-[#edf7ff] px-3 py-2 text-[11px] text-[#176bb4]"><CheckCircle2 className="h-4 w-4" />{statusMessage}</div>}
+
+          <section id="tasks" className="overview-panel min-h-[480px] lg:h-auto lg:min-h-0">
+            <div className="overview-title"><span>1</span><div><h2>任务 / 下载同步仪表盘</h2><p>同步调度并实时监测 Telegram 队列传输状态</p></div></div>
+            <div className="grid grid-cols-2 gap-2 px-3 pb-3 sm:grid-cols-3 lg:grid-cols-6">
+              {[
+                ['运行账号', runningAccounts.length, 'text-emerald-500'], ['下载中', downloadingCount, 'text-[#1988e8]'],
+                ['上传中', uploadingCount, 'text-[#1988e8]'], ['等待中', pendingCount, 'text-amber-500'],
+                ['失败任务', failedCount, 'text-rose-500'], ['当前总速度', `${totalSpeed.toFixed(1)} KB/s`, 'text-emerald-500'],
+              ].map(([label, value, color]) => <div key={String(label)} className="rounded-lg border border-[#dce6f2] bg-white px-3 py-2 shadow-[0_2px_8px_rgba(34,76,120,0.04)]"><p className="text-[9px] text-[#8291a5]">{label}</p><p className={`mt-1 truncate text-[17px] font-bold ${color}`}>{value}</p><p className="mt-1 text-[8px] text-[#9aa8b8]">● 实时更新</p></div>)}
+            </div>
+            <div className="overview-body px-3 pb-3"><TaskTable tasks={tasks} onPauseTask={(id) => handleTaskAction(id, 'pause')} onResumeTask={(id) => handleTaskAction(id, 'resume')} onResetUpload={(id) => handleTaskAction(id, 'reset_upload')} onDeleteTask={(id) => handleTaskAction(id, 'delete')} onAddTask={() => setStatusMessage('请通过监控会话或 Bot 创建下载任务。')} /></div>
+            <div className="border-t border-[#e2eaf3] px-4 py-2 text-[9px] text-[#78899e]">正在传输: <b className="text-[#1988e8]">{activeTasks.length}</b>　已归档: <b className="text-emerald-500">{completedFiles.length}</b></div>
+          </section>
+
+          <section id="files" className="overview-panel min-h-[480px] lg:h-auto lg:min-h-0">
+            <div className="overview-title"><span>2</span><div><h2>已归档文件 / 同步记录</h2><p>检索与管理已完成同步的媒体资源</p></div></div>
+            <div className="overview-body px-3 pb-3"><FileManager completedFiles={completedFiles} /></div>
+          </section>
+
+          <section id="settings" className="overview-panel min-h-[540px] lg:h-auto lg:min-h-0">
+            <div className="overview-title"><span>3</span><div><h2>同步设置</h2><p>存储挂载、同步规则与 Bot 通知配置</p></div></div>
+            <div className="overview-body px-3 pb-3"><ConfigPanel config={cloudConfig} rule={syncRule} statusConfig={botStatus} onSaveConfig={setCloudConfig} onSaveRule={setSyncRule} onSaveAll={saveConfig} /></div>
+          </section>
+
+          <section id="accounts" className="overview-panel min-h-[540px] lg:h-auto lg:min-h-0">
+            <div className="overview-title"><span>4</span><div><h2>Telegram 账号</h2><p>多账号 Session、登录验证与 Bot 投递权限</p></div></div>
+            <div className="overview-body px-3 pb-3"><AccountManager accounts={accounts} botAccess={botAccess} sessionExists={sessionExists} onCreateProfile={handleCreateProfile} onRenameProfile={handleRenameProfile} onDeleteProfile={handleDeleteProfile} onDisconnectAccount={handleLogout} onStartAccount={handleStartAccount} onStopAccount={handleStopAccount} onConnectSavedSession={handleConnectSaved} onSendCode={handleSendCode} onVerifyCode={handleVerifyCode} onVerifyPassword={handleVerifyPassword} onRefresh={handleAccountRefresh} onSaveBotAccess={saveBotAccess} /></div>
+          </section>
+
+          <section className="col-span-full grid gap-3 md:grid-cols-[280px_1fr]">
+            <div className="overview-panel p-4"><h3 className="text-xs font-bold text-[#223550]">状态说明</h3><div className="mt-4 grid grid-cols-3 gap-y-3 text-[9px] text-[#78899e]">{['等待中','下载中','上传中','同步中','已暂停','已完成','失败'].map((item, index) => <span key={item} className="flex items-center gap-1"><i className={`h-1.5 w-1.5 rounded-full ${index === 6 ? 'bg-rose-500' : index === 5 ? 'bg-emerald-500' : 'bg-[#2694ed]'}`} />{item}</span>)}</div></div>
+            <div className="overview-panel p-4"><h3 className="text-xs font-bold text-[#223550]">产品特色</h3><div className="mt-4 grid grid-cols-3 gap-4 text-center text-[9px] text-[#52677f] sm:grid-cols-6">{['多账号并发管理','实时任务监控','自动重试机制','断点续传','文件去重','安全存储'].map((item) => <div key={item}><span className="mx-auto mb-2 grid h-9 w-9 place-items-center rounded-full bg-[#edf7ff] text-[#1988e8]"><CheckCircle2 className="h-4 w-4" /></span>{item}</div>)}</div></div>
+          </section>
+        </main>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans antialiased">
       <header className="border-b border-slate-900 bg-slate-900/60 backdrop-blur-md sticky top-0 z-40 px-4 py-3 shrink-0">
@@ -629,12 +695,10 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2.5 sm:gap-4">
-            {currentActiveAccount ? (
+            {representativeAccount ? (
               <div className="flex items-center gap-2 text-xs bg-slate-950/80 px-2.5 py-1.5 rounded-lg border border-slate-805/90">
-                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
-                <span className="text-slate-300 font-mono hidden md:inline text-[11px]">{currentActiveAccount.username || currentActiveAccount.firstName}</span>
-                <span className="text-slate-600">|</span>
-                <span className="text-indigo-400 font-mono text-[11px] font-semibold">{accounts.length} 会话</span>
+                <span className={`w-2 h-2 rounded-full shrink-0 ${runningAccounts.length ? 'bg-emerald-500 animate-pulse' : 'bg-slate-600'}`} />
+                <span className="text-indigo-400 font-mono text-[11px] font-semibold">{runningAccounts.length} 运行 / {accounts.length} 会话</span>
               </div>
             ) : (
               <span className="text-xs text-rose-400 flex items-center gap-1 bg-rose-500/10 px-2.5 py-1 rounded-md border border-rose-500/20">
@@ -749,8 +813,8 @@ export default function App() {
             <div className="flex-1 flex flex-col space-y-4 overflow-hidden">
               <div className="flex items-center justify-between border-b border-slate-900 pb-3">
                 <div className="space-y-0.5">
-                  <h2 className="text-sm font-semibold text-white">下载同步仪表盘 (进行中)</h2>
-                  <p className="text-[10px] text-slate-500 font-medium">同步调度并实时监测 Telegram 队列的流式传输备份状态</p>
+                  <h2 className="text-sm font-semibold text-white">下载同步仪表盘</h2>
+                  <p className="text-[10px] text-slate-500 font-medium">集中查看进行中、成功与失败的 Telegram 同步任务</p>
                 </div>
               </div>
               <div className="flex-1 overflow-y-auto min-h-0">
@@ -758,6 +822,7 @@ export default function App() {
                   tasks={tasks}
                   onPauseTask={(id) => handleTaskAction(id, 'pause')}
                   onResumeTask={(id) => handleTaskAction(id, 'resume')}
+                  onResetUpload={(id) => handleTaskAction(id, 'reset_upload')}
                   onDeleteTask={(id) => handleTaskAction(id, 'delete')}
                   onAddTask={() => setStatusMessage('手动创建任务暂未接入后端，请通过监控会话或 Bot 触发下载。')}
                 />
@@ -802,9 +867,8 @@ export default function App() {
               </div>
               <AccountManager
                 accounts={accounts}
-                activeAccountId={activeAccountId}
+                botAccess={botAccess}
                 sessionExists={sessionExists}
-                onSelectAccount={handleSelectAccount}
                 onCreateProfile={handleCreateProfile}
                 onRenameProfile={handleRenameProfile}
                 onDeleteProfile={handleDeleteProfile}

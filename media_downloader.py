@@ -6,6 +6,7 @@ import inspect
 import logging
 import os
 import shutil
+import socket
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Union
@@ -22,6 +23,8 @@ from module.db import db
 from module.download_stat import (
     add_pending_download,
     get_pending_downloads,
+    mark_download_failed,
+    prepare_download_retry,
     remove_pending_download,
     update_download_status,
     verify_and_save_download,
@@ -29,10 +32,8 @@ from module.download_stat import (
 from module.get_chat_history_v2 import get_chat_history_v2
 from module.language import _t
 from module.profiles import (
-    get_active_profile,
+    get_profile,
     get_profiles,
-    save_active_profile,
-    sync_active_profile_to_legacy,
     update_profile,
 )
 from module.pyrogram_extension import (
@@ -47,11 +48,31 @@ from module.pyrogram_extension import (
     update_upload_stat,
     upload_telegram_chat,
 )
+
 from module.web import init_web
+from module.upload_stat import register_upload_task, remove_upload_status
 from utils.format import truncate_filename, validate_title
 from utils.log import LogFilter
 from utils.meta import print_meta
 from utils.meta_data import MetaData
+from utils.updates import check_for_updates
+
+_instance_lock_socket = None
+
+
+def acquire_instance_lock(port: int = 43791) -> bool:
+    """Keep exactly one downloader process responsible for Telegram replies."""
+
+    global _instance_lock_socket
+    lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        lock_socket.bind(("127.0.0.1", port))
+        lock_socket.listen(1)
+    except OSError:
+        lock_socket.close()
+        return False
+    _instance_lock_socket = lock_socket
+    return True
 
 logging.basicConfig(
     level=logging.INFO,
@@ -67,11 +88,91 @@ app = Application(CONFIG_NAME, DATA_FILE_NAME, APPLICATION_NAME)
 
 queue: asyncio.Queue = asyncio.Queue()
 RETRY_TIME_OUT = 3
+TELEGRAM_CHUNK_SIZE = 1024 * 1024
 
 logging.getLogger("pyrogram.session.session").addFilter(LogFilter())
 logging.getLogger("pyrogram.client").addFilter(LogFilter())
 
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
+
+
+async def download_media_resumable(
+    client,
+    message,
+    target_path: str,
+    total_size: int,
+    progress_callback=None,
+    progress_args: tuple = (),
+):
+    """Download Telegram media into a persistent .part file and resume by chunk."""
+
+    if total_size <= 0 or not callable(getattr(client, "stream_media", None)):
+        return await client.download_media(
+            message,
+            file_name=target_path,
+            progress=progress_callback,
+            progress_args=progress_args,
+        )
+
+    if os.path.exists(target_path) and os.path.getsize(target_path) == total_size:
+        return target_path
+
+    part_path = f"{target_path}.part"
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    existing_size = os.path.getsize(part_path) if os.path.exists(part_path) else 0
+
+    # Telegram offset is counted in 1 MiB chunks. Discard an incomplete tail so the
+    # next request always begins at an exact chunk boundary and never duplicates bytes.
+    aligned_size = min(existing_size, total_size)
+    if aligned_size < total_size:
+        aligned_size = (aligned_size // TELEGRAM_CHUNK_SIZE) * TELEGRAM_CHUNK_SIZE
+    if existing_size != aligned_size:
+        with open(part_path, "r+b") as part_file:
+            part_file.truncate(aligned_size)
+
+    downloaded = aligned_size
+    if downloaded < total_size:
+        offset_chunks = downloaded // TELEGRAM_CHUNK_SIZE
+        with open(part_path, "ab") as part_file:
+            async for chunk in client.stream_media(
+                message, limit=0, offset=offset_chunks
+            ):
+                remaining = total_size - downloaded
+                if remaining <= 0:
+                    break
+                chunk = chunk[:remaining]
+                part_file.write(chunk)
+                part_file.flush()
+                downloaded += len(chunk)
+                if progress_callback:
+                    result = progress_callback(
+                        downloaded, total_size, *progress_args
+                    )
+                    if inspect.isawaitable(result):
+                        await result
+
+    if downloaded != total_size:
+        raise IOError(
+            f"Telegram stream ended at {downloaded} of {total_size} bytes"
+        )
+
+    os.replace(part_path, target_path)
+    return target_path
+
+
+def local_file_stream_factory(file_path: str, chunk_size: int = TELEGRAM_CHUNK_SIZE):
+    """Return a repeatable async stream factory for WebDAV upload retries."""
+
+    async def stream():
+        with open(file_path, "rb") as source:
+            while True:
+                chunk = source.read(chunk_size)
+                if not chunk:
+                    break
+                yield chunk
+                await asyncio.sleep(0)
+
+    return stream
 
 
 def _check_download_finish(media_size: int, download_path: str, ui_file_name: str):
@@ -455,7 +556,7 @@ async def download_media(
             if _can_download(_type, file_formats, file_format):
                 if _is_exist(file_name):
                     file_size = os.path.getsize(file_name)
-                    if file_size or file_size == media_size:
+                    if file_size == media_size:
                         logger.info(
                             f"id={message.id} {ui_file_name} "
                             f"{_t('already download,download skipped')}.\n"
@@ -473,6 +574,15 @@ async def download_media(
             f"{_t('could not be downloaded due to following exception')}:\n[{e}].",
             exc_info=True,
         )
+        mark_download_failed(
+            node.chat_id,
+            message.id,
+            ui_file_name,
+            media_size,
+            node.task_id,
+            node.profile_id,
+            str(e),
+        )
         return DownloadStatus.FailedDownload, None
     if _media is None:
         return DownloadStatus.SkipDownload, None
@@ -482,21 +592,33 @@ async def download_media(
     # Register as pending download for resume on restart
     add_pending_download(node.chat_id, message_id, ui_file_name, node.profile_id)
 
+    last_error = "下载或 WebDAV 上传重试失败"
     for retry in range(3):
 
         try:
-            # Check if using WebDAV for streaming
+            # 所有适配器先写入持久化 .part 文件，暂停、断网或重启后按 Telegram 分块偏移继续。
+            temp_download_path = await download_media_resumable(
+                client,
+                message,
+                temp_file_name,
+                media_size,
+                update_download_status,
+                (
+                    message_id,
+                    ui_file_name,
+                    task_start_time,
+                    node,
+                    client,
+                ),
+            )
+
             if runtime_app.cloud_drive_config.upload_adapter == "webdav":
-                logger.info(f"Starting streaming upload to WebDAV: {ui_file_name}")
-
-                # Use pyrogram's stream_media which returns an async generator
-                stream_generator = client.stream_media(message, limit=0, offset=0)
-
+                logger.info(f"Uploading completed local file to WebDAV: {ui_file_name}")
                 success = await CloudDrive.webdav_upload_stream(
                     runtime_app.cloud_drive_config,
                     runtime_app.save_path,
-                    file_name,  # Relative path handled inside
-                    stream_generator,
+                    file_name,
+                    local_file_stream_factory(temp_download_path),
                     media_size,
                     progress_callback=update_upload_stat,
                     progress_args=(
@@ -508,13 +630,17 @@ async def download_media(
                         True,
                     ),
                 )
+                if not success:
+                    raise Exception("WebDAV upload failed; local completed file retained")
 
-                if success:
-                    # Mock successful download path to satisfy later logic, though file doesn't exist locally
-                    # We might need to adjust logic later if it checks for file existence
-                    # For now, we trick it by returning a dummy path if successful
-                    temp_download_path = "STREAMED_TO_WEBDAV"
-                    # Mark as success with proper file info
+            # Success handling for standard download (outside try block but inside for loop)
+            if temp_download_path:
+                if isinstance(temp_download_path, str):
+                    _check_download_finish(
+                        media_size, temp_download_path, ui_file_name
+                    )
+
+                    # 下载完整且云端上传成功后才持久化完成态，失败时保留本地文件供重试。
                     verify_and_save_download(
                         node.chat_id,
                         message.id,
@@ -523,55 +649,16 @@ async def download_media(
                         node.task_id,
                         node.profile_id,
                     )
-                    # CRITICAL: Remove from pending downloads to prevent re-download on restart
-                    remove_pending_download(node.chat_id, message.id, node.profile_id)
-                    return DownloadStatus.SuccessDownload, file_name
-                else:
-                    raise Exception("WebDAV stream upload failed")
-            else:
-                # Standard Download
-                temp_download_path = await client.download_media(
-                    message,
-                    file_name=temp_file_name,
-                    progress=update_download_status,
-                    progress_args=(
-                        message_id,
-                        ui_file_name,
-                        task_start_time,
-                        node,
-                        client,
-                    ),
-                )
 
-            # Success handling for standard download (outside try block but inside for loop)
-            if temp_download_path:
-                if temp_download_path != "STREAMED_TO_WEBDAV":
-                    if isinstance(temp_download_path, str):
-                        _check_download_finish(
-                            media_size, temp_download_path, ui_file_name
-                        )
-
-                        # Verify and persist completion to DB
-                        verify_and_save_download(
-                            node.chat_id,
-                            message.id,
-                            ui_file_name,
-                            media_size,
-                            node.task_id,
-                            node.profile_id,
-                        )
-
-                        await asyncio.sleep(0.5)
-                        _move_to_download_path(temp_download_path, file_name)
-                else:
-                    # Logic for streamed content - already handled above
-                    pass
+                    await asyncio.sleep(0.5)
+                    _move_to_download_path(temp_download_path, file_name)
 
                 # Remove from pending downloads (completed successfully)
                 remove_pending_download(node.chat_id, message.id, node.profile_id)
                 return DownloadStatus.SuccessDownload, file_name
 
         except pyrogram.errors.exceptions.bad_request_400.BadRequest:
+            last_error = "Telegram 文件引用已过期"
             logger.warning(
                 f"Message[{message.id}]: {_t('file reference expired, refetching')}..."
             )
@@ -584,10 +671,12 @@ async def download_media(
                     f"{_t('file reference expired for 3 retries, download skipped.')}"
                 )
         except pyrogram.errors.exceptions.flood_420.FloodWait as wait_err:
+            last_error = f"Telegram 限流等待 {wait_err.value} 秒"
             await asyncio.sleep(wait_err.value)
             logger.warning("Message[{}]: FlowWait {}", message.id, wait_err.value)
             _check_timeout(retry, message.id)
         except TypeError:
+            last_error = "Telegram 下载超时"
             # pylint: disable = C0301
             logger.warning(
                 f"{_t('Timeout Error occurred when downloading Message')}[{message.id}], "
@@ -599,6 +688,7 @@ async def download_media(
                     f"Message[{message.id}]: {_t('Timing out after 3 reties, download skipped.')}"
                 )
         except Exception as e:
+            last_error = str(e)
             # pylint: disable = C0301
             logger.error(
                 f"Message[{message.id}]: "
@@ -607,6 +697,15 @@ async def download_media(
             )
             break
 
+    mark_download_failed(
+        node.chat_id,
+        message.id,
+        ui_file_name,
+        media_size,
+        node.task_id,
+        node.profile_id,
+        last_error,
+    )
     return DownloadStatus.FailedDownload, None
 
 
@@ -865,7 +964,7 @@ def _effective_bot_token(config: dict = None, runtime_app: Application = None) -
 
 
 def _build_runtime_app(profile: dict) -> Application:
-    """Build an isolated Application object for a profile."""
+    """Build one account runtime from the shared downloader configuration."""
     runtime_app = Application(CONFIG_NAME, DATA_FILE_NAME, APPLICATION_NAME)
     created_loop = runtime_app.loop
     if created_loop is not app.loop and not created_loop.is_closed():
@@ -873,7 +972,9 @@ def _build_runtime_app(profile: dict) -> Application:
     runtime_app.loop = app.loop
     asyncio.set_event_loop(app.loop)
     runtime_app.profile_id = profile.get("id")
-    runtime_app.config = copy.deepcopy(profile.get("config") or {})
+    # 账号仅提供 Telegram Session；下载规则、云盘和 Bot 行为在所有账号间共享。
+    # profile.config 保留为旧数据，但不再参与新 runtime 的配置选择。
+    runtime_app.config = copy.deepcopy(app.config or {})
     runtime_app.app_data = copy.deepcopy(profile.get("app_data") or {})
     runtime_app.assign_config(runtime_app.config)
     runtime_app.assign_app_data(runtime_app.app_data)
@@ -909,27 +1010,7 @@ def main():
     """Main function of the downloader."""
     runtimes: dict[str, ProfileRuntime] = {}
     bot_owner_profile_id = None
-
-    if db.conn:
-        try:
-            active_profile = sync_active_profile_to_legacy()
-            active_config = active_profile.get("config") or {}
-            active_app_data = active_profile.get("app_data") or {}
-            app.profile_id = active_profile.get("id")
-            if active_config:
-                app.chat_download_config = {}
-                app._chat_id = ""
-                app.config = active_config
-                app.assign_config(active_config)
-            if active_app_data:
-                app.app_data = active_app_data
-                app.assign_app_data(active_app_data)
-            logger.info(
-                f"Active profile loaded: {active_profile.get('name')} "
-                f"({active_profile.get('id')})"
-            )
-        except Exception as e:
-            logger.warning(f"Failed to sync active profile on startup: {e}")
+    retrying_uploads: set[tuple[str, int, int]] = set()
 
     def restart_callback():
         logger.warning("Restarting application via Web UI request...")
@@ -951,12 +1032,6 @@ def main():
 
         if not getattr(runtime_client, "is_initialized", False):
             await runtime_client.initialize()
-
-    def get_profile_by_id(profile_id: str) -> dict:
-        for item in get_profiles():
-            if item.get("id") == profile_id:
-                return item
-        raise KeyError(f"Profile {profile_id} not found")
 
     async def runtime_maintenance(state: ProfileRuntime):
         tick = 0
@@ -1001,7 +1076,8 @@ def main():
     async def activate_runtime(runtime_client: pyrogram.Client = None, profile=None):
         """Start one profile runtime without stopping other running profiles."""
         nonlocal bot_owner_profile_id
-        profile = profile or get_active_profile()
+        if not profile:
+            raise ValueError("profile is required to start an account runtime")
         profile_id = profile.get("id")
         profile_name = profile.get("name") or profile_id
         current = runtimes.get(profile_id)
@@ -1168,7 +1244,11 @@ def main():
             }
 
         if not profile_id:
-            profile_id = get_active_profile().get("id") if db.conn else None
+            return {
+                "status": "error",
+                "message": "profile_id is required.",
+                "profile_id": None,
+            }
 
         state = runtimes.get(profile_id)
         if not state:
@@ -1260,7 +1340,7 @@ def main():
 
     def start_runtime_callback(runtime_client: pyrogram.Client = None, profile=None):
         if isinstance(profile, str):
-            profile = get_profile_by_id(profile)
+            profile = get_profile(profile)
         future = asyncio.run_coroutine_threadsafe(
             activate_runtime(runtime_client, profile), app.loop
         )
@@ -1271,6 +1351,103 @@ def main():
             deactivate_runtime(profile_id, stop_client=True), app.loop
         )
         return future.result(timeout=120)
+
+    async def reset_failed_upload(
+        chat_id: int,
+        message_id: int,
+        profile_id: str,
+        remote_path: str,
+        file_name: str,
+        total_size: int,
+    ):
+        """Remove one broken WebDAV object and queue its Telegram message again."""
+        state = runtimes.get(profile_id)
+        if not state or not state.running:
+            return {
+                "status": "error",
+                "message": "该任务所属的 Telegram 账号当前未运行。",
+            }
+        if state.app.cloud_drive_config.upload_adapter != "webdav":
+            return {"status": "error", "message": "当前上传适配器不是 WebDAV。"}
+
+        retry_key = (profile_id or "legacy", int(chat_id), int(message_id))
+        if retry_key in retrying_uploads:
+            return {"status": "error", "message": "该任务正在重置，请勿重复操作。"}
+
+        retrying_uploads.add(retry_key)
+        try:
+            # 先确认 Telegram 源消息仍可读取，避免删除云端对象后才发现任务无法重建。
+            message = await state.client.get_messages(chat_id, message_id)
+            if not message or message.empty:
+                return {"status": "error", "message": "Telegram 源消息已不存在。"}
+
+            deleted, delete_outcome = await CloudDrive.webdav_delete_path(
+                state.app.cloud_drive_config,
+                remote_path,
+            )
+            if not deleted:
+                return {"status": "error", "message": delete_outcome}
+
+            # 云端异常对象清理成功后，保留本地完整文件并重建上传进度，再交给原下载队列复用。
+            prepare_download_retry(chat_id, message_id, profile_id)
+            remove_upload_status(chat_id, message_id, profile_id)
+            register_upload_task(
+                chat_id,
+                message_id,
+                file_name,
+                total_size,
+                profile_id,
+            )
+            node = TaskNode(chat_id=chat_id, profile_id=profile_id)
+            queued = await add_download_task(message, node, state.queue)
+            if not queued:
+                mark_download_failed(
+                    chat_id,
+                    message_id,
+                    file_name,
+                    total_size,
+                    profile_id=profile_id,
+                    error="云端文件已重置，但任务重新入队失败",
+                )
+                return {"status": "error", "message": "任务重新入队失败。"}
+
+            return {
+                "status": "queued",
+                "message": (
+                    "云端异常文件已删除，任务已复用本地文件重新上传。"
+                    if delete_outcome == "deleted"
+                    else "云端目标已确认无残留，任务已复用本地文件重新上传。"
+                ),
+                "delete_outcome": delete_outcome,
+            }
+        except Exception as error:
+            logger.exception(
+                f"Failed to reset WebDAV upload {chat_id}/{message_id}: {error}"
+            )
+            return {"status": "error", "message": str(error)}
+        finally:
+            retrying_uploads.discard(retry_key)
+
+    def retry_upload_callback(
+        chat_id: int,
+        message_id: int,
+        profile_id: str,
+        remote_path: str,
+        file_name: str,
+        total_size: int,
+    ):
+        future = asyncio.run_coroutine_threadsafe(
+            reset_failed_upload(
+                chat_id,
+                message_id,
+                profile_id,
+                remote_path,
+                file_name,
+                total_size,
+            ),
+            app.loop,
+        )
+        return future.result(timeout=90)
 
     def apply_bot_access_config(target_app: Application, config: dict):
         allowed_user_ids = (config or {}).get("allowed_user_ids", [])
@@ -1356,6 +1533,7 @@ def main():
             stop_runtime_callback,
             runtime_status_callback,
             update_runtime_config_callback,
+            retry_upload_callback,
         )
 
         if db.conn:
@@ -1423,5 +1601,7 @@ def main():
 
 
 if __name__ == "__main__":
-    if _check_config():
+    if not acquire_instance_lock():
+        logger.error("Another telegram_media_downloader instance is already running.")
+    elif _check_config():
         main()

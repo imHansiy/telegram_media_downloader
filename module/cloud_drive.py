@@ -4,6 +4,7 @@ import functools
 import importlib
 import inspect
 import os
+import posixpath
 import re
 import urllib.parse
 from asyncio import subprocess
@@ -61,6 +62,89 @@ class CloudDriveConfig:
 
 class CloudDrive:
     """rclone support"""
+
+    @staticmethod
+    def normalize_webdav_remote_path(
+        drive_config: CloudDriveConfig, remote_path: str
+    ) -> str:
+        """Keep preview/download reads inside the configured WebDAV root."""
+        if not isinstance(remote_path, str) or not remote_path.strip():
+            raise ValueError("WebDAV remote path is required")
+
+        decoded_path = urllib.parse.unquote(remote_path.strip()).replace("\\", "/")
+        if "\x00" in decoded_path or "://" in decoded_path:
+            raise ValueError("Invalid WebDAV remote path")
+        if any(part == ".." for part in decoded_path.split("/")):
+            raise ValueError("WebDAV path traversal is not allowed")
+
+        normalized_path = posixpath.normpath(f"/{decoded_path.lstrip('/')}").lstrip("/")
+        if normalized_path in ("", "."):
+            raise ValueError("WebDAV remote path is required")
+
+        remote_root = (drive_config.remote_dir or "").strip("/")
+        if remote_root and not (
+            normalized_path == remote_root
+            or normalized_path.startswith(f"{remote_root}/")
+        ):
+            raise ValueError("WebDAV path is outside the configured remote root")
+        return normalized_path
+
+    @staticmethod
+    def build_webdav_remote_url(
+        drive_config: CloudDriveConfig, remote_path: str
+    ) -> str:
+        """Build an encoded WebDAV object URL from a validated remote path."""
+        base_url = (drive_config.webdav_url or "").rstrip("/")
+        parsed_base = urllib.parse.urlsplit(base_url)
+        if parsed_base.scheme not in ("http", "https") or not parsed_base.netloc:
+            raise ValueError("WebDAV URL is not configured")
+
+        normalized_path = CloudDrive.normalize_webdav_remote_path(
+            drive_config, remote_path
+        )
+        encoded_path = "/".join(
+            urllib.parse.quote(part, safe="")
+            for part in normalized_path.split("/")
+        )
+        return f"{base_url}/{encoded_path}"
+
+    @staticmethod
+    async def webdav_delete_path(
+        drive_config: CloudDriveConfig, remote_path: str
+    ) -> tuple[bool, str]:
+        """Delete one object inside the configured WebDAV root before a retry."""
+        remote_url = CloudDrive.build_webdav_remote_url(drive_config, remote_path)
+        auth = None
+        if drive_config.webdav_username:
+            auth = aiohttp.BasicAuth(
+                drive_config.webdav_username,
+                drive_config.webdav_password,
+            )
+
+        timeout = aiohttp.ClientTimeout(total=60, connect=10)
+        try:
+            async with aiohttp.ClientSession(auth=auth, timeout=timeout) as session:
+                async with session.delete(remote_url) as response:
+                    # WebDAV 对不存在文件返回 404 时已经达到“清空异常目标”的业务结果。
+                    if response.status in (200, 202, 204, 404):
+                        outcome = "not_found" if response.status == 404 else "deleted"
+                        logger.info(
+                            f"[WebDAV] Reset target {outcome}: {remote_path}"
+                        )
+                        return True, outcome
+
+                    response_text = (await response.text())[:500]
+                    logger.error(
+                        f"[WebDAV] Reset target failed: {response.status} - "
+                        f"{response_text}"
+                    )
+                    return False, f"WebDAV 删除失败（HTTP {response.status}）"
+        except (asyncio.TimeoutError, aiohttp.ClientError) as error:
+            logger.error(
+                f"[WebDAV] Reset target connection failed: "
+                f"{type(error).__name__}: {error}"
+            )
+            return False, f"WebDAV 删除连接失败：{type(error).__name__}"
 
     @staticmethod
     def get_relative_upload_path(save_path: str, file_name: str) -> str:
@@ -350,13 +434,10 @@ class CloudDrive:
         # e.g. Crypt/OneDrive/Telegram/ChannelName/Video.mp4
         full_rel_path = f"{remote_root}/{rel_path}".strip("/")
 
-        # Final URL
-        # Explicitly encode path segments to handle special chars/Chinese correctly
-        # Split by / to preserve directory structure, then quote each component
-        parts = full_rel_path.split("/")
-        # quote each part but keep / separators
-        encoded_path = "/".join(urllib.parse.quote(p) for p in parts)
-        remote_url = f"{base_url}/{encoded_path}"
+        # 上传与预览共用相同的路径规范化和编码，保证中文、空格及特殊字符定位一致。
+        remote_url = CloudDrive.build_webdav_remote_url(
+            drive_config, full_rel_path
+        )
 
         logger.info(f"[WebDAV] Uploading to (Encoded): {remote_url}")
         if remote_url != f"{base_url}/{full_rel_path}":
@@ -365,7 +446,8 @@ class CloudDrive:
         # Wrap the generator to report progress
         async def progress_stream():
             uploaded = 0
-            async for chunk in stream_generator:
+            source_stream = stream_generator() if callable(stream_generator) else stream_generator
+            async for chunk in source_stream:
                 yield chunk
                 uploaded += len(chunk)
                 if progress_callback:
@@ -376,6 +458,18 @@ class CloudDrive:
 
         # 10s for connect, 2 hours for total upload. Large videos need more time.
         timeout = aiohttp.ClientTimeout(total=7200, connect=10)
+
+        async def reset_interrupted_target():
+            """Remove an object whose PUT ended without a final WebDAV success."""
+            reset_ok, reset_message = await CloudDrive.webdav_delete_path(
+                drive_config,
+                full_rel_path,
+            )
+            if not reset_ok:
+                logger.warning(
+                    f"[WebDAV] Interrupted upload target could not be reset: "
+                    f"{reset_message}"
+                )
 
         for attempt in range(max_retries):
             try:
@@ -464,6 +558,8 @@ class CloudDrive:
                 logger.error(
                     f"WebDAV upload timeout (attempt {attempt + 1}/{max_retries}): {rel_path}"
                 )
+                # PUT 超时后服务端可能已留下不可读对象；下一次上传前必须先恢复干净目标。
+                await reset_interrupted_target()
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2 * (attempt + 1))
                     continue
@@ -472,6 +568,8 @@ class CloudDrive:
                 logger.error(
                     f"WebDAV connection error (attempt {attempt + 1}/{max_retries}): {type(e).__name__}: {e}"
                 )
+                # 连接断开不等于上传成功，即使进度已到 100% 也先删除残留对象再重试。
+                await reset_interrupted_target()
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2 * (attempt + 1))
                     continue

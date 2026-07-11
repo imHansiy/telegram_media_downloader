@@ -33,7 +33,7 @@ from module.db import db
 from module.filter import Filter
 from module.get_chat_history_v2 import get_chat_history_v2
 from module.language import Language, _t
-from module.profiles import save_active_profile
+from module.telegram_card import render_telegram_card
 from module.pyrogram_extension import (
     check_user_permission,
     get_utf16_length,
@@ -195,7 +195,10 @@ class DownloadBot:
         if access_mode == "allowed":
             return self.user_in_allowed_config(message.from_user)
 
-        return False
+        # “仅账号本人”覆盖下载器中所有已登录账号；运行时匹配成功后，任务会交给该账号读取。
+        return self.get_download_runtime_for_submitter(
+            message.from_user.id
+        )["matched_submitter"]
 
     def get_download_runtime_for_submitter(self, submitter_user_id) -> dict:
         """Resolve which Telegram user runtime should read submitted links."""
@@ -312,7 +315,10 @@ class DownloadBot:
         if access_mode == "allowed":
             return self.bot_api_user_in_allowed_config(user)
 
-        return False
+        # Bot API 备用收件路径与 Pyrogram 路径共用同一账号本人判定，避免权限结果不一致。
+        return self.get_download_runtime_for_submitter(user.get("id"))[
+            "matched_submitter"
+        ]
 
     async def bot_api_request(
         self,
@@ -370,6 +376,33 @@ class DownloadBot:
             return parse_mode
         return None
 
+    @staticmethod
+    def _bot_api_reply_markup(reply_markup):
+        """Convert Pyrogram inline buttons to the Bot API JSON shape."""
+
+        if not reply_markup:
+            return None
+        rows = getattr(reply_markup, "inline_keyboard", None)
+        if rows is None:
+            return reply_markup if isinstance(reply_markup, dict) else None
+        return {
+            "inline_keyboard": [
+                [
+                    {
+                        key: value
+                        for key, value in {
+                            "text": button.text,
+                            "callback_data": button.callback_data,
+                            "url": button.url,
+                        }.items()
+                        if value is not None
+                    }
+                    for button in row
+                ]
+                for row in rows
+            ]
+        }
+
     async def send_message(
         self,
         chat_id,
@@ -377,6 +410,7 @@ class DownloadBot:
         *,
         reply_to_message_id=None,
         parse_mode=None,
+        reply_markup=None,
         **_,
     ):
         """Send a message through Bot API and return a Pyrogram-like object."""
@@ -392,6 +426,9 @@ class DownloadBot:
         api_parse_mode = self._bot_api_parse_mode(parse_mode)
         if api_parse_mode:
             payload["parse_mode"] = api_parse_mode
+        api_reply_markup = self._bot_api_reply_markup(reply_markup)
+        if api_reply_markup:
+            payload["reply_markup"] = api_reply_markup
 
         result = await self.bot_api_request("sendMessage", payload)
         return SimpleNamespace(id=result.get("message_id"))
@@ -422,7 +459,7 @@ class DownloadBot:
         return SimpleNamespace(id=result.get("message_id"))
 
     async def edit_message_text(
-        self, chat_id, message_id, text: str, parse_mode=None, **_
+        self, chat_id, message_id, text: str, parse_mode=None, reply_markup=None, **_
     ):
         """Edit a Bot API message, matching the Pyrogram method used by tasks."""
 
@@ -435,9 +472,80 @@ class DownloadBot:
         api_parse_mode = self._bot_api_parse_mode(parse_mode)
         if api_parse_mode:
             payload["parse_mode"] = api_parse_mode
+        api_reply_markup = self._bot_api_reply_markup(reply_markup)
+        if api_reply_markup:
+            payload["reply_markup"] = api_reply_markup
 
         result = await self.bot_api_request("editMessageText", payload)
         return SimpleNamespace(id=result.get("message_id"))
+
+    def send_photo_sync(self, chat_id, photo, *, reply_markup=None, reply_to_message_id=None):
+        """Upload an in-memory PNG through the Bot API polling path."""
+
+        if not self.app or not self.app.bot_token:
+            raise RuntimeError("Bot token is not configured.")
+        photo.seek(0)
+        data = {"chat_id": str(chat_id)}
+        if reply_to_message_id:
+            data["reply_to_message_id"] = str(reply_to_message_id)
+            data["allow_sending_without_reply"] = "true"
+        api_reply_markup = self._bot_api_reply_markup(reply_markup)
+        if api_reply_markup:
+            data["reply_markup"] = json.dumps(api_reply_markup)
+        url = f"https://api.telegram.org/bot{self.app.bot_token}/sendPhoto"
+        response = requests.post(
+            url,
+            data=data,
+            files={"photo": (getattr(photo, "name", "telegram-card.png"), photo, "image/png")},
+            timeout=30,
+        )
+        result = response.json()
+        if not result.get("ok"):
+            raise RuntimeError(
+                f"Telegram Bot API sendPhoto failed: {result.get('description', 'unknown error')}"
+            )
+        return SimpleNamespace(id=result["result"].get("message_id"))
+
+    async def send_photo(self, chat_id, photo, **kwargs):
+        """Async facade matching Pyrogram's send_photo method."""
+
+        return await asyncio.to_thread(self.send_photo_sync, chat_id, photo, **kwargs)
+
+    def edit_message_media_sync(self, chat_id, message_id, media, *, reply_markup=None):
+        """Replace a task card image without creating another Telegram message."""
+
+        if not self.app or not self.app.bot_token:
+            raise RuntimeError("Bot token is not configured.")
+        photo = getattr(media, "media", media)
+        photo.seek(0)
+        data = {
+            "chat_id": str(chat_id),
+            "message_id": str(message_id),
+            "media": json.dumps({"type": "photo", "media": "attach://photo"}),
+        }
+        api_reply_markup = self._bot_api_reply_markup(reply_markup)
+        if api_reply_markup:
+            data["reply_markup"] = json.dumps(api_reply_markup)
+        url = f"https://api.telegram.org/bot{self.app.bot_token}/editMessageMedia"
+        response = requests.post(
+            url,
+            data=data,
+            files={"photo": (getattr(photo, "name", "telegram-card.png"), photo, "image/png")},
+            timeout=30,
+        )
+        result = response.json()
+        if not result.get("ok"):
+            raise RuntimeError(
+                f"Telegram Bot API editMessageMedia failed: {result.get('description', 'unknown error')}"
+            )
+        return SimpleNamespace(id=result["result"].get("message_id"))
+
+    async def edit_message_media(self, chat_id, message_id, media, **kwargs):
+        """Async facade matching Pyrogram's edit_message_media method."""
+
+        return await asyncio.to_thread(
+            self.edit_message_media_sync, chat_id, message_id, media, **kwargs
+        )
 
     @staticmethod
     def _bot_api_adapter_message(message: dict, text: str = None):
@@ -504,15 +612,10 @@ class DownloadBot:
             return
 
         if text.startswith("/start") or text.startswith("/help"):
-            self.send_message_sync(
-                chat_id,
-                "Bot 已开放给你使用。\n\n"
-                "请在私聊中发送以下内容之一：\n"
-                "1. Telegram 消息链接，例如 https://t.me/channel/123\n"
-                "2. 直接发送或转发包含媒体的消息\n\n"
-                "管理员命令不会对普通用户开放。",
-                reply_to_message_id=message_id,
+            future = asyncio.run_coroutine_threadsafe(
+                send_help_str(self, chat_id), self.app.loop
             )
+            future.result(timeout=60)
             return
 
         if text.startswith("/"):
@@ -676,8 +779,8 @@ class DownloadBot:
         """Update config to database."""
         self.config["download_filter"] = self.download_filter
         if db.conn:
+            # Bot 是进程级单实例，设置由下载器全局持有，不再复制到某个账号档案。
             db.save_setting("bot_setting", self.config)
-            save_active_profile(bot_setting=self.config, sync_legacy=False)
         else:
             # Fallback to file if DB is not available (though user said it is PG now)
             try:
@@ -936,6 +1039,7 @@ class DownloadBot:
                 public_text_hint,
                 filters=pyrogram.filters.private
                 & pyrogram.filters.text
+                & ~pyrogram.filters.outgoing
                 & ~pyrogram.filters.regex(r"^/")
                 & ~pyrogram.filters.regex(r"^https://t.me.*")
                 & non_admin_submitter_filter,
@@ -1114,26 +1218,24 @@ async def send_help_str(client: pyrogram.Client, chat_id):
     # except Exception:
     #     latest_release_str = ""
 
-    msg = (
-        f"`\n🤖 {_t('Telegram 媒体下载器')}\n"
-        f"🌐 {_t('版本')}: {utils.__version__}`\n"
-        f"{latest_release_str}\n"
-        f"{_t('可用命令:')}\n"
-        f"/help - {_t('显示可用命令')}\n"
-        f"/get_info - {_t('从消息链接获取群组和用户信息')}\n"
-        f"/download - {_t('下载消息')}\n"
-        f"/forward - {_t('转发消息')}\n"
-        f"/listen_forward - {_t('监听转发消息')}\n"
-        f"/forward_to_comments - {_t('将特定媒体转发到评论区')}\n"
-        f"/set_language - {_t('设置语言')}\n"
-        f"/status - {_t('获取运行设备系统信息')}\n"
-        f"/stop - {_t('停止机器人下载或转发')}\n\n"
-        f"{_t('**注意**: 1 表示整个聊天的开始')},"
-        f"{_t('0 表示整个聊天的结束')}\n"
-        f"`[` `]` {_t('表示可选，非必须')}\n"
-    )
-
-    await client.send_message(chat_id, msg, reply_markup=update_keyboard)
+    help_lines = [
+        f"版本：{utils.__version__}",
+        "",
+        f"/help  ·  {_t('显示可用命令')}",
+        f"/get_info  ·  {_t('从消息链接获取群组和用户信息')}",
+        f"/download  ·  {_t('下载消息')}",
+        f"/forward  ·  {_t('转发消息')}",
+        f"/listen_forward  ·  {_t('监听转发消息')}",
+        f"/forward_to_comments  ·  {_t('将特定媒体转发到评论区')}",
+        f"/set_language  ·  {_t('设置语言')}",
+        f"/status  ·  {_t('获取运行设备系统信息')}",
+        f"/stop  ·  {_t('停止机器人下载或转发')}",
+        "",
+        "1 表示整个聊天的开始，0 表示整个聊天的结束",
+        "[ ] 表示可选参数",
+    ]
+    card = render_telegram_card("帮助与命令", help_lines)
+    await client.send_photo(chat_id, card, reply_markup=update_keyboard)
 
 
 async def help_command(client: pyrogram.Client, message: pyrogram.types.Message):
@@ -1154,24 +1256,27 @@ async def help_command(client: pyrogram.Client, message: pyrogram.types.Message)
 async def public_help_command(client: pyrogram.Client, message: pyrogram.types.Message):
     """Send usage help for non-admin users allowed to submit downloads."""
 
+    # Pyrogram 与 Bot API 备用轮询可能同时收到更新；同一条 /help 只允许一条路径回复。
     if not _bot.mark_private_message_processed(message.chat.id, message.id):
         return
-
-    await client.send_message(
-        message.chat.id,
-        "Bot 已开放给你使用。\n\n"
-        "请在私聊中发送以下内容之一：\n"
-        "1. Telegram 消息链接，例如 https://t.me/channel/123\n"
-        "2. 直接发送或转发包含媒体的消息\n\n"
-        "管理员命令不会对普通用户开放。",
-        reply_to_message_id=message.id,
-    )
+    await send_help_str(client, message.chat.id)
 
 
 async def public_text_hint(client: pyrogram.Client, message: pyrogram.types.Message):
     """Tell public users what kind of messages can trigger downloads."""
 
+    if getattr(message, "outgoing", False):
+        return
+    if (
+        _bot.bot_info
+        and message.from_user
+        and str(message.from_user.id) == str(_bot.bot_info.id)
+    ):
+        return
     if message.text and message.text.startswith("/"):
+        return
+    # Telegram 链接由 download_from_link 独占处理，通用提示不能抢先标记或误报“未识别”。
+    if message.text and message.text.startswith("https://t.me"):
         return
     if not _bot.mark_private_message_processed(message.chat.id, message.id):
         return
@@ -1662,16 +1767,36 @@ async def direct_download(
     download_bot: DownloadBot,
     chat_id: Union[str, int],
     message: pyrogram.types.Message,
-    download_message: pyrogram.types.Message,
+    download_message: Union[pyrogram.types.Message, List[pyrogram.types.Message]],
     client: pyrogram.Client = None,
     add_download_task: Callable = None,
     profile_id: str = None,
 ):
-    """Direct Download"""
+    """Queue one submitted message or media group behind a single task card."""
 
-    replay_message = "Direct download..."
+    download_messages = (
+        download_message
+        if isinstance(download_message, (list, tuple))
+        else [download_message]
+    )
+    item_count = len(download_messages)
+    replay_message = (
+        "📥 <b>下载任务</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        "🕓 状态：等待处理\n"
+        f"📦 内容：{item_count} 项\n"
+        f"👤 执行账号：{profile_id or '默认账号'}"
+    )
+    task_id = download_bot.gen_task_id()
+    stop_keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("⏹ 停止任务", callback_data=f"stop_download task {task_id}")]]
+    )
     last_reply_message = await download_bot.send_message(
-        message.from_user.id, replay_message, reply_to_message_id=message.id
+        message.from_user.id,
+        replay_message,
+        reply_to_message_id=message.id,
+        parse_mode=pyrogram.enums.ParseMode.HTML,
+        reply_markup=stop_keyboard,
     )
 
     node = TaskNode(
@@ -1679,23 +1804,23 @@ async def direct_download(
         from_user_id=message.from_user.id,
         reply_message_id=last_reply_message.id,
         replay_message=replay_message,
-        limit=1,
+        limit=item_count,
         bot=download_bot,
-        task_id=_bot.gen_task_id(),
+        task_id=task_id,
         profile_id=profile_id,
     )
 
     node.client = client
 
-    _bot.add_task_node(node)
+    # 同一次媒体组投递共享任务节点和状态消息，所有进度都回写到这一张卡片。
+    download_bot.add_task_node(node)
 
-    enqueue_download_task = add_download_task or _bot.add_download_task
-    await enqueue_download_task(
-        download_message,
-        node,
-    )
+    enqueue_download_task = add_download_task or download_bot.add_download_task
+    for item in download_messages:
+        await enqueue_download_task(item, node)
 
     node.is_running = True
+    return node
 
 
 async def download_forward_media(
@@ -1811,20 +1936,16 @@ async def download_from_link(client: pyrogram.Client, message: pyrogram.types.Me
                             f"[download_from_link] Found {len(media_group_messages)} messages in media group"
                         )
 
-                        # Download each message in the group
-                        for idx, group_msg in enumerate(media_group_messages):
-                            logger.info(
-                                f"[download_from_link] Downloading {idx+1}/{len(media_group_messages)}: msg_id={group_msg.id}"
-                            )
-                            await direct_download(
-                                _bot,
-                                entity.id,
-                                message,
-                                group_msg,
-                                client=download_client,
-                                add_download_task=enqueue_download_task,
-                                profile_id=profile_id,
-                            )
+                        # 一个媒体组只创建一张任务卡片，组内媒体共用进度和最终结果。
+                        await direct_download(
+                            _bot,
+                            entity.id,
+                            message,
+                            media_group_messages,
+                            client=download_client,
+                            add_download_task=enqueue_download_task,
+                            profile_id=profile_id,
+                        )
                     except Exception as e:
                         logger.warning(
                             f"[download_from_link] Failed to get media group: {e}, downloading single message"
@@ -2375,21 +2496,21 @@ async def stop_task(
                 ],
             )
             await client.edit_message_text(
-                query.message.from_user.id,
+                query.message.chat.id,
                 query.message.id,
                 f"{_t('Stop')} {_t(task_type.name)}...",
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
         else:
             await client.edit_message_text(
-                query.message.from_user.id,
+                query.message.chat.id,
                 query.message.id,
                 f"{_t('No Task')}",
             )
     else:
         task_id = query.data.split(" ")[2]
         await client.edit_message_text(
-            query.message.from_user.id,
+            query.message.chat.id,
             query.message.id,
             f"{_t('Stop')} {_t(task_type.name)}...",
         )

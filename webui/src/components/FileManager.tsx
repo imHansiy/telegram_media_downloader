@@ -5,6 +5,7 @@
 
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { CompletedFile, MediaType } from '../types';
+import { buildWebdavResourceUrl, isPdfFile } from '../webdavPreview';
 import { 
   Folder, 
   FolderOpen, 
@@ -28,6 +29,7 @@ import {
   Filter,
   CheckCircle2,
   Eye,
+  Download,
   X
 } from 'lucide-react';
 
@@ -55,6 +57,11 @@ export function FileManager({ completedFiles }: FileManagerProps) {
 
   // Lightbox / File Preview Modal State
   const [previewFile, setPreviewFile] = useState<CompletedFile | null>(null);
+  const [previewError, setPreviewError] = useState('');
+
+  useEffect(() => {
+    setPreviewError('');
+  }, [previewFile]);
 
   // Quick navigation sidebar filter: 'all' | media categories
   const [sidebarFilter, setSidebarFilter] = useState<'all' | MediaType>('all');
@@ -522,8 +529,7 @@ export function FileManager({ completedFiles }: FileManagerProps) {
                         setSelectedFile(file);
                         setIsDetailsCollapsed(false);
                         localStorage.setItem('tg_sync_details_collapsed_user', 'false');
-                        // Double click emulation: Open external url pathway
-                        window.open(file.remotePath, '_blank');
+                        setPreviewFile(file);
                       }}
                       className={`p-3 bg-slate-900 border rounded-xl space-y-3 cursor-pointer select-none transition-all group hover:scale-[1.01] ${
                         isSelected 
@@ -562,7 +568,7 @@ export function FileManager({ completedFiles }: FileManagerProps) {
                             预览
                           </button>
                           <a
-                            href={file.remotePath}
+                            href={buildWebdavResourceUrl(file)}
                             target="_blank"
                             rel="noreferrer"
                             onClick={(e) => e.stopPropagation()}
@@ -666,7 +672,7 @@ export function FileManager({ completedFiles }: FileManagerProps) {
                                 预览
                               </button>
                               <a
-                                href={file.remotePath}
+                                href={buildWebdavResourceUrl(file)}
                                 target="_blank"
                                 rel="noreferrer"
                                 className="p-1 bg-slate-950 border border-slate-850 hover:bg-slate-900 text-slate-400 hover:text-white rounded transition-colors cursor-pointer"
@@ -792,7 +798,7 @@ export function FileManager({ completedFiles }: FileManagerProps) {
                   <div className="bg-slate-950 rounded-xl overflow-hidden border border-slate-800/80 aspect-video flex items-center justify-center relative group">
                     {selectedFile.type === 'photo' ? (
                       <img 
-                        src={selectedFile.remotePath} 
+                        src={buildWebdavResourceUrl(selectedFile)}
                         alt={selectedFile.name}
                         className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                         referrerPolicy="no-referrer"
@@ -804,7 +810,7 @@ export function FileManager({ completedFiles }: FileManagerProps) {
                       />
                     ) : selectedFile.type === 'video' ? (
                       <video 
-                        src={selectedFile.remotePath} 
+                        src={buildWebdavResourceUrl(selectedFile)}
                         controls 
                         playsInline
                         preload="metadata"
@@ -816,7 +822,7 @@ export function FileManager({ completedFiles }: FileManagerProps) {
                           {getMediaIcon(selectedFile.type, "w-8 h-8")}
                         </div>
                         <audio 
-                          src={selectedFile.remotePath} 
+                          src={buildWebdavResourceUrl(selectedFile)}
                           controls 
                           preload="none"
                           className="w-full h-8"
@@ -837,9 +843,9 @@ export function FileManager({ completedFiles }: FileManagerProps) {
                     {selectedFile.type === 'photo' && (
                       <div id={`preview-fb-${selectedFile.id}`} className="hidden absolute inset-0 flex flex-col items-center justify-center text-center p-3 bg-slate-950">
                         <Image className="w-6 h-6 text-slate-600 mb-1" />
-                        <span className="text-[9px] text-slate-400 px-3">由于 WebDAV CORS/鉴权限制无法直接在此加载</span>
+                        <span className="text-[9px] text-slate-400 px-3">云端图片读取失败，请确认文件仍存在且凭据有效</span>
                         <a 
-                          href={selectedFile.remotePath} 
+                          href={buildWebdavResourceUrl(selectedFile)}
                           target="_blank" 
                           rel="noreferrer" 
                           className="mt-1.5 text-[9px] text-indigo-400 hover:underline font-bold"
@@ -924,7 +930,7 @@ export function FileManager({ completedFiles }: FileManagerProps) {
                         WebDAV 流已入卷
                       </span>
                       <a 
-                        href={selectedFile.remotePath} 
+                        href={buildWebdavResourceUrl(selectedFile)}
                         target="_blank" 
                         rel="noreferrer"
                         className="text-indigo-400 hover:text-indigo-300 flex items-center gap-1 font-bold hover:underline cursor-pointer"
@@ -986,40 +992,36 @@ export function FileManager({ completedFiles }: FileManagerProps) {
           {/* Active Preview Stage */}
           <div className="flex-1 flex items-center justify-center p-4 sm:p-8" onClick={() => setPreviewFile(null)}>
             <div className="max-w-4xl w-full max-h-[70vh] flex items-center justify-center" onClick={e => e.stopPropagation()}>
-              {previewFile.type === 'photo' ? (
+              {previewError ? (
+                <div className="flex flex-col items-center justify-center text-center p-8 bg-slate-900 border border-rose-500/20 rounded-2xl max-w-md mx-auto shadow-2xl">
+                  <HardDrive className="w-12 h-12 text-rose-400 mb-3" />
+                  <h4 className="text-sm font-bold text-slate-200 mb-1">云端媒体加载失败</h4>
+                  <p className="text-[11px] text-slate-500 mb-5 max-w-sm">{previewError}</p>
+                  <a
+                    href={buildWebdavResourceUrl(previewFile, true)}
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-xs font-bold text-white rounded-lg transition-all shadow-lg flex items-center gap-1.5"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    下载原文件
+                  </a>
+                </div>
+              ) : previewFile.type === 'photo' ? (
                 <div className="relative group max-w-full">
                   <img 
-                    src={previewFile.remotePath} 
+                    src={buildWebdavResourceUrl(previewFile)}
                     alt={previewFile.name}
                     className="max-w-full max-h-[70vh] rounded-xl object-contain shadow-2xl border border-slate-805/50 mx-auto select-none"
-                    referrerPolicy="no-referrer"
-                    onError={(e) => {
-                      e.currentTarget.style.display = 'none';
-                      const fallback = document.getElementById(`lightbox-fallback-${previewFile.id}`);
-                      if (fallback) fallback.classList.remove('hidden');
-                    }}
+                    onError={() => setPreviewError('图片读取失败，请检查 WebDAV 文件是否仍然存在。')}
                   />
-                  <div id={`lightbox-fallback-${previewFile.id}`} className="hidden flex flex-col items-center justify-center text-center p-6 bg-slate-900 border border-slate-850 rounded-xl max-w-md mx-auto">
-                    <Image className="w-12 h-12 text-slate-600 mb-3" />
-                    <h4 className="text-xs font-bold text-slate-300 mb-1">图片无法在此直接加载</h4>
-                    <p className="text-[10px] text-slate-500 mb-4 max-w-xs">由于 WebDAV 的跨域访问资源策略 (CORS) 或鉴权限制，浏览器暂无法直接显示。我们建议您直接在新标签页中安全预览或下载。</p>
-                    <a 
-                      href={previewFile.remotePath} 
-                      target="_blank" 
-                      rel="noreferrer" 
-                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-xs font-bold text-white rounded-lg transition-all shadow-lg flex items-center gap-1 font-sans"
-                    >
-                      在新窗口安全预览
-                      <ArrowUpRight className="w-3.5 h-3.5" />
-                    </a>
-                  </div>
                 </div>
               ) : previewFile.type === 'video' ? (
                 <video 
-                  src={previewFile.remotePath} 
+                  src={buildWebdavResourceUrl(previewFile)}
                   controls 
                   autoPlay
                   playsInline
+                  preload="metadata"
+                  onError={() => setPreviewError('视频无法解码或 WebDAV 不支持字节范围读取。')}
                   className="max-w-full max-h-[70vh] rounded-xl shadow-2xl border border-slate-805/50 mx-auto bg-black"
                 />
               ) : (previewFile.type === 'audio' || previewFile.type === 'voice') ? (
@@ -1033,13 +1035,22 @@ export function FileManager({ completedFiles }: FileManagerProps) {
                   </div>
                   <div className="pt-2">
                     <audio 
-                      src={previewFile.remotePath} 
+                      src={buildWebdavResourceUrl(previewFile)}
                       controls 
                       autoPlay
+                      preload="metadata"
+                      onError={() => setPreviewError('音频无法解码或云端文件读取失败。')}
                       className="w-full"
                     />
                   </div>
                 </div>
+              ) : isPdfFile(previewFile) ? (
+                <iframe
+                  src={`${buildWebdavResourceUrl(previewFile)}#toolbar=1&navpanes=0`}
+                  title={`预览 ${previewFile.name}`}
+                  className="w-full h-[70vh] rounded-xl bg-white shadow-2xl border border-slate-805/50"
+                  onError={() => setPreviewError('PDF 预览器加载失败。')}
+                />
               ) : (
                 <div className="bg-slate-900 border border-slate-805 rounded-2xl p-8 max-w-sm w-full text-center space-y-5 shadow-2xl">
                   <div className="mx-auto w-12 h-12 rounded-xl bg-sky-500/10 border border-sky-500/20 text-sky-400 flex items-center justify-center">
@@ -1054,13 +1065,11 @@ export function FileManager({ completedFiles }: FileManagerProps) {
                   </p>
                   <div className="pt-2">
                     <a 
-                      href={previewFile.remotePath} 
-                      target="_blank" 
-                      rel="noreferrer" 
+                      href={buildWebdavResourceUrl(previewFile, true)}
                       className="px-4 py-2 bg-slate-800 hover:bg-slate-752 text-xs font-bold text-slate-200 rounded-lg transition-all flex items-center justify-center gap-1.5 font-sans"
                     >
-                      调用 WebDAV 外部打开
-                      <ArrowUpRight className="w-3.5 h-3.5" />
+                      <Download className="w-3.5 h-3.5" />
+                      下载原文件
                     </a>
                   </div>
                 </div>
@@ -1091,13 +1100,20 @@ export function FileManager({ completedFiles }: FileManagerProps) {
                 )}
               </button>
               <a 
-                href={previewFile.remotePath} 
+                href={buildWebdavResourceUrl(previewFile)}
                 target="_blank" 
                 rel="noreferrer" 
+                className="w-full sm:w-auto px-4 py-2 bg-slate-800 hover:bg-slate-750 text-slate-200 rounded-lg text-xs font-bold flex items-center justify-center gap-1 transition-all cursor-pointer font-sans"
+              >
+                新标签页预览
+                <ArrowUpRight className="w-3.5 h-3.5" />
+              </a>
+              <a
+                href={buildWebdavResourceUrl(previewFile, true)}
                 className="w-full sm:w-auto px-4 py-2 bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-slate-50 rounded-lg shadow-lg shadow-indigo-950/20 text-xs font-bold flex items-center justify-center gap-1 transition-all hover:scale-[1.02] active:scale-[0.98] cursor-pointer font-sans"
               >
-                直接下载 / 全屏预览
-                <ArrowUpRight className="w-3.5 h-3.5" />
+                <Download className="w-3.5 h-3.5" />
+                下载原文件
               </a>
             </div>
           </div>

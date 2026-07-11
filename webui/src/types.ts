@@ -15,7 +15,6 @@ export interface TelegramAccount {
   sessionName: string;
   createdAt: string;
   hasSession?: boolean;
-  isActive?: boolean;
   isRunning?: boolean;
   runtimeStatus?: 'starting' | 'running' | 'stopping' | 'stopped' | 'error' | string;
   runtimeMessage?: string;

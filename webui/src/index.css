@@ -113,3 +113,74 @@
   background-color: var(--color-slate-900) !important;
 }
 
+html { scroll-behavior: smooth; }
+body { background: #f7faff; }
+
+.overview-panel {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #d8e3ef;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 3px 14px rgba(37, 80, 125, 0.06);
+}
+
+.overview-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 13px;
+  color: #20344f;
+}
+
+.overview-title > span {
+  display: grid;
+  width: 21px;
+  height: 21px;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 6px;
+  background: #218be5;
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+  box-shadow: 0 3px 8px rgba(33, 139, 229, 0.25);
+}
+
+.overview-title h2 {
+  color: #20344f !important;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.overview-title p {
+  margin-top: 2px;
+  color: #8a99ab;
+  font-size: 9px;
+}
+
+.overview-body {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  zoom: 0.62;
+}
+
+@media (min-width: 1536px) and (min-height: 900px) {
+  .overview-body { zoom: 0.72; }
+}
+
+.light-mode button,
+.light-mode input,
+.light-mode select,
+.light-mode textarea { border-radius: 7px !important; }
+
+.light-mode ::-webkit-scrollbar-track { background: #f4f7fb !important; }
+
+@media (max-width: 1023px) {
+  .overview-panel { min-height: auto !important; }
+  .overview-body { max-height: none; overflow: visible; zoom: 1; }
+}
+

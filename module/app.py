@@ -18,7 +18,7 @@ from module.cloud_drive import CloudDrive, CloudDriveConfig
 from module.db import db
 from module.filter import Filter
 from module.language import Language, set_language
-from module.profiles import save_active_profile, update_profile
+from module.profiles import update_profile
 from utils.format import replace_date_time, validate_title
 from utils.meta_data import MetaData
 
@@ -154,6 +154,7 @@ class TaskNode:
         self.bot = bot
         self.task_id = task_id
         self.task_type = task_type
+        self.created_at = time.time()
         self.total_task = 0
         self.total_download_task = 0
         self.failed_download_task = 0
@@ -198,6 +199,7 @@ class TaskNode:
             "task_type": self.task_type.value,
             "topic_id": self.topic_id,
             "profile_id": self.profile_id,
+            "created_at": self.created_at,
             # We don't save runtime state like total_task etc. as we want to restart fresh or
             # we rely on download history to skip items.
         }
@@ -222,6 +224,7 @@ class TaskNode:
             topic_id=data.get("topic_id", 0),
             profile_id=data.get("profile_id"),
         )
+        node.created_at = data.get("created_at", node.created_at)
         return node
 
     def skip_msg_id(self, msg_id: int):
@@ -587,6 +590,9 @@ class Application:
                 self.cloud_drive_config.webdav_password = upload_drive_config[
                     "webdav_password"
                 ]
+        else:
+            # 配置不再包含云盘段时立即关闭旧上传目标，避免热更新后继续使用残留凭据。
+            self.cloud_drive_config = CloudDriveConfig()
 
         self.file_name_prefix_split = _config.get(
             "file_name_prefix_split", self.file_name_prefix_split
@@ -1071,19 +1077,15 @@ class Application:
             # Save to DB
             if db.conn:
                 if self.profile_id:
+                    # 每个账号只持久化自己的下载游标和失败重试状态；
+                    # 下载规则、云盘和 Bot 配置由全局 Application 统一管理。
                     update_profile(
                         self.profile_id,
-                        config=self.config,
                         app_data=self.app_data,
                     )
                 else:
                     db.save_setting("config", self.config)
                     db.save_setting("data", self.app_data)
-                    save_active_profile(
-                        config=self.config,
-                        app_data=self.app_data,
-                        sync_legacy=False,
-                    )
 
             try:
                 with open(self.config_file, "w", encoding="utf-8") as yaml_file:

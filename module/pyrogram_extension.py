@@ -34,6 +34,7 @@ from module.app import (
     DownloadStatus,
     ForwardStatus,
     TaskNode,
+    TaskType,
     UploadProgressStat,
     UploadStatus,
 )
@@ -1052,6 +1053,105 @@ async def report_bot_forward_status(
     await report_bot_status(client, node)
 
 
+def _format_task_elapsed(seconds: float) -> str:
+    """Format task runtime for the compact Telegram status panel."""
+    seconds = max(int(seconds), 0)
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}小时{minutes:02d}分{seconds:02d}秒"
+    if minutes:
+        return f"{minutes}分{seconds:02d}秒"
+    return f"{seconds}秒"
+
+
+def build_bot_task_summary(
+    node: TaskNode,
+    current_download_speed: int = 0,
+    current_upload_speed: int = 0,
+    task_records: Iterable[dict] = (),
+    now: float = None,
+) -> str:
+    """Build the stable overview section of a Telegram download status message."""
+    records = list(task_records)
+    processed_count = (
+        node.success_download_task
+        + node.failed_download_task
+        + node.skip_download_task
+    )
+    total_count = max(node.total_task, node.total_download_task, processed_count)
+    remaining_count = max(total_count - processed_count, 0)
+    progress = int(processed_count / total_count * 100) if total_count else 0
+
+    if node.is_stop_transmission:
+        status_label = "⏹ 已停止"
+    elif total_count and processed_count >= total_count:
+        if node.failed_download_task and node.success_download_task:
+            status_label = "⚠️ 部分完成"
+        elif node.failed_download_task:
+            status_label = "❌ 执行失败"
+        else:
+            status_label = "✅ 全部完成"
+    elif processed_count or records:
+        status_label = "🔄 传输中"
+    else:
+        status_label = "⏳ 等待中"
+
+    total_bytes = sum(max(int(item.get("total_size", 0)), 0) for item in records)
+    processed_bytes = sum(
+        min(
+            max(int(item.get("down_byte", 0)), 0),
+            max(int(item.get("total_size", 0)), 0),
+        )
+        for item in records
+    )
+    if not processed_bytes:
+        processed_bytes = max(int(node.total_download_byte), 0)
+
+    task_type_label = {
+        TaskType.Download: "媒体下载",
+        TaskType.Forward: "消息转发",
+        TaskType.ListenForward: "监听转发",
+    }.get(node.task_type, "媒体下载")
+    profile_label = truncate_filename(str(node.profile_id or "默认账号"), 24)
+    source_label = truncate_filename(str(node.chat_id), 28)
+    elapsed = _format_task_elapsed(
+        (now if now is not None else time.time()) - getattr(node, "created_at", time.time())
+    )
+    data_label = format_byte(processed_bytes)
+    if total_bytes:
+        data_label = f"{data_label} / {format_byte(total_bytes)}"
+    if current_download_speed or current_upload_speed:
+        speed_label = (
+            f"↓ {format_byte(current_download_speed)}/s  "
+            f"↑ {format_byte(current_upload_speed)}/s"
+        )
+    elif total_count and processed_count >= total_count:
+        speed_label = "任务已结束"
+    else:
+        speed_label = "等待传输"
+
+    return (
+        f"📦 Telegram 下载任务 #{node.task_id}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📌 状态  {status_label}\n"
+        f"🧭 类型  {task_type_label}\n"
+        f"👤 账号  {profile_label}\n"
+        f"💬 来源  {source_label}\n"
+        f"🕒 耗时  {elapsed}\n\n"
+        f"📊 总体进度\n"
+        f"[{create_progress_bar(progress)}] {progress}%  "
+        f"({processed_count}/{total_count or 0})\n"
+        f"💾 数据  {data_label}\n"
+        f"⚡ 速度  {speed_label}\n\n"
+        f"📋 结果统计\n"
+        f"├─ ✅ 成功  {node.success_download_task}\n"
+        f"├─ ❌ 失败  {node.failed_download_task}\n"
+        f"├─ ⏭ 跳过  {node.skip_download_task}\n"
+        f"└─ ⏳ 剩余  {remaining_count}\n"
+    )
+
+
 async def report_bot_status(
     client: pyrogram.Client,
     node: TaskNode,
@@ -1105,93 +1205,163 @@ async def _report_bot_status(
             if value.transferred == value.total:
                 continue
 
-            temp_file_name = truncate_filename(os.path.basename(value.file_name), 10)
+            temp_file_name = truncate_filename(
+                os.path.basename(value.file_name), 32
+            ).replace("`", "'")
             upload_msg_detail_str += (
-                f" ├─ 🆔 {_t('Message ID')}: {idx}\n"
-                f" │   ├─ 📁 : {temp_file_name}\n"
-                f" │   ├─ 📏 : {value.total}\n"
-                f" │   ├─ ⏫ : {value.speed}\n"
-                f" │   └─ 📊 : ["
+                f"├─ 🆔 消息 {idx}\n"
+                f"│  ├─ 📄 {temp_file_name}\n"
+                f"│  ├─ 💾 {value.transferred} / {value.total}\n"
+                f"│  ├─ ⚡ {value.speed} · 剩余 {value.eta}\n"
+                f"│  └─ ["
                 f"{create_progress_bar(int(value.percentage.split('%')[0]))}]"
-                f" ({value.percentage})%\n"
+                f" {value.percentage}\n"
             )
 
         download_result_str = ""
+        task_records = []
         download_result = get_download_result()
         if node.chat_id in download_result:
             messages = download_result[node.chat_id]
             for idx, value in messages.items():
                 task_id = value.get("task_id", 0)
-                if task_id != node.task_id or value["down_byte"] == value["total_size"]:
+                if task_id != node.task_id:
+                    continue
+                record_profile_id = value.get("profile_id")
+                if node.profile_id and record_profile_id not in (node.profile_id, None):
+                    continue
+                task_records.append({"message_id": idx, **value})
+                if (
+                    value.get("state") == "failed"
+                    or value.get("down_byte", 0) >= value.get("total_size", 1)
+                ):
                     continue
 
                 temp_file_name = truncate_filename(
-                    os.path.basename(value["file_name"]), 10
+                    os.path.basename(value["file_name"]), 32
+                ).replace("`", "'")
+                progress = int(
+                    value.get("down_byte", 0) / max(value.get("total_size", 0), 1) * 100
                 )
-                progress = int(value["down_byte"] / value["total_size"] * 100)
                 download_result_str += (
-                    f" ├─ 🆔 {_t('Message ID')}: {idx}\n"
-                    f" │   ├─ 📁 : {temp_file_name}\n"
-                    f" │   ├─ 📏 : {format_byte(value['total_size'])}\n"
-                    f" │   ├─ ⏬ : {format_byte(value['download_speed'])}/s\n"
-                    f" │   └─ 📊 : [{create_progress_bar(progress)}]"
-                    f" ({progress}%)\n"
+                    f"├─ 🆔 消息 {idx}\n"
+                    f"│  ├─ 📄 {temp_file_name}\n"
+                    f"│  ├─ 💾 {format_byte(value.get('down_byte', 0))} / "
+                    f"{format_byte(value.get('total_size', 0))}\n"
+                    f"│  ├─ ⚡ {format_byte(value.get('download_speed', 0))}/s\n"
+                    f"│  └─ [{create_progress_bar(progress)}] {progress}%\n"
                 )
 
             if download_result_str:
-                download_result_str = (
-                    f"\n📥 {_t('Download Progresses')}:\n" + download_result_str
-                )
+                download_result_str = "\n📥 当前下载\n" + download_result_str
 
         upload_result_str = ""
         for idx, value in node.upload_stat_dict.items():
             if value.total_size == value.upload_size:
                 continue
 
-            temp_file_name = truncate_filename(os.path.basename(value.file_name), 10)
+            temp_file_name = truncate_filename(
+                os.path.basename(value.file_name), 32
+            ).replace("`", "'")
             progress = int(value.upload_size / value.total_size * 100)
             upload_result_str += (
-                f" ├─ 🆔 {_t('Message ID')}: {idx}\n"
-                f" │   ├─ 📁 : {temp_file_name}\n"
-                f" │   ├─ 📏 : {format_byte(value.total_size)}\n"
-                f" │   ├─ ⏫ : {format_byte(value.upload_speed)}/s\n"
-                f" │   └─ 📊 : [{create_progress_bar(progress)}]"
-                f" ({progress}%)\n"
+                f"├─ 🆔 消息 {idx}\n"
+                f"│  ├─ 📄 {temp_file_name}\n"
+                f"│  ├─ 💾 {format_byte(value.upload_size)} / "
+                f"{format_byte(value.total_size)}\n"
+                f"│  ├─ ⚡ {format_byte(value.upload_speed)}/s\n"
+                f"│  └─ [{create_progress_bar(progress)}] {progress}%\n"
             )
 
         if upload_result_str:
-            upload_result_str = f"\n📤 {_t('Upload Progresses')}:\n" + upload_result_str
+            upload_result_str = "\n📤 当前上传\n" + upload_result_str
 
-        # Get current download speed
-        current_speed = get_total_download_speed()
-        speed_str = (
-            f"⚡ {_t('Speed')}: {format_byte(current_speed)}/s\n"
-            if current_speed > 0
-            else ""
+        recent_file_result_str = ""
+        terminal_records = [
+            item
+            for item in task_records
+            if item.get("state") == "failed"
+            or item.get("down_byte", 0) >= item.get("total_size", 1)
+        ]
+        terminal_records.sort(
+            key=lambda item: item.get("end_time", item.get("created_at", 0)),
+            reverse=True,
+        )
+        if terminal_records:
+            recent_file_lines = []
+            for position, item in enumerate(terminal_records[:5]):
+                prefix = "└─" if position == len(terminal_records[:5]) - 1 else "├─"
+                result_icon = "❌" if item.get("state") == "failed" else "✅"
+                file_name = truncate_filename(
+                    os.path.basename(item.get("file_name", "未知文件")), 32
+                ).replace("`", "'")
+                recent_file_lines.append(
+                    f"{prefix} {result_icon} {file_name}  "
+                    f"({format_byte(item.get('total_size', 0))})"
+                )
+                if item.get("state") == "failed" and item.get("error"):
+                    error = truncate_filename(str(item["error"]), 64).replace("`", "'")
+                    recent_file_lines.append(f"   ↳ 原因：{error}")
+            recent_file_result_str = "\n📄 最近文件\n" + "\n".join(recent_file_lines) + "\n"
+
+        current_download_speed = sum(
+            max(int(item.get("download_speed", 0)), 0)
+            for item in task_records
+            if item.get("down_byte", 0) < item.get("total_size", 1)
+        )
+        if not current_download_speed:
+            current_download_speed = get_total_download_speed()
+        current_upload_speed = sum(
+            max(int(value.upload_speed), 0)
+            for value in node.upload_stat_dict.values()
+            if value.upload_size < value.total_size
+        )
+        task_summary = build_bot_task_summary(
+            node,
+            current_download_speed,
+            current_upload_speed,
+            task_records,
         )
 
-        new_msg_str = (
-            f"`\n"
-            f"🆔 task id: {node.task_id}\n"
-            f"{speed_str}"
-            f"📥 {_t('Downloading')}: {format_byte(node.total_download_byte)}\n"
-            f"├─ 📁 {_t('Total')}: {node.total_download_task}\n"
-            f"├─ ✅ {_t('Success')}: {node.success_download_task}\n"
-            f"├─ ❌ {_t('Failed')}: {node.failed_download_task}\n"
-            f"└─ ⏩ {_t('Skipped')}: {node.skip_download_task}\n"
+        status_body = (
+            f"{task_summary}"
             f"{node.forward_msg_detail_str}"
             f"{upload_msg_detail_str}"
             f"{upload_result_str}"
-            f"{download_result_str}\n`"
+            f"{download_result_str}"
+            f"{recent_file_result_str}"
         )
+        # Telegram 单条消息上限为 4096 字符；保留概览和最新进度，超长文件清单在尾部截断。
+        if get_utf16_length(status_body) > 3800:
+            status_body = (
+                truncate_caption(status_body, limit=3740)[0].rstrip()
+                + "\n… 其余明细已折叠"
+            )
+        new_msg_str = f"```\n{status_body.rstrip()}\n```"
 
         if new_msg_str != node.last_edit_msg:
             node.last_edit_msg = new_msg_str
+            callback_prefix = {
+                TaskType.Download: "stop_download",
+                TaskType.Forward: "stop_forward",
+                TaskType.ListenForward: "stop_listen_forward",
+            }.get(node.task_type, "stop_download")
+            task_controls = types.InlineKeyboardMarkup(
+                [
+                    [
+                        types.InlineKeyboardButton(
+                            "⏹ 停止任务",
+                            callback_data=f"{callback_prefix} task {node.task_id}",
+                        )
+                    ]
+                ]
+            )
             await client.edit_message_text(
                 node.from_user_id,
                 node.reply_message_id,
                 new_msg_str,
                 parse_mode=pyrogram.enums.ParseMode.MARKDOWN,
+                reply_markup=task_controls,
             )
 
 
