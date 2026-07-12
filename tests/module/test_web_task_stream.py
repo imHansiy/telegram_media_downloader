@@ -66,6 +66,33 @@ class WebTaskProjectionTestCase(unittest.TestCase):
         self.assertEqual("failed", active[0]["state"])
         self.assertEqual("WebDAV upload failed", active[0]["error"])
 
+    def test_upload_failed_task_shows_local_complete_and_upload_failed_status(self):
+        download_result = {
+            -1001: {
+                93341: {
+                    "down_byte": 100,
+                    "total_size": 100,
+                    "file_name": "local-complete.mp4",
+                    "download_speed": 0,
+                    "profile_id": "default",
+                    "state": "upload_failed",
+                    "error": "WebDAV upload failed; local completed file retained",
+                }
+            }
+        }
+
+        with mock.patch.object(web, "get_download_result", return_value=download_result), mock.patch.object(
+            web, "get_upload_result", return_value={}
+        ):
+            active = web._get_formatted_list(already_down=False)
+            history = web._get_formatted_list(already_down=True)
+
+        self.assertEqual(1, len(active))
+        self.assertEqual([], history)
+        self.assertEqual("上传失败", active[0]["status"])
+        self.assertEqual("upload_failed", active[0]["state"])
+        self.assertEqual("100.0", active[0]["download_progress"])
+
 
 class WebTaskResetRouteTestCase(unittest.TestCase):
     def setUp(self):
@@ -82,8 +109,8 @@ class WebTaskResetRouteTestCase(unittest.TestCase):
             "file_name": "downloads/channel/video.mp4",
             "total_size": 1024,
             "profile_id": "profile-1",
-            "state": "failed",
-            "error": "WebDAV upload failed",
+            "state": "upload_failed",
+            "error": "WebDAV upload failed; local completed file retained",
         }
         projected_task = {
             "chat": "-1001",
@@ -126,6 +153,204 @@ class WebTaskResetRouteTestCase(unittest.TestCase):
             "downloads/channel/video.mp4",
             1024,
         )
+
+    def test_delete_action_removes_task_history(self):
+        """Given a persisted task, delete must remove it instead of only hiding its worker state."""
+        with mock.patch.object(
+            web,
+            "remove_download_task",
+            return_value=True,
+        ) as remove_mock, mock.patch.object(web, "set_task_state") as state_mock:
+            response = web._flask_app.test_client().post(
+                "/task_control",
+                json={
+                    "chat_id": -1001,
+                    "message_id": 93341,
+                    "profile_id": "profile-1",
+                    "action": "delete",
+                },
+            )
+
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(response.get_json()["success"])
+        remove_mock.assert_called_once_with(-1001, 93341, "profile-1")
+        state_mock.assert_called_once_with(-1001, 93341, "deleted", "profile-1")
+
+    def test_delete_remote_uses_server_derived_path_then_removes_task(self):
+        projected_task = {
+            "chat": "-1001",
+            "id": "93341",
+            "profile_id": "profile-1",
+            "remote_path": "/TelegramBackup/channel/video.mp4",
+        }
+        with mock.patch.object(
+            web,
+            "_get_formatted_list",
+            return_value=[projected_task],
+        ), mock.patch.object(
+            web,
+            "_delete_webdav_resource",
+            return_value=(True, "deleted"),
+        ) as delete_remote_mock, mock.patch.object(
+            web,
+            "remove_download_task",
+            return_value=True,
+        ) as remove_mock, mock.patch.object(web, "set_task_state") as state_mock:
+            response = web._flask_app.test_client().post(
+                "/task_control",
+                json={
+                    "chat_id": -1001,
+                    "message_id": 93341,
+                    "profile_id": "profile-1",
+                    "action": "delete_remote",
+                    "remote_path": "/outside/user-controlled.mp4",
+                },
+            )
+
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(response.get_json()["success"])
+        delete_remote_mock.assert_called_once_with(
+            "/TelegramBackup/channel/video.mp4"
+        )
+        remove_mock.assert_called_once_with(-1001, 93341, "profile-1")
+        state_mock.assert_called_once_with(-1001, 93341, "deleted", "profile-1")
+
+    def test_delete_remote_failure_keeps_task_record(self):
+        projected_task = {
+            "chat": "-1001",
+            "id": "93341",
+            "profile_id": "profile-1",
+            "remote_path": "/TelegramBackup/channel/video.mp4",
+        }
+        with mock.patch.object(
+            web,
+            "_get_formatted_list",
+            return_value=[projected_task],
+        ), mock.patch.object(
+            web,
+            "_delete_webdav_resource",
+            return_value=(False, "WebDAV 删除失败（HTTP 423）"),
+        ), mock.patch.object(web, "remove_download_task") as remove_mock:
+            response = web._flask_app.test_client().post(
+                "/task_control",
+                json={
+                    "chat_id": -1001,
+                    "message_id": 93341,
+                    "profile_id": "profile-1",
+                    "action": "delete_remote",
+                },
+            )
+
+        self.assertEqual(409, response.status_code)
+        self.assertFalse(response.get_json()["success"])
+        remove_mock.assert_not_called()
+
+    def test_delete_action_cancels_matching_bot_task_card(self):
+        """网页删除活跃任务时，必须同步停止 Bot 任务节点并更新状态卡片。"""
+        with mock.patch.object(
+            web,
+            "remove_download_task",
+            return_value=True,
+        ), mock.patch.object(web, "set_task_state"), mock.patch.object(
+            web,
+            "cancel_bot_tasks_for_message",
+            return_value=1,
+        ) as cancel_bot_mock:
+            response = web._flask_app.test_client().post(
+                "/task_control",
+                json={
+                    "chat_id": -1001,
+                    "message_id": 93341,
+                    "profile_id": "profile-1",
+                    "action": "delete",
+                },
+            )
+
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(response.get_json()["success"])
+        cancel_bot_mock.assert_called_once_with(-1001, 93341, "profile-1")
+
+    def test_delete_remote_cancels_matching_bot_task_card(self):
+        """删除远程资源成功后，同样要清理 Bot 活跃任务卡片。"""
+        projected_task = {
+            "chat": "-1001",
+            "id": "93341",
+            "profile_id": "profile-1",
+            "remote_path": "/TelegramBackup/channel/video.mp4",
+        }
+        with mock.patch.object(
+            web,
+            "_get_formatted_list",
+            return_value=[projected_task],
+        ), mock.patch.object(
+            web,
+            "_delete_webdav_resource",
+            return_value=(True, "deleted"),
+        ), mock.patch.object(
+            web,
+            "remove_download_task",
+            return_value=True,
+        ), mock.patch.object(web, "set_task_state"), mock.patch.object(
+            web,
+            "cancel_bot_tasks_for_message",
+            return_value=1,
+        ) as cancel_bot_mock:
+            response = web._flask_app.test_client().post(
+                "/task_control",
+                json={
+                    "chat_id": -1001,
+                    "message_id": 93341,
+                    "profile_id": "profile-1",
+                    "action": "delete_remote",
+                },
+            )
+
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(response.get_json()["success"])
+        cancel_bot_mock.assert_called_once_with(-1001, 93341, "profile-1")
+
+
+class CancelBotTaskCardTestCase(unittest.TestCase):
+    def test_cancel_bot_tasks_for_message_stops_node_and_finalizes_card(self):
+        """Given: Bot 仍持有活跃 TaskNode
+        When: 网页按 chat/message 删除该任务
+        Then: 节点停止传输、卡片改为已删除，并从活跃列表移除
+        """
+        from module.app import TaskNode
+        from module.bot import DownloadBot, cancel_bot_tasks_for_message
+        import module.bot as bot_module
+
+        bot = DownloadBot()
+        bot.is_running = True
+        node = TaskNode(
+            chat_id=-1001,
+            from_user_id=8906676091,
+            reply_message_id=501,
+            task_id=7,
+            profile_id="profile-1",
+            bot=bot,
+        )
+        node.is_running = True
+        node.download_status[93341] = object()
+        bot.task_node[7] = node
+
+        edit_mock = mock.AsyncMock(return_value=mock.Mock(id=501))
+        bot.edit_message_text = edit_mock
+
+        previous_bot = bot_module._bot
+        bot_module._bot = bot
+        try:
+            cancelled = cancel_bot_tasks_for_message(-1001, 93341, "profile-1")
+        finally:
+            bot_module._bot = previous_bot
+
+        self.assertEqual(1, cancelled)
+        self.assertTrue(node.is_stop_transmission)
+        self.assertFalse(node.is_running)
+        self.assertNotIn(7, bot.task_node)
+        edit_mock.assert_awaited()
+        edited_text = edit_mock.await_args.args[2]
+        self.assertIn("已删除", edited_text)
 
 
 if __name__ == "__main__":

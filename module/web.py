@@ -31,6 +31,7 @@ import requests
 import utils
 from module.app import Application
 from module.bot import (
+    cancel_bot_tasks_for_message,
     get_download_bot_diagnostics,
     get_download_bot_webhook_secret,
     handle_download_bot_webhook_update,
@@ -49,6 +50,7 @@ from module.download_stat import (
     get_download_result,
     get_download_state,
     get_total_download_speed,
+    is_retryable_failure_state,
     set_download_state,
     clear_download_history,
     remove_download_task,
@@ -1720,7 +1722,8 @@ def _get_formatted_list(already_down=False):
         task_record_state = (u_item or {}).get("state") or (d_item or {}).get(
             "state"
         )
-        is_failed = task_record_state == "failed"
+        is_failed = is_retryable_failure_state(task_record_state or "")
+        is_upload_failed = task_record_state == "upload_failed"
 
         # Extract basic info
         file_name = base_item.get("file_name", "Unknown")
@@ -1833,8 +1836,11 @@ def _get_formatted_list(already_down=False):
              display_upload_progress = "Finishing..."
 
         # Determine status text
+        # 本机已完整、仅云盘失败时单独文案，便于仪表盘区分“下载失败”和“上传失败”。
         status_text = ""
-        if is_failed:
+        if is_upload_failed:
+            status_text = "上传失败"
+        elif is_failed:
             status_text = "失败"
         elif is_truly_finished:
             status_text = "已完成"
@@ -1849,6 +1855,21 @@ def _get_formatted_list(already_down=False):
             status_text = "下载中"
         else:
             status_text = "等待中"
+
+        # 上传失败时本机进度应为 100%，避免 UI 看起来像没下完。
+        if is_upload_failed and total_size > 0:
+            download_progress = 100.0
+            display_download_progress = "100.0"
+
+        projected_state = (
+            task_record_state
+            if is_failed
+            else (
+                get_task_state(chat_id, idx, profile_id)
+                if not already_down
+                else "finished"
+            )
+        )
 
         item = {
             "chat": str(chat_id),
@@ -1868,18 +1889,31 @@ def _get_formatted_list(already_down=False):
             "completed_ts": completed_ts if is_truly_finished else None,
             "profile_id": profile_id,
             "profileId": profile_id,
-            "state": "failed"
-            if is_failed
-            else (
-                get_task_state(chat_id, idx, profile_id)
-                if not already_down
-                else "finished"
-            ),
+            "state": projected_state,
             "status": status_text,
             "error": (u_item or {}).get("error") or (d_item or {}).get("error") or "",
         }
         data.append(item)
     return data
+
+
+def _delete_webdav_resource(remote_path: str) -> tuple[bool, str]:
+    """Delete one server-derived remote object from the active WebDAV root."""
+    if not _app_instance:
+        return False, "应用运行态尚未就绪"
+    cloud_config = _app_instance.cloud_drive_config
+    if cloud_config.upload_adapter != "webdav":
+        return False, "当前上传适配器不是 WebDAV"
+
+    future = asyncio.run_coroutine_threadsafe(
+        CloudDrive.webdav_delete_path(cloud_config, remote_path),
+        _app_instance.loop,
+    )
+    try:
+        return future.result(timeout=90)
+    except TimeoutError:
+        future.cancel()
+        return False, "WebDAV 删除超时"
 
 
 @_flask_app.route("/task_control", methods=["POST"])
@@ -1903,9 +1937,9 @@ def api_task_control():
             task_record = get_download_result().get(chat_id, {}).get(message_id)
             if not task_record:
                 return jsonify({"success": False, "message": "任务不存在"}), 404
-            if task_record.get("state") != "failed":
+            if not is_retryable_failure_state(task_record.get("state", "")):
                 return jsonify(
-                    {"success": False, "message": "只有失败任务可以重置上传"}
+                    {"success": False, "message": "只有失败或上传失败任务可以重置上传"}
                 ), 409
             if profile_id and task_record.get("profile_id") not in (profile_id, None):
                 return jsonify({"success": False, "message": "任务不属于当前账号"}), 403
@@ -1950,10 +1984,54 @@ def api_task_control():
                 }
             )
 
+        if action == "delete":
+            # 先通知正在运行的 worker 停止，再清理下载历史、待处理项和上传状态。
+            # 仅写入 deleted 控制状态会被 SSE 从历史记录再次投影，前端看起来像“没反应”。
+            # Bot 状态卡片由独立的 task_node 维护，必须同步取消，否则会继续刷新旧进度。
+            set_task_state(chat_id, message_id, "deleted", profile_id)
+            cancel_bot_tasks_for_message(chat_id, message_id, profile_id)
+            remove_download_task(chat_id, message_id, profile_id)
+            return jsonify({"success": True, "message": "任务已取消并删除"})
+
+        if action == "delete_remote":
+            # 远程路径只能由服务端任务投影生成，禁止信任客户端传入的路径。
+            matched_task = next(
+                (
+                    item
+                    for item in (
+                        _get_formatted_list(already_down=False)
+                        + _get_formatted_list(already_down=True)
+                    )
+                    if int(item["chat"]) == chat_id
+                    and int(item["id"]) == message_id
+                    and (
+                        not profile_id
+                        or item.get("profile_id") in (profile_id, None)
+                    )
+                ),
+                None,
+            )
+            if not matched_task:
+                return jsonify({"success": False, "message": "任务不存在"}), 404
+
+            deleted, delete_message = _delete_webdav_resource(
+                matched_task["remote_path"]
+            )
+            if not deleted:
+                return jsonify(
+                    {"success": False, "message": delete_message}
+                ), 409
+
+            set_task_state(chat_id, message_id, "deleted", profile_id)
+            cancel_bot_tasks_for_message(chat_id, message_id, profile_id)
+            remove_download_task(chat_id, message_id, profile_id)
+            return jsonify(
+                {"success": True, "message": "任务及远程资源已删除"}
+            )
+
         state_map = {
             'pause': 'paused',
             'resume': 'running',
-            'delete': 'deleted'
         }
         
         target_state = state_map.get(action)

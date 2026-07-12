@@ -30,6 +30,7 @@ from module.app import (
     UploadStatus,
 )
 from module.db import db
+from module.download_stat import get_download_result
 from module.filter import Filter
 from module.get_chat_history_v2 import get_chat_history_v2
 from module.language import Language, _t
@@ -125,6 +126,98 @@ class DownloadBot:
                     task.stop_transmission()
             except Exception:
                 return
+
+    @staticmethod
+    def _node_matches_message(
+        node: TaskNode,
+        chat_id: int,
+        message_id: int,
+        profile_id: str = None,
+    ) -> bool:
+        """Whether a Bot TaskNode owns the web task identified by chat/message."""
+        if int(node.chat_id) != int(chat_id):
+            return False
+        if profile_id and node.profile_id not in (profile_id, None):
+            return False
+
+        if message_id in node.download_status:
+            return True
+        if message_id in node.upload_stat_dict:
+            return True
+        if message_id in node.cloud_drive_upload_stat_dict:
+            return True
+
+        # 媒体组任务在入队时会写入 download_status；兜底再按 task_id 匹配下载历史。
+        download_result = get_download_result()
+        chat_tasks = download_result.get(chat_id) or download_result.get(int(chat_id)) or {}
+        record = chat_tasks.get(message_id)
+        if not record:
+            return False
+        if record.get("task_id", 0) != node.task_id:
+            return False
+        record_profile_id = record.get("profile_id")
+        if profile_id and record_profile_id not in (profile_id, None):
+            return False
+        return True
+
+    def _finalize_deleted_task_card(self, node: TaskNode, message_id: int) -> None:
+        """把 Bot 状态卡片改成终态，避免删除后仍每 3 秒刷新旧进度。"""
+        if not node.reply_message_id or not node.from_user_id:
+            return
+
+        text = (
+            "🗑️ 任务已删除\n"
+            f"消息 {message_id} 已从网页取消，传输已停止。\n"
+            "此状态卡片不再更新。"
+        )
+
+        async def _edit_card():
+            await self.edit_message_text(
+                node.from_user_id,
+                node.reply_message_id,
+                text,
+            )
+
+        try:
+            loop = getattr(getattr(self, "app", None), "loop", None)
+            if loop and loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(_edit_card(), loop)
+                future.result(timeout=10)
+            else:
+                asyncio.run(_edit_card())
+        except Exception as e:
+            logger.warning(
+                "Failed to finalize bot task card for message {}: {}",
+                message_id,
+                e,
+            )
+
+    def cancel_tasks_for_message(
+        self,
+        chat_id: int,
+        message_id: int,
+        profile_id: str = None,
+    ) -> int:
+        """Stop Bot nodes covering one web message and finalize their cards."""
+        cancelled = 0
+        for task_id, node in list(self.task_node.items()):
+            if not self._node_matches_message(node, chat_id, message_id, profile_id):
+                continue
+
+            # 先停传输，再改卡片并移除活跃节点，避免 update_reply_message 继续回写。
+            node.stop_transmission()
+            node.is_running = False
+            self._finalize_deleted_task_card(node, message_id)
+            self.remove_task_node(task_id)
+            cancelled += 1
+            logger.info(
+                "Cancelled bot task {} for chat={} message={} profile={}",
+                task_id,
+                chat_id,
+                message_id,
+                profile_id,
+            )
+        return cancelled
 
     async def update_reply_message(self):
         """Update reply message"""
@@ -1137,6 +1230,15 @@ async def stop_download_bot():
         _bot.monitor_task.cancel()
         _bot.monitor_task = None
     _bot.client = None
+
+
+def cancel_bot_tasks_for_message(
+    chat_id: int,
+    message_id: int,
+    profile_id: str = None,
+) -> int:
+    """Public entry used by Web task deletion to sync Bot task cards."""
+    return _bot.cancel_tasks_for_message(chat_id, message_id, profile_id)
 
 
 def get_download_bot_diagnostics(ensure_polling: bool = False):
