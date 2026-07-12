@@ -56,17 +56,33 @@ class FakeAsyncWebDavSession:
 
 
 class FakeUploadSession(FakeAsyncWebDavSession):
-    def __init__(self, put_response=None, put_error=None):
+    def __init__(self, put_response=None, put_error=None, head_status=404, head_length=None):
         super().__init__(FakeAsyncWebDavResponse(status=204))
         self.put_response = put_response
         self.put_error = put_error
+        self.head_status = head_status
+        self.head_length = head_length
+        self.put_urls = []
+        self.move_calls = []
 
-    def request(self, method, url):
-        del method, url
+    def request(self, method, url, headers=None):
+        # MKCOL / MOVE 共用 request；MOVE 时带 Destination 头。
+        if str(method).upper() == "MOVE":
+            self.move_calls.append((url, headers or {}))
+            return FakeAsyncWebDavResponse(status=201)
         return FakeAsyncWebDavResponse(status=405)
 
+    def head(self, url, allow_redirects=True):
+        del url, allow_redirects
+        resp = FakeAsyncWebDavResponse(status=self.head_status)
+        resp.headers = {}
+        if self.head_length is not None:
+            resp.headers["Content-Length"] = str(self.head_length)
+        return resp
+
     def put(self, url, data, headers):
-        del url, data, headers
+        del data, headers
+        self.put_urls.append(url)
         if self.put_error:
             raise self.put_error
         return self.put_response
@@ -157,9 +173,19 @@ class WebDavResetTestCase(unittest.IsolatedAsyncioTestCase):
             side_effect=[first_attempt, second_attempt],
         ), mock.patch.object(
             CloudDrive,
+            "webdav_head_size",
+            new=mock.AsyncMock(side_effect=[None, 4]),
+        ), mock.patch.object(
+            CloudDrive,
+            "webdav_move_path",
+            new=mock.AsyncMock(return_value=True),
+        ), mock.patch.object(
+            CloudDrive,
             "webdav_delete_path",
             new=mock.AsyncMock(return_value=(True, "deleted")),
-        ) as delete_mock, mock.patch("module.cloud_drive.asyncio.sleep", new=mock.AsyncMock()):
+        ) as delete_mock, mock.patch(
+            "module.cloud_drive.asyncio.sleep", new=mock.AsyncMock()
+        ):
             success = await CloudDrive.webdav_upload_stream(
                 config,
                 "downloads",
@@ -170,9 +196,12 @@ class WebDavResetTestCase(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(success)
-        delete_mock.assert_awaited_once_with(
-            config,
-            "TelegramBackup/channel/video.mp4",
+        # 中断后与成功前都会清理 staging（.uploading），避免半文件污染最终路径。
+        deleted_paths = [call.args[1] for call in delete_mock.await_args_list]
+        self.assertTrue(deleted_paths)
+        self.assertTrue(
+            all(path.endswith(".uploading") for path in deleted_paths),
+            deleted_paths,
         )
 
     def test_open_ended_preview_range_is_bounded(self):

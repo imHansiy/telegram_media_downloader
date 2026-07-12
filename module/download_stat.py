@@ -129,6 +129,10 @@ def add_pending_download(
         "started_at": time.time(),
     }
     _save_pending_downloads()
+    # 网页删除会把任务记为 deleted；用户重新提交同一消息时必须清掉旧锁，
+    # 否则进度回调会立刻当“已取消”处理，Bot 卡片卡住且网页看不到任务。
+    if get_task_state(chat_id, message_id, profile_id) == "deleted":
+        set_task_state(chat_id, message_id, "running", profile_id)
 
 
 def remove_pending_download(chat_id: int, message_id: int, profile_id: str = None):
@@ -431,16 +435,19 @@ def verify_and_save_download(
         print(f"Error saving download history: {e}")
 
 
-def mark_download_failed(
+def _persist_terminal_failure(
     chat_id: int,
     message_id: int,
+    *,
+    state: str,
     file_name: str = "",
     total_size: int = 0,
     task_id: int = 0,
     profile_id: str = None,
     error: str = "",
+    local_complete: bool = False,
 ):
-    """Persist a terminal failure so the dashboard can show and explain it."""
+    """Write a terminal failure row shared by download/upload failure paths."""
     global _download_result
 
     now = time.time()
@@ -462,17 +469,119 @@ def mark_download_failed(
         item["file_name"] = file_name
     if total_size:
         item["total_size"] = total_size
+    # 本地下载已完整、仅云盘失败时，进度条保持 100%，避免被误判成“没下完”。
+    if local_complete and item.get("total_size", 0) > 0:
+        item["down_byte"] = item["total_size"]
     item.update(
         {
             "end_time": now,
             "download_speed": 0,
             "task_id": task_id or item.get("task_id", 0),
             "profile_id": profile_id or item.get("profile_id"),
-            "state": "failed",
+            "state": state,
             "error": error or item.get("error") or "下载或上传失败",
         }
     )
 
+    if db.conn:
+        db.save_setting("download_history", _download_result)
+    return item
+
+
+def mark_download_failed(
+    chat_id: int,
+    message_id: int,
+    file_name: str = "",
+    total_size: int = 0,
+    task_id: int = 0,
+    profile_id: str = None,
+    error: str = "",
+):
+    """Persist a terminal Telegram-download failure for the dashboard."""
+    return _persist_terminal_failure(
+        chat_id,
+        message_id,
+        state="failed",
+        file_name=file_name,
+        total_size=total_size,
+        task_id=task_id,
+        profile_id=profile_id,
+        error=error or "下载失败",
+        local_complete=False,
+    )
+
+
+def mark_upload_failed(
+    chat_id: int,
+    message_id: int,
+    file_name: str = "",
+    total_size: int = 0,
+    task_id: int = 0,
+    profile_id: str = None,
+    error: str = "",
+):
+    """Persist local-complete / cloud-upload failure separately from download failure.
+
+    业务上本机媒体已落盘，只是 WebDAV 上传未成功；仪表盘应显示“上传失败”，
+    重置时只重传，不重新从 Telegram 拉完整文件（有本地完整文件时）。
+    """
+    return _persist_terminal_failure(
+        chat_id,
+        message_id,
+        state="upload_failed",
+        file_name=file_name,
+        total_size=total_size,
+        task_id=task_id,
+        profile_id=profile_id,
+        error=error or "WebDAV 上传失败；本地文件已保留",
+        local_complete=True,
+    )
+
+
+def is_retryable_failure_state(state: str) -> bool:
+    """Whether a history row can be reset and re-queued for upload."""
+    return state in ("failed", "upload_failed")
+
+
+def get_upload_auto_retry_count(
+    chat_id: int, message_id: int, profile_id: str = None
+) -> int:
+    """How many delayed auto-upload retries have already been scheduled/used."""
+    item = (_download_result.get(chat_id) or {}).get(message_id) or {}
+    if profile_id and item.get("profile_id") not in (profile_id, None, ""):
+        return 0
+    return int(item.get("upload_auto_retry_count") or 0)
+
+
+def bump_upload_auto_retry_count(
+    chat_id: int, message_id: int, profile_id: str = None
+) -> int:
+    """Increment delayed auto-upload retry counter and return the new value."""
+    chat_tasks = _download_result.setdefault(chat_id, {})
+    item = chat_tasks.setdefault(message_id, {})
+    if profile_id and item.get("profile_id") not in (profile_id, None, ""):
+        item["profile_id"] = profile_id
+    next_count = int(item.get("upload_auto_retry_count") or 0) + 1
+    item["upload_auto_retry_count"] = next_count
+    item["upload_auto_retry_at"] = time.time()
+    if db.conn:
+        db.save_setting("download_history", _download_result)
+    return next_count
+
+
+def clear_upload_auto_retry_count(
+    chat_id: int, message_id: int, profile_id: str = None
+) -> None:
+    """Clear delayed auto-upload counters after success or manual reset."""
+    item = (_download_result.get(chat_id) or {}).get(message_id)
+    if not item:
+        return
+    if profile_id and item.get("profile_id") not in (profile_id, None, ""):
+        return
+    if "upload_auto_retry_count" not in item and "upload_auto_retry_at" not in item:
+        return
+    item.pop("upload_auto_retry_count", None)
+    item.pop("upload_auto_retry_at", None)
     if db.conn:
         db.save_setting("download_history", _download_result)
 
@@ -487,8 +596,8 @@ def prepare_download_retry(
         raise KeyError("任务不存在")
     if profile_id and item.get("profile_id") not in (profile_id, None):
         raise PermissionError("任务不属于当前账号")
-    if item.get("state") != "failed":
-        raise ValueError("只有失败任务可以重置上传")
+    if not is_retryable_failure_state(item.get("state", "")):
+        raise ValueError("只有失败或上传失败任务可以重置上传")
 
     # 重置只清理失败终态；已下载字节数和本地文件继续保留，重新入队后优先复用完整文件。
     item["state"] = "pending"
@@ -517,10 +626,11 @@ def init_stat():
                     restored[chat_id] = {}
                     for msg_id_str, info in messages.items():
                         msg_id = int(msg_id_str)
-                        # 成功记录和失败终态都要跨重启保留；普通未完成进度由 pending_downloads 负责续传。
+                        # 成功记录、下载失败、上传失败终态都要跨重启保留；
+                        # 普通未完成进度由 pending_downloads 负责续传。
                         if (
                             info.get("down_byte", 0) >= info.get("total_size", 1)
-                            or info.get("state") == "failed"
+                            or is_retryable_failure_state(info.get("state", ""))
                         ):
                             restored[chat_id][msg_id] = info
                         else:

@@ -22,8 +22,14 @@ from module.cloud_drive import CloudDrive
 from module.db import db
 from module.download_stat import (
     add_pending_download,
+    bump_upload_auto_retry_count,
+    clear_upload_auto_retry_count,
+    get_download_result,
     get_pending_downloads,
+    get_task_state,
+    get_upload_auto_retry_count,
     mark_download_failed,
+    mark_upload_failed,
     prepare_download_retry,
     remove_pending_download,
     update_download_status,
@@ -89,6 +95,9 @@ app = Application(CONFIG_NAME, DATA_FILE_NAME, APPLICATION_NAME)
 queue: asyncio.Queue = asyncio.Queue()
 RETRY_TIME_OUT = 3
 TELEGRAM_CHUNK_SIZE = 1024 * 1024
+# 单次任务内 WebDAV 已有 6 次连接重试；这里再做任务级延迟重传，避免瞬时断网后要人手点重置。
+UPLOAD_AUTO_RETRY_DELAYS_SEC = (30, 120, 300)
+UPLOAD_AUTO_RETRY_MAX = len(UPLOAD_AUTO_RETRY_DELAYS_SEC)
 
 logging.getLogger("pyrogram.session.session").addFilter(LogFilter())
 logging.getLogger("pyrogram.client").addFilter(LogFilter())
@@ -534,6 +543,7 @@ async def download_media(
     # pylint: disable = R0912
 
     file_name: str = ""
+    temp_file_name: str = ""
     ui_file_name: str = ""
     task_start_time: float = time.time()
     media_size = 0
@@ -561,9 +571,9 @@ async def download_media(
                             f"id={message.id} {ui_file_name} "
                             f"{_t('already download,download skipped')}.\n"
                         )
-
-                        # Return Success so that upload logic can proceed if needed
-                        return DownloadStatus.SuccessDownload, file_name
+                        # 本地完整时不能直接 Success 返回：WebDAV 场景还要继续上传/重传。
+                        if runtime_app.cloud_drive_config.upload_adapter != "webdav":
+                            return DownloadStatus.SuccessDownload, file_name
             else:
                 return DownloadStatus.SkipDownload, None
 
@@ -596,21 +606,40 @@ async def download_media(
     for retry in range(3):
 
         try:
-            # 所有适配器先写入持久化 .part 文件，暂停、断网或重启后按 Telegram 分块偏移继续。
-            temp_download_path = await download_media_resumable(
-                client,
-                message,
-                temp_file_name,
-                media_size,
-                update_download_status,
-                (
+            # 本地终态文件已完整时直接复用，避免 reset_upload 再次走 Telegram 下载。
+            if (
+                _is_exist(file_name)
+                and media_size > 0
+                and os.path.getsize(file_name) == media_size
+            ):
+                temp_download_path = file_name
+                # 本地复用不会再走下载进度回调；这里写入一次完成进度，
+                # 让网页仪表盘立刻出现任务，而不是只在 Bot 卡片上“传输中”。
+                await update_download_status(
+                    media_size,
+                    media_size,
                     message_id,
                     ui_file_name,
                     task_start_time,
                     node,
                     client,
-                ),
-            )
+                )
+            else:
+                # 所有适配器先写入持久化 .part 文件，暂停、断网或重启后按 Telegram 分块偏移继续。
+                temp_download_path = await download_media_resumable(
+                    client,
+                    message,
+                    temp_file_name,
+                    media_size,
+                    update_download_status,
+                    (
+                        message_id,
+                        ui_file_name,
+                        task_start_time,
+                        node,
+                        client,
+                    ),
+                )
 
             if runtime_app.cloud_drive_config.upload_adapter == "webdav":
                 logger.info(f"Uploading completed local file to WebDAV: {ui_file_name}")
@@ -631,7 +660,16 @@ async def download_media(
                     ),
                 )
                 if not success:
-                    raise Exception("WebDAV upload failed; local completed file retained")
+                    last_error = "WebDAV upload failed; local completed file retained"
+                    # 单次任务内继续外层重试；全部失败后再进入延迟自动重传。
+                    logger.error(
+                        f"Message[{message.id}]: WebDAV upload failed "
+                        f"(attempt {retry + 1}/3); local completed file retained."
+                    )
+                    if retry < 2:
+                        await asyncio.sleep(RETRY_TIME_OUT)
+                        continue
+                    break
 
             # Success handling for standard download (outside try block but inside for loop)
             if temp_download_path:
@@ -649,9 +687,13 @@ async def download_media(
                         node.task_id,
                         node.profile_id,
                     )
+                    clear_upload_auto_retry_count(
+                        node.chat_id, message.id, node.profile_id
+                    )
 
                     await asyncio.sleep(0.5)
-                    _move_to_download_path(temp_download_path, file_name)
+                    if temp_download_path != file_name:
+                        _move_to_download_path(temp_download_path, file_name)
 
                 # Remove from pending downloads (completed successfully)
                 remove_pending_download(node.chat_id, message.id, node.profile_id)
@@ -697,15 +739,54 @@ async def download_media(
             )
             break
 
-    mark_download_failed(
-        node.chat_id,
-        message.id,
-        ui_file_name,
-        media_size,
-        node.task_id,
-        node.profile_id,
-        last_error,
-    )
+    # 若本机完整文件已在，优先标成上传失败，避免误导为“下载失败”。
+    local_complete = False
+    try:
+        if file_name and _is_exist(file_name) and media_size > 0:
+            local_complete = os.path.getsize(file_name) == media_size
+        if not local_complete and temp_file_name and _is_exist(temp_file_name) and media_size > 0:
+            local_complete = os.path.getsize(temp_file_name) == media_size
+    except OSError:
+        local_complete = False
+
+    if local_complete and (
+        "WebDAV" in (last_error or "") or "upload" in (last_error or "").lower()
+    ):
+        mark_upload_failed(
+            node.chat_id,
+            message.id,
+            ui_file_name,
+            media_size,
+            node.task_id,
+            node.profile_id,
+            last_error,
+        )
+        # 任务级延迟自动重传：复用本地完整文件，无需用户手动点重置。
+        schedule_fn = getattr(runtime_app, "schedule_upload_auto_retry", None)
+        if callable(schedule_fn):
+            try:
+                schedule_fn(
+                    node.chat_id,
+                    message.id,
+                    node.profile_id,
+                    ui_file_name,
+                    media_size,
+                )
+            except Exception as schedule_error:
+                logger.warning(
+                    f"Message[{message.id}]: failed to schedule upload auto-retry: "
+                    f"{schedule_error}"
+                )
+    else:
+        mark_download_failed(
+            node.chat_id,
+            message.id,
+            ui_file_name,
+            media_size,
+            node.task_id,
+            node.profile_id,
+            last_error,
+        )
     return DownloadStatus.FailedDownload, None
 
 
@@ -1011,6 +1092,7 @@ def main():
     runtimes: dict[str, ProfileRuntime] = {}
     bot_owner_profile_id = None
     retrying_uploads: set[tuple[str, int, int]] = set()
+    scheduled_auto_retries: set[tuple[str, int, int]] = set()
 
     def restart_callback():
         logger.warning("Restarting application via Web UI request...")
@@ -1032,6 +1114,152 @@ def main():
 
         if not getattr(runtime_client, "is_initialized", False):
             await runtime_client.initialize()
+
+    def _build_remote_path_for_retry(
+        runtime_app: Application, file_name: str
+    ) -> str:
+        """Derive WebDAV remote path the same way the dashboard projection does."""
+        local_path = (file_name or "").replace("\\", "/")
+        save_path = getattr(runtime_app, "save_path", "") or ""
+        relative_path = CloudDrive.get_relative_upload_path(
+            save_path.replace("\\", "/").rstrip("/"), local_path
+        )
+        remote_dir = (
+            getattr(runtime_app.cloud_drive_config, "remote_dir", "") or ""
+        ).rstrip("/")
+        if remote_dir:
+            return f"{remote_dir}/{relative_path}"
+        return relative_path
+
+    async def auto_retry_failed_upload(
+        chat_id: int,
+        message_id: int,
+        profile_id: str,
+        file_name: str,
+        total_size: int,
+        delay_sec: int,
+        attempt: int,
+    ):
+        """Delayed task-level re-queue after a WebDAV upload_failed terminal state."""
+        retry_key = (profile_id or "legacy", int(chat_id), int(message_id))
+        try:
+            logger.info(
+                f"Auto-retry upload scheduled in {delay_sec}s "
+                f"(attempt {attempt}/{UPLOAD_AUTO_RETRY_MAX}) "
+                f"for chat={chat_id} msg={message_id}"
+            )
+            await asyncio.sleep(delay_sec)
+
+            state = runtimes.get(profile_id)
+            if not state or not state.running:
+                logger.warning(
+                    f"Auto-retry skipped: profile {profile_id} is not running "
+                    f"(chat={chat_id} msg={message_id})"
+                )
+                return
+
+            # 用户中途删除后不再自动重传。
+            if get_task_state(chat_id, message_id, profile_id) == "deleted":
+                logger.info(
+                    f"Auto-retry skipped: task deleted "
+                    f"(chat={chat_id} msg={message_id})"
+                )
+                return
+
+            record = (get_download_result().get(chat_id) or {}).get(message_id) or {}
+            if record.get("state") != "upload_failed":
+                logger.info(
+                    f"Auto-retry skipped: state is {record.get('state')!r} "
+                    f"(chat={chat_id} msg={message_id})"
+                )
+                return
+
+            remote_path = _build_remote_path_for_retry(state.app, file_name)
+            result = await reset_failed_upload(
+                chat_id,
+                message_id,
+                profile_id,
+                remote_path,
+                file_name,
+                total_size,
+            )
+            if result.get("status") == "error":
+                logger.warning(
+                    f"Auto-retry enqueue failed for chat={chat_id} msg={message_id}: "
+                    f"{result.get('message')}"
+                )
+            else:
+                logger.success(
+                    f"Auto-retry queued chat={chat_id} msg={message_id} "
+                    f"(attempt {attempt}/{UPLOAD_AUTO_RETRY_MAX})"
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.exception(
+                f"Auto-retry worker crashed for chat={chat_id} msg={message_id}: {error}"
+            )
+        finally:
+            scheduled_auto_retries.discard(retry_key)
+
+    def schedule_upload_auto_retry(
+        chat_id: int,
+        message_id: int,
+        profile_id: str,
+        file_name: str,
+        total_size: int,
+    ):
+        """Schedule one delayed auto re-upload if budget remains."""
+        profile_id = profile_id or "default"
+        retry_key = (profile_id, int(chat_id), int(message_id))
+        if retry_key in scheduled_auto_retries or retry_key in retrying_uploads:
+            return
+
+        used = get_upload_auto_retry_count(chat_id, message_id, profile_id)
+        if used >= UPLOAD_AUTO_RETRY_MAX:
+            logger.warning(
+                f"Auto-retry budget exhausted ({UPLOAD_AUTO_RETRY_MAX}) "
+                f"for chat={chat_id} msg={message_id}"
+            )
+            return
+
+        attempt = bump_upload_auto_retry_count(chat_id, message_id, profile_id)
+        delay_sec = UPLOAD_AUTO_RETRY_DELAYS_SEC[
+            min(attempt - 1, len(UPLOAD_AUTO_RETRY_DELAYS_SEC) - 1)
+        ]
+        scheduled_auto_retries.add(retry_key)
+
+        # 把“将自动重试”写进错误文案，网页/Bot 都能看到还在跟进。
+        try:
+            record = (get_download_result().get(chat_id) or {}).get(message_id)
+            if record is not None:
+                base_error = record.get("error") or "WebDAV 上传失败；本地文件已保留"
+                # 去掉旧的自动重试提示，避免文案叠加
+                if "将在" in base_error and "自动重试" in base_error:
+                    base_error = base_error.split("；将在", 1)[0]
+                record["error"] = (
+                    f"{base_error}；将在 {delay_sec}s 后自动重试 "
+                    f"({attempt}/{UPLOAD_AUTO_RETRY_MAX})"
+                )
+                if db.conn:
+                    db.save_setting("download_history", get_download_result())
+        except Exception:
+            pass
+
+        state = runtimes.get(profile_id)
+        task = app.loop.create_task(
+            auto_retry_failed_upload(
+                chat_id,
+                message_id,
+                profile_id,
+                file_name,
+                total_size,
+                delay_sec,
+                attempt,
+            )
+        )
+        if state is not None:
+            state.tasks.append(task)
 
     async def runtime_maintenance(state: ProfileRuntime):
         tick = 0
@@ -1089,6 +1317,8 @@ def main():
             }
 
         runtime_app = _build_runtime_app(profile)
+        # download_media 通过 runtime_app 回调调度任务级上传自动重试。
+        runtime_app.schedule_upload_auto_retry = schedule_upload_auto_retry
         runtime_queue = asyncio.Queue()
         if runtime_client is None:
             runtime_client = _create_client_for_runtime(profile, runtime_app)
@@ -1399,6 +1629,7 @@ def main():
                 profile_id,
             )
             node = TaskNode(chat_id=chat_id, profile_id=profile_id)
+            node.client = state.client
             queued = await add_download_task(message, node, state.queue)
             if not queued:
                 mark_download_failed(

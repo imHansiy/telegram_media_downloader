@@ -9,7 +9,7 @@ import re
 import urllib.parse
 from asyncio import subprocess
 from subprocess import Popen
-from typing import Callable
+from typing import Callable, Optional
 from zipfile import ZipFile
 
 import aiohttp
@@ -395,6 +395,73 @@ class CloudDrive:
         return ret
 
     @staticmethod
+    async def webdav_head_size(
+        drive_config: CloudDriveConfig, remote_path: str
+    ) -> Optional[int]:
+        """Return remote Content-Length when HEAD succeeds, else None."""
+        try:
+            remote_url = CloudDrive.build_webdav_remote_url(drive_config, remote_path)
+        except ValueError:
+            return None
+        auth = None
+        if drive_config.webdav_username:
+            auth = aiohttp.BasicAuth(
+                drive_config.webdav_username,
+                drive_config.webdav_password,
+            )
+        timeout = aiohttp.ClientTimeout(total=30, connect=15)
+        try:
+            async with aiohttp.ClientSession(auth=auth, timeout=timeout) as session:
+                async with session.head(remote_url, allow_redirects=True) as resp:
+                    if resp.status not in (200, 204):
+                        return None
+                    length = resp.headers.get("Content-Length")
+                    if length is None:
+                        return None
+                    return int(length)
+        except (asyncio.TimeoutError, aiohttp.ClientError, ValueError, TypeError):
+            return None
+
+    @staticmethod
+    async def webdav_move_path(
+        drive_config: CloudDriveConfig, source_path: str, dest_path: str
+    ) -> bool:
+        """MOVE staging object to final path after a successful PUT."""
+        try:
+            source_url = CloudDrive.build_webdav_remote_url(drive_config, source_path)
+            dest_url = CloudDrive.build_webdav_remote_url(drive_config, dest_path)
+        except ValueError as error:
+            logger.error(f"[WebDAV] MOVE path invalid: {error}")
+            return False
+        auth = None
+        if drive_config.webdav_username:
+            auth = aiohttp.BasicAuth(
+                drive_config.webdav_username,
+                drive_config.webdav_password,
+            )
+        headers = {
+            "Destination": dest_url,
+            "Overwrite": "T",
+            "User-Agent": "TelegramMediaDownloader/1.0",
+        }
+        timeout = aiohttp.ClientTimeout(total=120, connect=15)
+        try:
+            async with aiohttp.ClientSession(auth=auth, timeout=timeout) as session:
+                async with session.request("MOVE", source_url, headers=headers) as resp:
+                    if resp.status in (200, 201, 204):
+                        return True
+                    text = (await resp.text())[:300]
+                    logger.error(
+                        f"[WebDAV] MOVE failed: {resp.status} - {text}"
+                    )
+                    return False
+        except (asyncio.TimeoutError, aiohttp.ClientError) as error:
+            logger.error(
+                f"[WebDAV] MOVE connection failed: {type(error).__name__}: {error}"
+            )
+            return False
+
+    @staticmethod
     async def webdav_upload_stream(
         drive_config: CloudDriveConfig,
         save_path: str,
@@ -403,9 +470,16 @@ class CloudDrive:
         total_size: int,
         progress_callback: Callable = None,
         progress_args: tuple = (),
-        max_retries: int = 3,
+        max_retries: int = 6,
     ) -> bool:
-        """Stream upload to WebDAV with retry support"""
+        """Stream upload to WebDAV with staging PUT, size check, and stronger retries.
+
+        Strategy A (practical for Alist/Crypt WebDAV that may lack true Content-Range):
+        1) If final remote already has exact size, treat as success (resume skip).
+        2) PUT to a sibling ``.uploading`` staging path (avoids half-written final object).
+        3) On success MOVE/overwrite to final path; on interrupt delete staging first.
+        4) More retries + longer backoff for flaky long connections.
+        """
         if not drive_config.webdav_url:
             logger.error("WebDAV URL is not configured")
             return False
@@ -417,12 +491,6 @@ class CloudDrive:
                 drive_config.webdav_username, drive_config.webdav_password
             )
 
-        headers = {
-            "Content-Type": "application/octet-stream",
-            "User-Agent": "TelegramMediaDownloader/1.0",
-            "Expect": "",  # Disable Expect: 100-continue to avoid hangs with some WebDAV servers
-        }
-
         # Preserve folders created by file_path_prefix under save_path.
         rel_path = CloudDrive.get_relative_upload_path(save_path, file_name)
 
@@ -433,20 +501,42 @@ class CloudDrive:
         # Full path to the file on WebDAV (without protocol) -> used for splitting directories
         # e.g. Crypt/OneDrive/Telegram/ChannelName/Video.mp4
         full_rel_path = f"{remote_root}/{rel_path}".strip("/")
+        staging_rel_path = f"{full_rel_path}.uploading"
 
         # 上传与预览共用相同的路径规范化和编码，保证中文、空格及特殊字符定位一致。
         remote_url = CloudDrive.build_webdav_remote_url(
             drive_config, full_rel_path
+        )
+        staging_url = CloudDrive.build_webdav_remote_url(
+            drive_config, staging_rel_path
         )
 
         logger.info(f"[WebDAV] Uploading to (Encoded): {remote_url}")
         if remote_url != f"{base_url}/{full_rel_path}":
             logger.info(f"[WebDAV] Original Path was: {full_rel_path}")
 
+        # 终态文件已存在且大小一致时，跳过重传（断点续传的“已完成探测”）。
+        if total_size > 0:
+            existing_size = await CloudDrive.webdav_head_size(
+                drive_config, full_rel_path
+            )
+            if existing_size == total_size:
+                logger.info(
+                    f"[WebDAV] Remote already complete ({existing_size} bytes), skip: {rel_path}"
+                )
+                if progress_callback:
+                    if inspect.iscoroutinefunction(progress_callback):
+                        await progress_callback(total_size, total_size, *progress_args)
+                    else:
+                        progress_callback(total_size, total_size, *progress_args)
+                return True
+
         # Wrap the generator to report progress
         async def progress_stream():
             uploaded = 0
-            source_stream = stream_generator() if callable(stream_generator) else stream_generator
+            source_stream = (
+                stream_generator() if callable(stream_generator) else stream_generator
+            )
             async for chunk in source_stream:
                 yield chunk
                 uploaded += len(chunk)
@@ -456,129 +546,170 @@ class CloudDrive:
                     else:
                         progress_callback(uploaded, total_size, *progress_args)
 
-        # 10s for connect, 2 hours for total upload. Large videos need more time.
-        timeout = aiohttp.ClientTimeout(total=7200, connect=10)
+        # 连接更宽松；大视频总时长仍给 2 小时。sock_read 防止半开连接挂死。
+        timeout = aiohttp.ClientTimeout(total=7200, connect=30, sock_connect=30, sock_read=300)
 
-        async def reset_interrupted_target():
-            """Remove an object whose PUT ended without a final WebDAV success."""
+        async def reset_staging_target():
+            """Remove interrupted staging object before the next attempt."""
             reset_ok, reset_message = await CloudDrive.webdav_delete_path(
                 drive_config,
-                full_rel_path,
+                staging_rel_path,
             )
             if not reset_ok:
                 logger.warning(
-                    f"[WebDAV] Interrupted upload target could not be reset: "
-                    f"{reset_message}"
+                    f"[WebDAV] Staging target could not be reset: {reset_message}"
                 )
+                # 423 时多等一会，给 Crypt/Alist 释放锁
+                if "423" in str(reset_message):
+                    await asyncio.sleep(8)
+
+        async def ensure_parent_dirs(session: aiohttp.ClientSession):
+            parent_dir = os.path.dirname(full_rel_path).replace("\\", "/")
+            if not parent_dir or parent_dir == ".":
+                return
+            dirs = parent_dir.split("/")
+            current_path_parts = []
+            for d in dirs:
+                if not d:
+                    continue
+                current_path_parts.append(urllib.parse.quote(d))
+                encoded_current_path = "/".join(current_path_parts)
+                mkcol_url = f"{base_url}/{encoded_current_path}"
+                if drive_config.dir_cache.get(encoded_current_path):
+                    continue
+                try:
+                    async with session.request("MKCOL", mkcol_url) as resp:
+                        if resp.status in (201, 405):
+                            drive_config.dir_cache[encoded_current_path] = True
+                            if resp.status == 201:
+                                logger.info(f"[WebDAV] Created directory: {mkcol_url}")
+                        elif resp.status == 423:
+                            logger.warning(
+                                f"[WebDAV] Directory locked, waiting: {mkcol_url}"
+                            )
+                            await asyncio.sleep(2)
+                            drive_config.dir_cache[encoded_current_path] = True
+                        else:
+                            logger.warning(
+                                f"[WebDAV] MKCOL {mkcol_url} returned {resp.status}"
+                            )
+                            drive_config.dir_cache[encoded_current_path] = True
+                except Exception as e:
+                    logger.warning(f"[WebDAV] MKCOL error: {e}")
+                    drive_config.dir_cache[encoded_current_path] = True
 
         for attempt in range(max_retries):
+            backoff = min(60, 3 * (2 ** attempt))  # 3,6,12,24,48,60...
+            put_headers = {
+                "Content-Type": "application/octet-stream",
+                "User-Agent": "TelegramMediaDownloader/1.0",
+                "Expect": "",  # Disable Expect: 100-continue to avoid hangs with some WebDAV servers
+            }
+            if total_size > 0:
+                put_headers["Content-Length"] = str(total_size)
+
             try:
+                # 每次重试前清理残留 staging，避免 423 / 半文件污染最终路径。
+                await reset_staging_target()
+
                 async with aiohttp.ClientSession(auth=auth, timeout=timeout) as session:
-                    # 1. Ensure parent directories exist (MKCOL) - use cache to avoid duplicates
-                    parent_dir = os.path.dirname(full_rel_path).replace("\\", "/")
-                    if parent_dir and parent_dir != ".":
-                        dirs = parent_dir.split("/")
-                        current_path_parts = []
-                        for d in dirs:
-                            if not d:
-                                continue
-                            current_path_parts.append(urllib.parse.quote(d))
-                            # Join quoted parts
-                            encoded_current_path = "/".join(current_path_parts)
-                            mkcol_url = f"{base_url}/{encoded_current_path}"
+                    await ensure_parent_dirs(session)
 
-                            # Check cache to avoid duplicate MKCOL requests
-                            if drive_config.dir_cache.get(encoded_current_path):
-                                continue
-
-                            try:
-                                async with session.request("MKCOL", mkcol_url) as resp:
-                                    if resp.status == 201:
-                                        # Successfully created
-                                        drive_config.dir_cache[
-                                            encoded_current_path
-                                        ] = True
-                                        logger.info(
-                                            f"[WebDAV] Created directory: {mkcol_url}"
-                                        )
-                                    elif resp.status == 405:
-                                        # Already exists (Method Not Allowed for existing dir)
-                                        drive_config.dir_cache[
-                                            encoded_current_path
-                                        ] = True
-                                    elif resp.status == 423:
-                                        # Locked - wait and continue, another process is creating it
-                                        logger.warning(
-                                            f"[WebDAV] Directory locked, waiting: {mkcol_url}"
-                                        )
-                                        await asyncio.sleep(1)
-                                        drive_config.dir_cache[
-                                            encoded_current_path
-                                        ] = True
-                                    else:
-                                        logger.warning(
-                                            f"[WebDAV] MKCOL {mkcol_url} returned {resp.status}"
-                                        )
-                                        # Still mark as attempted to avoid infinite loops
-                                        drive_config.dir_cache[
-                                            encoded_current_path
-                                        ] = True
-                            except Exception as e:
-                                logger.warning(f"[WebDAV] MKCOL error: {e}")
-                                # Mark as attempted anyway
-                                drive_config.dir_cache[encoded_current_path] = True
-
-                    # 2. PUT stream
-                    # Set Content-Length if size is known to help some WebDAV servers
-                    if total_size > 0:
-                        headers["Content-Length"] = str(total_size)
-
+                    # 2. PUT stream to staging path first
                     async with session.put(
-                        remote_url, data=progress_stream(), headers=headers
+                        staging_url, data=progress_stream(), headers=put_headers
                     ) as resp:
                         if resp.status in [200, 201, 204]:
+                            # 校验 staging 大小（部分网关会返回成功但体长不对）
+                            if total_size > 0:
+                                staged_size = await CloudDrive.webdav_head_size(
+                                    drive_config, staging_rel_path
+                                )
+                                if staged_size is not None and staged_size != total_size:
+                                    logger.error(
+                                        f"[WebDAV] Staging size mismatch: "
+                                        f"{staged_size} != {total_size} for {rel_path}"
+                                    )
+                                    await reset_staging_target()
+                                    if attempt < max_retries - 1:
+                                        await asyncio.sleep(backoff)
+                                        continue
+                                    return False
+
+                            # 3. Promote staging -> final (MOVE); fallback to direct PUT final if MOVE unsupported
+                            moved = await CloudDrive.webdav_move_path(
+                                drive_config, staging_rel_path, full_rel_path
+                            )
+                            if not moved:
+                                # 部分 Alist 驱动不支持 MOVE：再对最终路径整文件 PUT 一次（数据仍在本地）
+                                logger.warning(
+                                    f"[WebDAV] MOVE unsupported/failed, falling back to final PUT: {rel_path}"
+                                )
+                                async with session.put(
+                                    remote_url,
+                                    data=progress_stream(),
+                                    headers=put_headers,
+                                ) as final_resp:
+                                    if final_resp.status not in (200, 201, 204):
+                                        text = (await final_resp.text())[:500]
+                                        logger.error(
+                                            f"WebDAV final PUT failed: {final_resp.status} - {text}"
+                                        )
+                                        await reset_staging_target()
+                                        if attempt < max_retries - 1:
+                                            await asyncio.sleep(backoff)
+                                            continue
+                                        return False
+                                await reset_staging_target()
                             logger.info(f"WebDAV upload success: {rel_path}")
                             return True
-                        elif resp.status == 423:
-                            # Locked - retry after delay
+                        if resp.status == 423:
                             logger.warning(
                                 f"[WebDAV] File locked (423), retry {attempt + 1}/{max_retries}"
                             )
-                            await asyncio.sleep(
-                                2 * (attempt + 1)
-                            )  # Exponential backoff
+                            await asyncio.sleep(max(backoff, 8))
                             continue
-                        else:
-                            text = await resp.text()
-                            logger.error(
-                                f"WebDAV upload failed: {resp.status} - {text[:500]}"
-                            )
-                            return False
+                        text = await resp.text()
+                        logger.error(
+                            f"WebDAV upload failed: {resp.status} - {text[:500]}"
+                        )
+                        await reset_staging_target()
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(backoff)
+                            continue
+                        return False
             except asyncio.TimeoutError:
                 logger.error(
                     f"WebDAV upload timeout (attempt {attempt + 1}/{max_retries}): {rel_path}"
                 )
-                # PUT 超时后服务端可能已留下不可读对象；下一次上传前必须先恢复干净目标。
-                await reset_interrupted_target()
+                await reset_staging_target()
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(2 * (attempt + 1))
+                    await asyncio.sleep(backoff)
                     continue
                 return False
             except aiohttp.ClientError as e:
                 logger.error(
                     f"WebDAV connection error (attempt {attempt + 1}/{max_retries}): {type(e).__name__}: {e}"
                 )
-                # 连接断开不等于上传成功，即使进度已到 100% 也先删除残留对象再重试。
-                await reset_interrupted_target()
+                await reset_staging_target()
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(2 * (attempt + 1))
+                    await asyncio.sleep(backoff)
                     continue
                 return False
             except Exception as e:
+                # 任务被网页/Bot 取消时立即结束，不再指数退避重试。
+                if "Task cancelled" in str(e):
+                    logger.info(f"[WebDAV] Upload cancelled by task control: {rel_path}")
+                    await reset_staging_target()
+                    return False
                 logger.error(f"WebDAV unexpected error: {type(e).__name__}: {e}")
                 import traceback
 
                 logger.debug(traceback.format_exc())
+                await reset_staging_target()
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(backoff)
+                    continue
                 return False
 
         logger.error(f"WebDAV upload failed after {max_retries} retries: {rel_path}")

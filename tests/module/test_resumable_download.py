@@ -28,6 +28,30 @@ class FakeStreamClient:
 
 
 class ResumableDownloadTestCase(unittest.IsolatedAsyncioTestCase):
+    def test_add_pending_download_clears_deleted_task_state(self):
+        """Given: 同一消息曾被网页删除
+        When: 再次入队为 pending
+        Then: deleted 控制状态被清掉，允许重新下载/上传
+        """
+        chat_id = -1002237269038
+        message_id = 93341
+        profile_id = "default"
+        download_stat.set_task_state(chat_id, message_id, "deleted", profile_id)
+        self.assertEqual(
+            "deleted",
+            download_stat.get_task_state(chat_id, message_id, profile_id),
+        )
+
+        download_stat.add_pending_download(
+            chat_id, message_id, "video.mp4", profile_id
+        )
+
+        self.assertEqual(
+            "running",
+            download_stat.get_task_state(chat_id, message_id, profile_id),
+        )
+        download_stat.remove_pending_download(chat_id, message_id, profile_id)
+
     async def test_legacy_progress_record_is_upgraded_during_resume(self):
         chat_id = -1001
         message_id = 21

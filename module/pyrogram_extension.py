@@ -1232,7 +1232,7 @@ async def _report_bot_status(
                     continue
                 task_records.append({"message_id": idx, **value})
                 if (
-                    value.get("state") == "failed"
+                    value.get("state") in ("failed", "upload_failed")
                     or value.get("down_byte", 0) >= value.get("total_size", 1)
                 ):
                     continue
@@ -1280,7 +1280,7 @@ async def _report_bot_status(
         terminal_records = [
             item
             for item in task_records
-            if item.get("state") == "failed"
+            if item.get("state") in ("failed", "upload_failed")
             or item.get("down_byte", 0) >= item.get("total_size", 1)
         ]
         terminal_records.sort(
@@ -1291,7 +1291,12 @@ async def _report_bot_status(
             recent_file_lines = []
             for position, item in enumerate(terminal_records[:5]):
                 prefix = "└─" if position == len(terminal_records[:5]) - 1 else "├─"
-                result_icon = "❌" if item.get("state") == "failed" else "✅"
+                if item.get("state") == "upload_failed":
+                    result_icon = "⚠️"
+                elif item.get("state") == "failed":
+                    result_icon = "❌"
+                else:
+                    result_icon = "✅"
                 file_name = truncate_filename(
                     os.path.basename(item.get("file_name", "未知文件")), 32
                 ).replace("`", "'")
@@ -1299,7 +1304,7 @@ async def _report_bot_status(
                     f"{prefix} {result_icon} {file_name}  "
                     f"({format_byte(item.get('total_size', 0))})"
                 )
-                if item.get("state") == "failed" and item.get("error"):
+                if item.get("state") in ("failed", "upload_failed") and item.get("error"):
                     error = truncate_filename(str(item["error"]), 64).replace("`", "'")
                     recent_file_lines.append(f"   ↳ 原因：{error}")
             recent_file_result_str = "\n📄 最近文件\n" + "\n".join(recent_file_lines) + "\n"
@@ -1590,10 +1595,11 @@ async def update_upload_stat(
     profile_id = getattr(node, "profile_id", None)
     state = get_task_state(chat_id, message_id, profile_id)
 
-    if state == "deleted":
+    # 网页删除或 Bot 停止后必须中断 WebDAV/上传流；仅 return 会让 PUT 继续跑完。
+    if state == "deleted" or node.is_stop_transmission:
         if client:
             client.stop_transmission()
-        return
+        raise RuntimeError("Task cancelled")
 
     # Global or local pause check
     # Skip pause for streams to avoid 502/timeouts
@@ -1602,13 +1608,14 @@ async def update_upload_stat(
             if node.is_stop_transmission:
                 if client:
                     client.stop_transmission()
+                raise RuntimeError("Task cancelled")
             await asyncio.sleep(1)
             # Re-check state
             state = get_task_state(chat_id, message_id, profile_id)
-            if state == "deleted":
+            if state == "deleted" or node.is_stop_transmission:
                 if client:
                     client.stop_transmission()
-                return
+                raise RuntimeError("Task cancelled")
     # -----------------------
 
     if node.upload_stat_dict.get(message_id):
