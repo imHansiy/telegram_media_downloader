@@ -48,5 +48,10 @@ assert.equal(
   'completed',
   '后端已完成状态必须优先于 100% 上传进度',
 );
+assert.equal(
+  statusFromBackendState({ state: 'upload_failed', status: '上传失败' }),
+  'upload_failed',
+  '本机完整、云盘失败必须映射为 upload_failed',
+);
 
 console.log('task model regression: passed');

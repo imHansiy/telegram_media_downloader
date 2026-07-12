@@ -73,7 +73,7 @@ export interface SyncTask {
   createdAt: string;
   downloadProgress: number; // 0 to 100
   uploadProgress: number; // 0 to 100
-  status: 'pending' | 'downloading' | 'uploading' | 'syncing' | 'completed' | 'paused' | 'failed';
+  status: 'pending' | 'downloading' | 'uploading' | 'syncing' | 'completed' | 'paused' | 'failed' | 'upload_failed';
   speedKb: number; // Download / Upload current combined transfer speed
   remotePath: string; // Target location on cloud drive
   errorMsg?: string;

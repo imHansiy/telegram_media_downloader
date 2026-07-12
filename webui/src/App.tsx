@@ -451,7 +451,10 @@ export default function App() {
     setStatusMessage(result.message || '配置已保存。');
   };
 
-  const handleTaskAction = async (id: string, action: 'pause' | 'resume' | 'reset_upload' | 'delete') => {
+  const handleTaskAction = async (
+    id: string,
+    action: 'pause' | 'resume' | 'reset_upload' | 'delete' | 'delete_remote',
+  ) => {
     const parts = id.split(':');
     const hasProfile = parts.length >= 3;
     const profileId = hasProfile ? parts[0] : undefined;
@@ -465,6 +468,13 @@ export default function App() {
     });
     if (action === 'reset_upload') {
       setStatusMessage(result.message || '云端异常文件已重置，任务已重新入队。');
+    } else if (action === 'delete' || action === 'delete_remote') {
+      setLiveTasks((current) => current.filter((task) => task.id !== id));
+      setTerminalTasks((current) => current.filter((task) => task.id !== id));
+      setCompletedFiles((current) => current.filter((file) => file.id !== id));
+      setStatusMessage(
+        result.message || (action === 'delete_remote' ? '任务及远程资源已删除。' : '任务已取消并删除。'),
+      );
     }
   };
 
@@ -590,7 +600,7 @@ export default function App() {
       onClick={() => navigate(tab)}
       className={`flex items-center ${isSidebarCollapsed ? 'md:justify-center' : 'justify-start'} gap-2.5 px-3 py-2.5 rounded-xl text-xs font-semibold select-none cursor-pointer transition-all border ${
         activeTab === tab
-          ? 'bg-slate-900 border-indigo-500/30 text-white shadow-inner'
+          ? 'bg-slate-900 border-indigo-500/30 text-slate-100 shadow-inner'
           : 'bg-transparent border-transparent text-slate-400 hover:text-slate-205 hover:bg-slate-900/40'
       }`}
       title={label}
@@ -647,7 +657,7 @@ export default function App() {
                 ['失败任务', failedCount, 'text-rose-500'], ['当前总速度', `${totalSpeed.toFixed(1)} KB/s`, 'text-emerald-500'],
               ].map(([label, value, color]) => <div key={String(label)} className="rounded-lg border border-[#dce6f2] bg-white px-3 py-2 shadow-[0_2px_8px_rgba(34,76,120,0.04)]"><p className="text-[9px] text-[#8291a5]">{label}</p><p className={`mt-1 truncate text-[17px] font-bold ${color}`}>{value}</p><p className="mt-1 text-[8px] text-[#9aa8b8]">● 实时更新</p></div>)}
             </div>
-            <div className="overview-body px-3 pb-3"><TaskTable tasks={tasks} onPauseTask={(id) => handleTaskAction(id, 'pause')} onResumeTask={(id) => handleTaskAction(id, 'resume')} onResetUpload={(id) => handleTaskAction(id, 'reset_upload')} onDeleteTask={(id) => handleTaskAction(id, 'delete')} onAddTask={() => setStatusMessage('请通过监控会话或 Bot 创建下载任务。')} /></div>
+            <div className="overview-body px-3 pb-3"><TaskTable tasks={tasks} onPauseTask={(id) => handleTaskAction(id, 'pause')} onResumeTask={(id) => handleTaskAction(id, 'resume')} onResetUpload={(id) => handleTaskAction(id, 'reset_upload')} onDeleteTask={(id, deleteRemote) => handleTaskAction(id, deleteRemote ? 'delete_remote' : 'delete')} onAddTask={() => setStatusMessage('请通过监控会话或 Bot 创建下载任务。')} /></div>
             <div className="border-t border-[#e2eaf3] px-4 py-2 text-[9px] text-[#78899e]">正在传输: <b className="text-[#1988e8]">{activeTasks.length}</b>　已归档: <b className="text-emerald-500">{completedFiles.length}</b></div>
           </section>
 
@@ -685,7 +695,7 @@ export default function App() {
             </span>
             <div>
               <div className="flex items-center gap-2">
-                <h1 className="text-xs font-bold uppercase tracking-wider text-white">Telegram Media Sync</h1>
+                <h1 className="text-xs font-bold uppercase tracking-wider text-slate-100">Telegram Media Sync</h1>
                 <span className="text-[9px] bg-indigo-500/15 border border-indigo-500/20 px-1.5 rounded text-indigo-400 font-mono">
                   v{version}
                 </span>
@@ -734,8 +744,8 @@ export default function App() {
           <div className="md:hidden fixed inset-0 bg-slate-950/70 backdrop-blur-md z-50 animate-fadeIn" onClick={() => setIsMobileMenuOpen(false)} />
           <div className="md:hidden fixed inset-y-0 left-0 w-72 max-w-[85vw] bg-slate-950 border-r border-slate-900 p-5 z-60 flex flex-col gap-6 shadow-2xl animate-slideRight">
             <div className="flex items-center justify-between border-b border-slate-900 pb-4">
-              <span className="text-xs font-bold uppercase tracking-wider text-white">导航控制台</span>
-              <button onClick={() => setIsMobileMenuOpen(false)} className="p-1 text-slate-450 hover:text-white rounded-lg hover:bg-slate-900">
+              <span className="text-xs font-bold uppercase tracking-wider text-slate-100">导航控制台</span>
+              <button onClick={() => setIsMobileMenuOpen(false)} className="p-1 text-slate-450 hover:text-slate-100 rounded-lg hover:bg-slate-900">
                 <X className="w-4 h-4" />
               </button>
             </div>
@@ -763,7 +773,7 @@ export default function App() {
                     return !prev;
                   });
                 }}
-                className={`p-1.5 rounded-lg text-slate-500 hover:text-white hover:bg-slate-900 transition-colors cursor-pointer flex items-center justify-center ${isSidebarCollapsed ? 'mx-auto' : 'ml-auto'}`}
+                className={`p-1.5 rounded-lg text-slate-500 hover:text-slate-100 hover:bg-slate-900 transition-colors cursor-pointer flex items-center justify-center ${isSidebarCollapsed ? 'mx-auto' : 'ml-auto'}`}
                 title={isSidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
               >
                 {isSidebarCollapsed ? <ChevronRight className="w-3.5 h-3.5" /> : <ChevronLeft className="w-3.5 h-3.5" />}
@@ -813,7 +823,7 @@ export default function App() {
             <div className="flex-1 flex flex-col space-y-4 overflow-hidden">
               <div className="flex items-center justify-between border-b border-slate-900 pb-3">
                 <div className="space-y-0.5">
-                  <h2 className="text-sm font-semibold text-white">下载同步仪表盘</h2>
+                  <h2 className="text-sm font-semibold text-slate-100">下载同步仪表盘</h2>
                   <p className="text-[10px] text-slate-500 font-medium">集中查看进行中、成功与失败的 Telegram 同步任务</p>
                 </div>
               </div>
@@ -823,7 +833,7 @@ export default function App() {
                   onPauseTask={(id) => handleTaskAction(id, 'pause')}
                   onResumeTask={(id) => handleTaskAction(id, 'resume')}
                   onResetUpload={(id) => handleTaskAction(id, 'reset_upload')}
-                  onDeleteTask={(id) => handleTaskAction(id, 'delete')}
+                  onDeleteTask={(id, deleteRemote) => handleTaskAction(id, deleteRemote ? 'delete_remote' : 'delete')}
                   onAddTask={() => setStatusMessage('手动创建任务暂未接入后端，请通过监控会话或 Bot 触发下载。')}
                 />
               </div>
@@ -833,7 +843,7 @@ export default function App() {
           {activeTab === 'files' && (
             <div className="flex-1 flex flex-col space-y-4 overflow-hidden">
               <div className="border-b border-slate-900 pb-3">
-                <h2 className="text-sm font-semibold text-white font-medium">云端已归档媒体/云盘 (WebDAV Storage)</h2>
+                <h2 className="text-sm font-semibold text-slate-100 font-medium">云端已归档媒体/云盘 (WebDAV Storage)</h2>
                 <p className="text-[10px] text-slate-500 font-medium">管理、归类检索已成功上传的 Telegram 文件资源</p>
               </div>
               <div className="flex-1 overflow-hidden">
@@ -845,7 +855,7 @@ export default function App() {
           {activeTab === 'config' && (
             <div className="flex-1 overflow-y-auto space-y-4">
               <div className="border-b border-slate-900 pb-3">
-                <h2 className="text-sm font-semibold text-white">同步策略与云盘挂载</h2>
+                <h2 className="text-sm font-semibold text-slate-100">同步策略与云盘挂载</h2>
                 <p className="text-[10px] text-slate-500">配置 WebDAV 目标、媒体过滤规则和远端目录结构</p>
               </div>
               <ConfigPanel
@@ -862,7 +872,7 @@ export default function App() {
           {activeTab === 'accounts' && (
             <div className="flex-1 overflow-y-auto space-y-4">
               <div className="border-b border-slate-900 pb-3">
-                <h2 className="text-sm font-semibold text-white">Telegram 接入管理 (Client Sessions)</h2>
+                <h2 className="text-sm font-semibold text-slate-100">Telegram 接入管理 (Client Sessions)</h2>
                 <p className="text-[10px] text-slate-500">连接、验证、断开或热启动保存的 Telegram session</p>
               </div>
               <AccountManager

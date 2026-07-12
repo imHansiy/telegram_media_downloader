@@ -101,6 +101,47 @@
   color: var(--color-slate-100) !important;
 }
 
+/*
+ * Light mode remaps slate surfaces to near-white, but many components still use
+ * hard-coded text-white for titles / selected rows / active nav. That becomes
+ * white-on-white. Force high-contrast ink, then restore pure white only on
+ * solid brand / gradient action surfaces that stay dark or colored.
+ */
+.light-mode .text-white {
+  color: #0f172a !important;
+}
+
+.light-mode .hover\:text-white:hover,
+.light-mode .group:hover .group-hover\:text-white {
+  color: #0f172a !important;
+}
+
+.light-mode .bg-indigo-600.text-white,
+.light-mode .bg-indigo-500.text-white,
+.light-mode .hover\:bg-indigo-500:hover.text-white,
+.light-mode .bg-emerald-600.text-white,
+.light-mode .bg-emerald-500.text-white,
+.light-mode .bg-rose-500.text-white,
+.light-mode .bg-amber-500.text-white,
+.light-mode .bg-gradient-to-tr.text-white,
+.light-mode .bg-gradient-to-br.text-white,
+.light-mode .bg-gradient-to-r.text-white,
+.light-mode .from-indigo-600.text-white,
+.light-mode .from-\[\#32a7ef\].text-white {
+  color: #ffffff !important;
+}
+
+/* Browser text selection: keep readable ink on light surfaces */
+::selection {
+  background: #4338ca;
+  color: #ffffff;
+}
+
+.light-mode ::selection {
+  background: #c7d2fe;
+  color: #0f172a;
+}
+
 /* Input placeholder text alignment for Light Mode */
 .light-mode input::placeholder,
 .light-mode textarea::placeholder {

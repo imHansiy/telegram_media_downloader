@@ -417,7 +417,7 @@ export function FileManager({ completedFiles }: FileManagerProps) {
             <button
               id="btn-breadcrumb-root"
               onClick={handleResetToRoot}
-              className={`hover:text-indigo-400 px-1 py-0.5 rounded transition-colors cursor-pointer flex items-center gap-1 font-medium ${!currentL1 ? 'text-white' : 'text-slate-450'}`}
+              className={`hover:text-indigo-400 px-1 py-0.5 rounded transition-colors cursor-pointer flex items-center gap-1 font-medium ${!currentL1 ? 'text-slate-100' : 'text-slate-450'}`}
             >
               <HardDrive className="w-3.5 h-3.5" />
               全部同步 (云盘根)
@@ -429,7 +429,7 @@ export function FileManager({ completedFiles }: FileManagerProps) {
                 <button
                   id={`btn-breadcrumb-l1-${currentL1}`}
                   onClick={handleBackToL1}
-                  className={`hover:text-indigo-400 px-1 py-0.5 rounded transition-colors cursor-pointer font-medium max-w-[120px] sm:max-w-xs truncate ${!currentL2 ? 'text-white font-semibold' : 'text-slate-450'}`}
+                  className={`hover:text-indigo-400 px-1 py-0.5 rounded transition-colors cursor-pointer font-medium max-w-[120px] sm:max-w-xs truncate ${!currentL2 ? 'text-slate-100 font-semibold' : 'text-slate-450'}`}
                 >
                   {currentL1}
                 </button>
@@ -439,7 +439,7 @@ export function FileManager({ completedFiles }: FileManagerProps) {
             {currentL2 && (
               <>
                 <ChevronRight className="w-3 h-3 text-slate-650 shrink-0" />
-                <span className="text-white font-semibold px-1 py-0.5 bg-slate-800 border border-slate-750/70 rounded flex items-center gap-1">
+                <span className="text-slate-100 font-semibold px-1 py-0.5 bg-slate-800 border border-slate-750/70 rounded flex items-center gap-1">
                   {currentL2}
                 </span>
               </>
@@ -640,7 +640,7 @@ export function FileManager({ completedFiles }: FileManagerProps) {
                             setIsDetailsCollapsed(false);
                             localStorage.setItem('tg_sync_details_collapsed_user', 'false');
                           }}
-                          className={`hover:bg-slate-850/30 cursor-pointer transition-colors ${isSelected ? 'bg-slate-850/30 text-white' : ''}`}
+                          className={`hover:bg-slate-850/30 cursor-pointer transition-colors ${isSelected ? 'bg-slate-850/30 text-slate-100' : ''}`}
                         >
                           <td className="py-2.5 px-4 font-medium">
                             <div className="flex items-center gap-2 truncate max-w-xs sm:max-w-md">
