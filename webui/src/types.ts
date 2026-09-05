@@ -57,6 +57,28 @@ export interface BotAccessConfig {
 
 export type BotStartupNotificationMode = 'off' | 'admin' | 'status_chat';
 
+export interface VideoClassifierConfig {
+  enable: boolean;
+  apiBase: string;
+  apiKey: string;
+  model: string;
+  maxFrames: number;
+  timeoutSec: number;
+  maxVideoSizeMb: number;
+  minConfidence: number;
+}
+
+export const defaultVideoClassifier: VideoClassifierConfig = {
+  enable: false,
+  apiBase: 'https://api.openai.com/v1',
+  apiKey: '',
+  model: 'gpt-4o-mini',
+  maxFrames: 4,
+  timeoutSec: 60,
+  maxVideoSizeMb: 2048,
+  minConfidence: 0.4,
+};
+
 export interface BotStatusConfig {
   startupNotificationMode: BotStartupNotificationMode;
   statusChatId: string;
@@ -74,6 +96,9 @@ export interface SyncTask {
   downloadProgress: number; // 0 to 100
   uploadProgress: number; // 0 to 100
   status: 'pending' | 'downloading' | 'uploading' | 'syncing' | 'completed' | 'paused' | 'failed' | 'upload_failed';
+  aiStatus?: string; // AI 分类阶段：抽帧中 / 语音转写中 / AI 识图中 / 分类完成:nsfw/子类
+  aiSummary?: string; // AI 生成的视频一句话简介（基于转写文本）
+  aiTags?: string[]; // AI 内容标签
   speedKb: number; // Download / Upload current combined transfer speed
   remotePath: string; // Target location on cloud drive
   errorMsg?: string;
@@ -87,6 +112,8 @@ export interface CompletedFile {
   sizeBytes: number;
   completedAt: string;
   remotePath: string;
+  relativePath?: string; // 真实目录结构（含 AI 类别层），用于文件夹分组
+  aiSummary?: string; // AI 生成的视频一句话简介
   sourceName: string;
   sourceId: string;
 }

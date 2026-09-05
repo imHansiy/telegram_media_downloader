@@ -34,7 +34,6 @@ from module.download_stat import get_download_result
 from module.filter import Filter
 from module.get_chat_history_v2 import get_chat_history_v2
 from module.language import Language, _t
-from module.telegram_card import render_telegram_card
 from module.pyrogram_extension import (
     check_user_permission,
     get_utf16_length,
@@ -1336,8 +1335,8 @@ async def send_help_str(client: pyrogram.Client, chat_id):
         "1 表示整个聊天的开始，0 表示整个聊天的结束",
         "[ ] 表示可选参数",
     ]
-    card = render_telegram_card("帮助与命令", help_lines)
-    await client.send_photo(chat_id, card, reply_markup=update_keyboard)
+    help_text = "🤖 帮助与命令\n" + "\n".join(help_lines)
+    await client.send_message(chat_id, help_text, reply_markup=update_keyboard)
 
 
 async def help_command(client: pyrogram.Client, message: pyrogram.types.Message):
@@ -1351,6 +1350,10 @@ async def help_command(client: pyrogram.Client, message: pyrogram.types.Message)
     Returns:
         None
     """
+
+    # Pyrogram 与 Bot API 备用轮询可能同时收到更新；同一条 /help 或 /start 只允许一条路径回复。
+    if not _bot.mark_private_message_processed(message.chat.id, message.id):
+        return
 
     await send_help_str(client, message.chat.id)
 

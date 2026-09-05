@@ -4,42 +4,47 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { 
+import {
   BotStatusConfig,
   BotStartupNotificationMode,
-  CloudStorageConfig, 
-  SyncRule, 
-  MediaType 
+  CloudStorageConfig,
+  SyncRule,
+  MediaType,
+  VideoClassifierConfig,
+  defaultVideoClassifier,
 } from '../types';
-import { 
+import {
   Bell,
-  Save, 
-  RefreshCw, 
-  Check, 
-  Sliders, 
-  Cloud, 
-  AlertTriangle, 
-  Lock, 
-  Key, 
-  CheckCircle2, 
+  Save,
+  RefreshCw,
+  Check,
+  Sliders,
+  Cloud,
+  AlertTriangle,
+  Lock,
+  Key,
+  CheckCircle2,
   HelpCircle,
-  FolderSync
+  FolderSync,
+  Sparkles,
 } from 'lucide-react';
 
 interface ConfigPanelProps {
   config: CloudStorageConfig;
   rule: SyncRule;
   statusConfig: BotStatusConfig;
+  vcConfig: VideoClassifierConfig;
   onSaveConfig: (config: CloudStorageConfig) => void;
   onSaveRule: (rule: SyncRule) => void;
-  onSaveAll?: (config: CloudStorageConfig, rule: SyncRule, statusConfig: BotStatusConfig) => void;
+  onSaveAll?: (config: CloudStorageConfig, rule: SyncRule, statusConfig: BotStatusConfig, vcConfig?: VideoClassifierConfig) => void;
 }
 
-export function ConfigPanel({ 
-  config, 
-  rule, 
+export function ConfigPanel({
+  config,
+  rule,
   statusConfig,
-  onSaveConfig, 
+  vcConfig,
+  onSaveConfig,
   onSaveRule,
   onSaveAll,
 }: ConfigPanelProps) {
@@ -60,6 +65,16 @@ export function ConfigPanel({
   const [dateThreshold, setDateThreshold] = useState(rule.dateThreshold);
   const [startupNotificationMode, setStartupNotificationMode] = useState<BotStartupNotificationMode>(statusConfig.startupNotificationMode);
   const [statusChatId, setStatusChatId] = useState(statusConfig.statusChatId);
+
+  // Local states for video AI classifier
+  const [vcEnable, setVcEnable] = useState(vcConfig.enable);
+  const [vcApiBase, setVcApiBase] = useState(vcConfig.apiBase);
+  const [vcApiKey, setVcApiKey] = useState(vcConfig.apiKey);
+  const [vcModel, setVcModel] = useState(vcConfig.model);
+  const [vcMaxFrames, setVcMaxFrames] = useState(vcConfig.maxFrames);
+  const [vcTimeout, setVcTimeout] = useState(vcConfig.timeoutSec);
+  const [vcMaxSize, setVcMaxSize] = useState(vcConfig.maxVideoSizeMb);
+  const [vcMinConfidence, setVcMinConfidence] = useState(vcConfig.minConfidence);
 
   // Connection testing state
   const [testState, setTestState] = useState<'idle' | 'checking' | 'success' | 'failed'>('idle');
@@ -90,6 +105,17 @@ export function ConfigPanel({
     setStartupNotificationMode(statusConfig.startupNotificationMode || 'off');
     setStatusChatId(statusConfig.statusChatId || '');
   }, [statusConfig]);
+
+  useEffect(() => {
+    setVcEnable(vcConfig.enable === true);
+    setVcApiBase(vcConfig.apiBase || defaultVideoClassifier.apiBase);
+    setVcApiKey(vcConfig.apiKey || '');
+    setVcModel(vcConfig.model || defaultVideoClassifier.model);
+    setVcMaxFrames(vcConfig.maxFrames || defaultVideoClassifier.maxFrames);
+    setVcTimeout(vcConfig.timeoutSec || defaultVideoClassifier.timeoutSec);
+    setVcMaxSize(vcConfig.maxVideoSizeMb || defaultVideoClassifier.maxVideoSizeMb);
+    setVcMinConfidence(vcConfig.minConfidence || defaultVideoClassifier.minConfidence);
+  }, [vcConfig]);
 
   const handleTestConnection = async (e: React.MouseEvent) => {
     e.preventDefault();
@@ -157,8 +183,19 @@ export function ConfigPanel({
       statusChatId: statusChatId.trim(),
     } as BotStatusConfig;
 
+    const nextVcConfig = {
+      enable: vcEnable,
+      apiBase: vcApiBase.trim(),
+      apiKey: vcApiKey.trim(),
+      model: vcModel.trim(),
+      maxFrames: Number(vcMaxFrames) || defaultVideoClassifier.maxFrames,
+      timeoutSec: Number(vcTimeout) || defaultVideoClassifier.timeoutSec,
+      maxVideoSizeMb: Number(vcMaxSize) || defaultVideoClassifier.maxVideoSizeMb,
+      minConfidence: Number(vcMinConfidence) || defaultVideoClassifier.minConfidence,
+    } as VideoClassifierConfig;
+
     if (onSaveAll) {
-      onSaveAll(nextConfig, nextRule, nextStatusConfig);
+      onSaveAll(nextConfig, nextRule, nextStatusConfig, nextVcConfig);
     } else {
       onSaveConfig(nextConfig);
       onSaveRule(nextRule);
@@ -490,6 +527,118 @@ export function ConfigPanel({
               </span>
             </div>
 
+          </div>
+        </div>
+
+        <div className="lg:col-span-2 space-y-4 bg-slate-900 border border-slate-800 p-5 rounded-xl">
+          <div className="flex items-center gap-2 border-b border-slate-800 pb-3">
+            <Sparkles className="w-4 h-4 text-indigo-400" />
+            <div>
+              <h3 className="text-xs font-semibold text-slate-200">视频 AI 分类归档 (Video Classifier)</h3>
+              <p className="text-[10px] text-slate-500">下载完成的视频自动抽帧并调用视觉模型识别内容类别，归档到对应的类别子文件夹</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-[1fr_1.6fr] gap-4 text-xs">
+            {/* 启用开关 */}
+            <div className="flex items-center justify-between bg-slate-950/40 p-3 rounded-lg border border-slate-800">
+              <div className="space-y-0.5 pr-2">
+                <span className="text-xs font-semibold text-slate-300 block">启用 AI 分类</span>
+                <span className="text-[10px] text-slate-500">分类失败或置信度不足时自动保持原目录结构</span>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer select-none">
+                <input
+                  id="checkbox-vc-enable"
+                  type="checkbox"
+                  checked={vcEnable}
+                  className="sr-only peer"
+                  onChange={(e) => setVcEnable(e.target.checked)}
+                />
+                <div className="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-300 after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600" />
+              </label>
+            </div>
+
+            {/* API 参数 */}
+            <div className={`space-y-3 ${vcEnable ? '' : 'opacity-50 pointer-events-none'}`}>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="block text-slate-400 font-medium">API Base (兼容 OpenAI 协议)</label>
+                  <input
+                    id="input-vc-api-base"
+                    type="text"
+                    className="w-full bg-slate-950/70 border border-slate-800 focus:border-indigo-500 rounded-lg p-2.5 text-slate-300 font-mono focus:outline-none"
+                    placeholder="https://api.openai.com/v1"
+                    value={vcApiBase}
+                    onChange={(e) => setVcApiBase(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="block text-slate-400 font-medium flex items-center gap-1">
+                    API Key
+                    <Key className="w-3 h-3 text-slate-600" />
+                  </label>
+                  <input
+                    id="input-vc-api-key"
+                    type="password"
+                    className="w-full bg-slate-950/70 border border-slate-800 focus:border-indigo-500 rounded-lg p-2.5 text-slate-300 font-mono focus:outline-none"
+                    placeholder="sk-..."
+                    value={vcApiKey}
+                    onChange={(e) => setVcApiKey(e.target.value)}
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="space-y-1">
+                  <label className="block text-slate-400">视觉模型</label>
+                  <input
+                    id="input-vc-model"
+                    type="text"
+                    className="w-full bg-slate-950/70 border border-slate-800 focus:border-indigo-500 rounded-lg p-2.5 text-slate-300 font-mono focus:outline-none"
+                    value={vcModel}
+                    onChange={(e) => setVcModel(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="block text-slate-400">抽帧数量</label>
+                  <input
+                    id="input-vc-frames"
+                    type="number"
+                    min="1"
+                    max="16"
+                    className="w-full bg-slate-950/70 border border-slate-800 focus:border-indigo-500 rounded-lg p-2.5 text-slate-300 font-mono focus:outline-none"
+                    value={vcMaxFrames}
+                    onChange={(e) => setVcMaxFrames(Number(e.target.value) || 4)}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="block text-slate-400">视频上限 (MB)</label>
+                  <input
+                    id="input-vc-max-size"
+                    type="number"
+                    min="1"
+                    className="w-full bg-slate-950/70 border border-slate-800 focus:border-indigo-500 rounded-lg p-2.5 text-slate-300 font-mono focus:outline-none"
+                    value={vcMaxSize}
+                    onChange={(e) => setVcMaxSize(Number(e.target.value) || 2048)}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="block text-slate-400">置信度阈值</label>
+                  <input
+                    id="input-vc-confidence"
+                    type="number"
+                    step="0.05"
+                    min="0"
+                    max="1"
+                    className="w-full bg-slate-950/70 border border-slate-800 focus:border-indigo-500 rounded-lg p-2.5 text-slate-300 font-mono focus:outline-none"
+                    value={vcMinConfidence}
+                    onChange={(e) => setVcMinConfidence(Number(e.target.value) || 0.4)}
+                  />
+                </div>
+              </div>
+              <span className="text-[10px] text-slate-500 block leading-relaxed">
+                NSFW 中文子类目录：按产地（日本有码 / 日本无码 / 中文字幕AV / 国产流出 / 国产直播 / 欧美片厂 / 欧美素人 / 韩国 / 泰妹东南亚 / 其他亚洲）和形态（里番动画 / 3D动画 / 订阅网红 / 成人cos / 制服校园 / 偷拍 / 写真擦边 / 短视频擦边 / 多人群体 / SM调教 / 丝袜美足 / 男男 / 女女 / AI生成 / 合集剪辑 等），插入为 频道/nsfw/子类/日期/文件；非 NSFW 内容不插类别目录。
+              </span>
+            </div>
           </div>
         </div>
 

@@ -4,6 +4,7 @@ import os
 import time
 from enum import Enum
 
+from loguru import logger
 from pyrogram import Client
 
 from module.app import TaskNode
@@ -33,6 +34,47 @@ _pending_downloads: dict = (
 def get_download_result() -> dict:
     """get global download result"""
     return _download_result
+
+
+def set_ai_status(chat_id: int, message_id: int, ai_status: str, profile_id=None):
+    """Update the AI classification stage shown in the dashboard for one task.
+
+    Stages: 抽帧中 / 语音转写中 / AI 识图中 / 分类完成:<dir> / 分类跳过.
+    Empty string clears the stage (task moves on to upload).
+    """
+
+    try:
+        record = _download_result.get(chat_id, {}).get(message_id)
+        if record is not None:
+            record["ai_status"] = ai_status
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"set_ai_status failed: {e}")
+
+
+def set_ai_summary(chat_id: int, message_id: int, summary: str, profile_id=None):
+    """Store the AI-generated one-line video summary on the task record."""
+
+    try:
+        record = _download_result.get(chat_id, {}).get(message_id)
+        if record is not None and summary:
+            record["ai_summary"] = summary
+            if db.conn:
+                db.save_setting("download_history", _download_result)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"set_ai_summary failed: {e}")
+
+
+def set_ai_tags(chat_id: int, message_id: int, tags: list, profile_id=None):
+    """Store AI-generated content tags on the task record."""
+
+    try:
+        record = _download_result.get(chat_id, {}).get(message_id)
+        if record is not None and isinstance(tags, list) and tags:
+            record["ai_tags"] = [str(t).strip() for t in tags if str(t).strip()]
+            if db.conn:
+                db.save_setting("download_history", _download_result)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"set_ai_tags failed: {e}")
 
 
 def get_total_download_speed() -> int:
@@ -206,7 +248,13 @@ def _load_pending_downloads():
                         d_item = _download_result[chat_id][msg_id]
                         down_byte = d_item.get("down_byte", 0)
                         total_size = d_item.get("total_size", 1)
-                        if down_byte >= total_size:
+                        # 只有下载字节完整且 state 是非可重试终态（finished）
+                        # 才算真正完成；上传失败/pending 的任务仍需重入队。
+                        truly_done = (
+                            down_byte >= total_size
+                            and d_item.get("state") == "completed"
+                        )
+                        if truly_done:
                             # Already completed, mark for removal
                             to_remove.append(key)
 

@@ -473,6 +473,24 @@ export function TaskTable({
                             >
                               {shortSource(task.sourceName, task.sourceId)}
                             </div>
+                            {task.aiSummary && (
+                              <div
+                                className="text-[9px] text-slate-500 line-clamp-2 leading-snug"
+                                title={task.aiSummary}
+                              >
+                                {task.aiSummary}
+                              </div>
+                            )}
+                            {task.aiTags && task.aiTags.length > 0 && (
+                              <div className="flex flex-wrap gap-1">
+                                {task.aiTags.slice(0, 4).map(tag => (
+                                  <span
+                                    key={tag}
+                                    className="text-[8px] font-medium text-violet-300 bg-violet-500/10 border border-violet-500/25 rounded-full px-1.5 py-px"
+                                  >{tag}</span>
+                                ))}
+                              </div>
+                            )}
                           </div>
                         </td>
 
@@ -553,6 +571,11 @@ export function TaskTable({
                         {/* State Badge */}
                         <td className="py-2.5 px-3 whitespace-nowrap">
                           {getStatusBadge(task.status)}
+                          {task.aiStatus && (
+                            <p className="text-[10px] text-indigo-400 mt-1 max-w-[110px] truncate" title={task.aiStatus}>
+                              {task.aiStatus}
+                            </p>
+                          )}
                           {task.errorMsg && (
                             <p className="text-[10px] text-rose-400 mt-1 max-w-[100px] truncate" title={task.errorMsg}>
                               {task.errorMsg}

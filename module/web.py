@@ -586,6 +586,183 @@ def _is_webdav_inline_type(content_type: str) -> bool:
     )
 
 
+@_flask_app.route("/api/webdav/browse", methods=["GET"])
+@login_required
+def api_webdav_browse():
+    """List one real WebDAV directory (PROPFIND depth 1) under the configured root.
+
+    Query: ?path=<relative path inside remote_dir, empty for root>.
+    Returns {success, path, folders:[{name,path}], files:[{name,path,size,modified,content_type}]}
+    """
+    if not _app_instance or not getattr(_app_instance, "cloud_drive_config", None):
+        return jsonify({"success": False, "message": "WebDAV 未初始化"}), 503
+
+    drive_config = _app_instance.cloud_drive_config
+    remote_root = (drive_config.remote_dir or "").strip("/")
+    rel_path = (request.args.get("path") or "").strip().strip("/")
+    # 浏览限定在 remote_dir 之内；rel_path 为空即根目录。
+    full_path = f"{remote_root}/{rel_path}".strip("/") if rel_path else remote_root
+    try:
+        remote_url = CloudDrive.build_webdav_remote_url(drive_config, full_path)
+    except ValueError as error:
+        return jsonify({"success": False, "message": str(error)}), 400
+
+    auth = None
+    if drive_config.webdav_username:
+        auth = (drive_config.webdav_username, drive_config.webdav_password)
+
+    try:
+        resp = requests.request(
+            "PROPFIND",
+            remote_url,
+            headers={"Depth": "1", "User-Agent": "TelegramMediaDownloader/1.0"},
+            auth=auth,
+            timeout=(10, 60),
+        )
+    except requests.RequestException as error:
+        return jsonify({"success": False, "message": f"WebDAV 连接失败: {error}"}), 502
+
+    if resp.status_code == 404:
+        return jsonify({
+            "success": True,
+            "path": rel_path,
+            "folders": [],
+            "files": [],
+            "message": "目录不存在或为空",
+        })
+    if resp.status_code not in (200, 207):
+        return jsonify({
+            "success": False,
+            "message": f"WebDAV 返回状态 {resp.status_code}",
+        }), 502
+
+    # 解析 multistatus XML：第一个 response 是目录自身，其余为子项。
+    import xml.etree.ElementTree as ET
+
+    folders = []
+    files = []
+    try:
+        root_xml = ET.fromstring(resp.content)
+    except ET.ParseError:
+        return jsonify({"success": False, "message": "WebDAV 响应解析失败"}), 502
+
+    def _localname(tag: str) -> str:
+        return tag.rsplit("}", 1)[-1].lower()
+
+    def _child_text(node, name: str):
+        for child in node.iter():
+            if _localname(child.tag) == name:
+                return (child.text or "").strip()
+        return ""
+
+    # PROPFIND 返回的 href 是 URL 编码的全路径（含 webdav_url 前缀），
+    # 只取 remote_root 之后的部分作为展示/导航用的相对路径。
+    root_prefix = urllib.parse.quote(full_path, safe="/").rstrip("/") + "/"
+
+    for response_el in root_xml.iter():
+        if _localname(response_el.tag) != "response":
+            continue
+        href_raw = ""
+        for child in response_el:
+            if _localname(child.tag) == "href":
+                href_raw = (child.text or "").strip()
+                break
+        if not href_raw:
+            continue
+        href_decoded = urllib.parse.unquote(href_raw)
+        # 跳过目录自身（href 与请求路径相同，即以 full_path 结尾且无更多段）
+        rel_from_root = href_decoded
+        if full_path and full_path + "/" in href_decoded:
+            rel_from_root = href_decoded.split(full_path + "/", 1)[1]
+        elif full_path and href_decoded.rstrip("/").endswith("/" + full_path):
+            continue  # the collection itself
+        name = rel_from_root.rstrip("/")
+        if not name:
+            continue
+
+        is_collection = False
+        size_text = ""
+        modified_text = ""
+        content_type = ""
+        for propstat in response_el.iter():
+            if _localname(propstat.tag) == "resourcetype":
+                if any(_localname(x.tag) == "collection" for x in propstat.iter()):
+                    is_collection = True
+            elif _localname(propstat.tag) == "getcontentlength":
+                size_text = (propstat.text or "").strip()
+            elif _localname(propstat.tag) == "getlastmodified":
+                modified_text = (propstat.text or "").strip()
+            elif _localname(propstat.tag) == "getcontenttype":
+                content_type = (propstat.text or "").strip()
+
+        entry_rel = f"{rel_path}/{name}".strip("/") if rel_path else name
+        if is_collection or href_raw.endswith("/"):
+            if name:
+                folders.append({"name": name, "path": entry_rel})
+        else:
+            try:
+                size = int(size_text) if size_text else 0
+            except ValueError:
+                size = 0
+            files.append({
+                "name": name,
+                "path": entry_rel,
+                "size": size,
+                "modified": modified_text,
+                "content_type": content_type,
+            })
+
+    folders.sort(key=lambda item: item["name"])
+    files.sort(key=lambda item: item["name"])
+    return jsonify({
+        "success": True,
+        "path": rel_path,
+        "root": remote_root,
+        "folders": folders,
+        "files": files,
+    })
+
+
+@_flask_app.route("/api/webdav/summary", methods=["GET"])
+@login_required
+def api_webdav_summary():
+    """Look up the AI summary for a real WebDAV file by its relative upload path.
+
+    The file browser lists live WebDAV entries; summaries live on download
+    history records. Match by relative_path (channel/.../file).
+    """
+    rel_path = (request.args.get("path") or "").strip().strip("/")
+    if not rel_path:
+        return jsonify({"success": False, "message": "path is required"}), 400
+
+    download_result = get_download_result()
+    remote_dir = ""
+    if _app_instance and hasattr(_app_instance, "cloud_drive_config"):
+        remote_dir = (_app_instance.cloud_drive_config.remote_dir or "").strip("/")
+
+    match_name = os.path.basename(rel_path)
+    for chat_id, messages in download_result.items():
+        for msg_id, record in (messages or {}).items():
+            file_name = (record or {}).get("file_name") or ""
+            base_name = os.path.basename(file_name.replace("\\", "/"))
+            if base_name != match_name:
+                continue
+            # 以远程根为参照的相对路径要一致，避免同名文件误配。
+            record_rel = CloudDrive.get_relative_upload_path(
+                getattr(_app_instance, "save_path", "") if _app_instance else "",
+                file_name,
+            )
+            if record_rel != rel_path:
+                continue
+            return jsonify({
+                "success": True,
+                "ai_summary": (record or {}).get("ai_summary") or "",
+                "ai_status": (record or {}).get("ai_status") or "",
+                "ai_tags": (record or {}).get("ai_tags") or [],
+            })
+    return jsonify({"success": True, "ai_summary": "", "ai_status": "", "ai_tags": []})
+
+
 @_flask_app.route("/api/webdav/preview", methods=["GET", "HEAD"])
 @login_required
 def api_webdav_preview():
@@ -1774,14 +1951,17 @@ def _get_formatted_list(already_down=False):
             d_item
             and d_item.get("down_byte", 0) >= d_item.get("total_size", 1)
         )
+        # WebDAV 上传是下载任务的第二阶段；下载到 100% 但上传未完成时仍属于活动任务。
+        # 下载记录还是 pending（未走完上传确认流程）时，即使内存里没有上传记录，
+        # 也不能当成已完成——那是断电/崩溃留下的半程任务，需要等 resume 重跑。
         upload_complete = bool(
-            not u_item
+            task_record_state == "completed"
             or (
-                upload_total > 0
+                u_item
+                and upload_total > 0
                 and upload_processed >= upload_total
             )
         )
-        # WebDAV 上传是下载任务的第二阶段；下载到 100% 但上传未完成时仍属于活动任务。
         is_truly_finished = download_complete and upload_complete
         
         # If it's effectively 100% data transfer but NOT yet marked finished in history,
@@ -1837,6 +2017,8 @@ def _get_formatted_list(already_down=False):
 
         # Determine status text
         # 本机已完整、仅云盘失败时单独文案，便于仪表盘区分“下载失败”和“上传失败”。
+        # AI 分类阶段（抽帧/转写/识图）发生在下载完成后、上传开始前，优先展示。
+        ai_status = (d_item or {}).get("ai_status") or ""
         status_text = ""
         if is_upload_failed:
             status_text = "上传失败"
@@ -1844,6 +2026,8 @@ def _get_formatted_list(already_down=False):
             status_text = "失败"
         elif is_truly_finished:
             status_text = "已完成"
+        elif ai_status:
+            status_text = f"AI {ai_status}"
         elif is_uploading:
             if is_finishing:
                 status_text = "正在完成..."
@@ -1891,6 +2075,9 @@ def _get_formatted_list(already_down=False):
             "profileId": profile_id,
             "state": projected_state,
             "status": status_text,
+            "ai_status": ai_status,
+            "ai_summary": (d_item or {}).get("ai_summary") or "",
+            "ai_tags": (d_item or {}).get("ai_tags") or [],
             "error": (u_item or {}).get("error") or (d_item or {}).get("error") or "",
         }
         data.append(item)

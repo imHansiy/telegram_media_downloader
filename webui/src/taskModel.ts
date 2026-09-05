@@ -24,6 +24,8 @@ export function statusFromBackendState(item: BackendTaskState): SyncTask['status
   if (item.state === 'finished' || item.status === '已完成') return 'completed';
   if (item.state === 'paused' || item.status === '已暂停') return 'paused';
   if (item.status === '正在完成...') return 'syncing';
+  // AI 分类阶段（后端 status 形如 "AI 抽帧中"）是下载后的处理步骤，按传输中显示。
+  if (item.status && item.status.startsWith('AI ')) return 'syncing';
   if (item.status === '上传中' || Number(item.upload_progress) > 0) return 'uploading';
   if (item.status === '等待中') return 'pending';
   return 'downloading';

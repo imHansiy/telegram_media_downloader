@@ -448,6 +448,7 @@ class Application:
         self.app_data: dict = {}
         self.profile_id: str = None
         self.file_path_prefix: List[str] = ["chat_title", "media_datetime"]
+        self.video_classifier_config: dict = {}
         self.file_name_prefix: List[str] = ["message_id", "file_name"]
         self.file_name_prefix_split: str = " - "
         self.log_file_path = os.path.join(os.path.abspath("."), "log")
@@ -547,6 +548,8 @@ class Application:
             self.restart_program = _config["restart_program"]
         if _config.get("file_path_prefix"):
             self.file_path_prefix = _config["file_path_prefix"]
+        if isinstance(_config.get("video_classifier"), dict):
+            self.video_classifier_config = _config["video_classifier"]
         if _config.get("file_name_prefix"):
             self.file_name_prefix = _config["file_name_prefix"]
 
@@ -1044,6 +1047,8 @@ class Application:
 
         self.config["save_path"] = self.save_path
         self.config["file_path_prefix"] = self.file_path_prefix
+        if self.video_classifier_config:
+            self.config["video_classifier"] = self.video_classifier_config
         self.config["allowed_user_ids"] = self.allowed_user_ids
         self.config["bot_download_access_mode"] = self.bot_download_access_mode
         self.config["bot_allow_public_download"] = self.bot_allow_public_download

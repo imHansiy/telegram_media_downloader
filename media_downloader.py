@@ -20,6 +20,7 @@ from module.app import Application, ChatDownloadConfig, DownloadStatus, TaskNode
 from module.bot import start_download_bot, stop_download_bot
 from module.cloud_drive import CloudDrive
 from module.db import db
+from module.video_classifier import classify_video
 from module.download_stat import (
     add_pending_download,
     bump_upload_auto_retry_count,
@@ -32,6 +33,9 @@ from module.download_stat import (
     mark_upload_failed,
     prepare_download_retry,
     remove_pending_download,
+    set_ai_status,
+    set_ai_summary,
+    set_ai_tags,
     update_download_status,
     verify_and_save_download,
 )
@@ -391,6 +395,126 @@ async def _get_media_meta(
     return truncate_filename(file_name), truncate_filename(temp_file_name), file_format
 
 
+async def _apply_video_category_path(
+    temp_download_path: str,
+    file_name: str,
+    message: pyrogram.types.Message,
+    media_obj,
+    runtime_app: Application,
+    node: TaskNode = None,
+) -> Optional[str]:
+    """对已完整落地的视频做 AI 分类，返回插入类别目录后的新路径。
+
+    分类关闭、失败或置信度过低时返回 None，调用方沿用原路径。
+    只改最终目录（在 save_path 后插入类别层级），不改文件名，
+    避免 UI 记录里的 ui_file_name 与真实路径脱节。
+    """
+
+    classifier_config = getattr(runtime_app, "video_classifier_config", None) or {}
+    if not classifier_config.get("enable"):
+        return None
+    api_key = (
+        classifier_config.get("api_key")
+        or os.getenv("OPENAI_API_KEY")
+        or ""
+    )
+    if not api_key:
+        logger.warning("[video_classifier] 未配置 api_key，跳过视频分类")
+        return None
+
+    max_size_mb = float(classifier_config.get("max_video_size_mb", 2048))
+    if os.path.getsize(temp_download_path) > max_size_mb * 1024 * 1024:
+        logger.info("[video_classifier] 视频超过大小上限，跳过分类")
+        if node:
+            set_ai_status(node.chat_id, message.id, "分类跳过", node.profile_id)
+        return None
+
+    def _report_ai_stage(stage: str):
+        if node:
+            set_ai_status(node.chat_id, message.id, stage, node.profile_id)
+
+    result = await classify_video(
+        temp_download_path,
+        api_key,
+        api_base=classifier_config.get("api_base", "https://api.openai.com/v1"),
+        model=classifier_config.get("model", "gpt-4o-mini"),
+        max_frames=int(classifier_config.get("max_frames", 4)),
+        timeout=int(classifier_config.get("timeout", 60)),
+        text_hints={
+            "file_name": os.path.basename(file_name),
+            "chat_title": getattr(getattr(message, "chat", None), "title", "") or "",
+            # caption 优先取媒体组共享的描述（转发相册时真正的标题简介
+            # 通常写在整个组的第一条上，单条 caption 常为空）。
+            "caption": (
+                runtime_app.get_caption_name(
+                    node.chat_id, getattr(message, "media_group_id", None)
+                )
+                or getattr(message, "caption", "")
+                or ""
+            )[:1000],
+        },
+        transcribe=bool(classifier_config.get("transcribe", False)),
+        progress_callback=_report_ai_stage,
+    )
+    if not result:
+        _report_ai_stage("分类跳过")
+        return None
+
+    # 分类成功即存简介与标签（即使置信度不足保持原路径，元数据仍有展示价值）。
+    if node and result.get("summary"):
+        set_ai_summary(
+            node.chat_id, message.id, result["summary"], node.profile_id
+        )
+    if node and result.get("tags"):
+        set_ai_tags(node.chat_id, message.id, result["tags"], node.profile_id)
+
+    min_confidence = float(classifier_config.get("min_confidence", 0.4))
+    if result["confidence"] < min_confidence:
+        logger.info(
+            f"[video_classifier] 置信度 {result['confidence']} 低于阈值 "
+            f"{min_confidence}，保持原路径"
+        )
+        _report_ai_stage("分类跳过")
+        return None
+
+    from module.video_classifier import category_to_dir
+
+    category_dir = category_to_dir(result["category"])
+    if not category_dir:
+        logger.info(
+            f"[video_classifier] 类别 {result['category']!r} 无需归类，保持原路径"
+        )
+        _report_ai_stage("分类跳过")
+        return None
+    save_path = os.path.normpath(runtime_app.save_path)
+    current_path = os.path.normpath(file_name)
+
+    try:
+        rel_path = os.path.relpath(current_path, save_path)
+    except ValueError:
+        return None
+    rel_parts = rel_path.split(os.sep)
+    # 目标结构：频道/nsfw/子类/文件名（去掉日期层，方便按类别浏览）。
+    # rel_parts[0] 是频道目录，文件名是最后一段；中间的日期层直接丢弃。
+    file_part = rel_parts[-1]
+    category_parts = category_dir.split("/")
+    new_parts = [rel_parts[0], *category_parts, file_part]
+    new_path = os.path.join(save_path, *new_parts)
+
+    _report_ai_stage(f"分类完成:{category_dir}")
+
+    os.makedirs(os.path.dirname(new_path), exist_ok=True)
+    if temp_download_path != file_name:
+        # .part 临时文件由后续 _move_to_download_path 负责搬运，这里只算路径。
+        return truncate_filename(new_path)
+    if os.path.exists(new_path) and os.path.getsize(new_path) == os.path.getsize(
+        temp_download_path
+    ):
+        return truncate_filename(new_path)
+    shutil.move(temp_download_path, new_path)
+    return truncate_filename(new_path)
+
+
 async def add_download_task(
     message: pyrogram.types.Message,
     node: TaskNode,
@@ -440,6 +564,10 @@ async def download_task(
 ):
     """Download and Forward media"""
 
+    logger.info(
+        f"[download_task] enter msg={message.id} "
+        f"chat={node.chat_id} profile={getattr(runtime_app, 'profile_id', None)}"
+    )
     download_status, file_name = await download_media(
         client, message, runtime_app.media_types, runtime_app.file_formats, node, runtime_app
     )
@@ -548,14 +676,61 @@ async def download_media(
     task_start_time: float = time.time()
     media_size = 0
     _media = None
-    message = await fetch_message(client, message)
+    # resume 入队的消息已经是完整 get_messages 结果；重复拉取会再走一次
+    # channels.getMessages，慢且偶发挂起。已有 chat 上下文时直接复用。
+    _fetch_timeout_sec = 45
+    if getattr(message, "chat", None) and getattr(message, "id", None):
+        try:
+            _media_probe = getattr(message, "video", None) or getattr(
+                message, "document", None
+            )
+        except Exception:
+            _media_probe = None
+        if _media_probe is not None or getattr(message, "photo", None):
+            logger.info(f"Message[{message.id}]: reusing fetched message object")
+        else:
+            try:
+                message = await asyncio.wait_for(
+                    fetch_message(client, message), timeout=_fetch_timeout_sec
+                )
+            except asyncio.TimeoutError:
+                # getMessages 在个别频道上会无限挂起（服务端不回包）；
+                # 复用原对象继续，让 _get_media_meta 自行决定路径。
+                logger.warning(
+                    f"Message[{getattr(message, 'id', '?')}]: refetch timed out, "
+                    f"continuing with original object"
+                )
+    else:
+        try:
+            message = await asyncio.wait_for(
+                fetch_message(client, message), timeout=_fetch_timeout_sec
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Message[{getattr(message, 'id', '?')}]: refetch timed out "
+                f"with no original object; skipping"
+            )
+            return DownloadStatus.SkipDownload, None
+    if message is None or getattr(message, "empty", False):
+        logger.warning(
+            f"Message object unavailable, skip. node chat={node.chat_id}"
+        )
+        return DownloadStatus.SkipDownload, None
+    logger.info(
+        f"Message[{message.id}]: media probe video={getattr(message, 'video', None) is not None} "
+        f"doc={getattr(message, 'document', None) is not None}"
+    )
     try:
         for _type in media_types:
             _media = getattr(message, _type, None)
             if _media is None:
                 continue
+            logger.info(f"Message[{message.id}]: media type={_type}, fetching meta")
             file_name, temp_file_name, file_format = await _get_media_meta(
                 node.chat_id, message, _media, _type, runtime_app
+            )
+            logger.info(
+                f"Message[{message.id}]: meta ok, size={getattr(_media, 'file_size', 0)}"
             )
             media_size = getattr(_media, "file_size", 0)
 
@@ -595,12 +770,24 @@ async def download_media(
         )
         return DownloadStatus.FailedDownload, None
     if _media is None:
+        # resume 场景拿到的 message 可能是空壳（服务端偶发不回 media）。
+        # 不清理 pending 的话每次重启都会重新入队、无限空转。
+        logger.warning(
+            f"Message[{getattr(message, 'id', '?')}]: no downloadable media, "
+            f"cleaning pending record to avoid resume loop"
+        )
+        if getattr(node, "chat_id", None) and getattr(message, "id", None):
+            remove_pending_download(node.chat_id, message.id, node.profile_id)
         return DownloadStatus.SkipDownload, None
 
     message_id = message.id
 
     # Register as pending download for resume on restart
     add_pending_download(node.chat_id, message_id, ui_file_name, node.profile_id)
+    logger.info(
+        f"Message[{message_id}]: entering transfer loop, "
+        f"final={file_name}, temp={temp_file_name}"
+    )
 
     last_error = "下载或 WebDAV 上传重试失败"
     for retry in range(3):
@@ -640,6 +827,22 @@ async def download_media(
                         client,
                     ),
                 )
+
+            if temp_download_path and _type == "video":
+                reassigned = await _apply_video_category_path(
+                    temp_download_path,
+                    file_name,
+                    message,
+                    _media,
+                    runtime_app,
+                    node,
+                )
+                if reassigned:
+                    file_name = reassigned
+                    ui_file_name = reassigned
+                    logger.info(
+                        f"Message[{message.id}]: AI 分类后保存路径 -> {file_name}"
+                    )
 
             if runtime_app.cloud_drive_config.upload_adapter == "webdav":
                 logger.info(f"Uploading completed local file to WebDAV: {ui_file_name}")
@@ -824,6 +1027,10 @@ async def worker(
             item = await runtime_queue.get()
             message = item[0]
             node: TaskNode = item[1]
+            logger.info(
+                f"[worker:{getattr(runtime_app, 'profile_id', None)}] picked msg "
+                f"{message.id} from chat {node.chat_id}"
+            )
 
             if node.is_stop_transmission:
                 continue

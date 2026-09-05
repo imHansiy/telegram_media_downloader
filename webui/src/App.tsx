@@ -34,6 +34,8 @@ import {
   SyncRule,
   SyncTask,
   TelegramAccount,
+  VideoClassifierConfig,
+  defaultVideoClassifier,
 } from './types';
 
 type ActiveTab = 'dashboard' | 'files' | 'config' | 'accounts';
@@ -58,6 +60,9 @@ interface BackendTask {
   completed_ts?: number | null;
   state?: string;
   status?: string;
+  ai_status?: string;
+  ai_summary?: string;
+  ai_tags?: string[];
   error?: string;
 }
 
@@ -170,6 +175,9 @@ function taskFromBackend(item: BackendTask): SyncTask {
     downloadProgress,
     uploadProgress,
     status: statusFromBackend(item),
+    aiStatus: item.ai_status || undefined,
+    aiSummary: item.ai_summary || undefined,
+    aiTags: item.ai_tags || undefined,
     speedKb: Math.max(parseSpeedKb(item.download_speed), parseSpeedKb(item.upload_speed)),
     remotePath: item.remote_path || item.save_path || '',
     errorMsg: item.error || undefined,
@@ -186,6 +194,7 @@ function completedFromBackend(item: BackendTask): CompletedFile {
     sizeBytes: parseHumanBytes(item.total_size),
     completedAt: backendDateToIso(item.completed_at || item.created_at, item.completed_ts || item.created_ts),
     remotePath: item.remote_path || item.save_path || '',
+    relativePath: item.relative_path || '',
     sourceName: relativeParts[0] || item.chat,
     sourceId: item.chat,
   };
@@ -236,6 +245,39 @@ function botAccessFromConfig(config: Record<string, any>): BotAccessConfig {
   return {
     mode,
     allowedUsers,
+  };
+}
+
+function videoClassifierFromConfig(config: Record<string, any>): VideoClassifierConfig {
+  const vc = config.video_classifier || {};
+  return {
+    enable: vc.enable === true,
+    apiBase: vc.api_base || defaultVideoClassifier.apiBase,
+    apiKey: vc.api_key || '',
+    model: vc.model || defaultVideoClassifier.model,
+    maxFrames: Number(vc.max_frames) || defaultVideoClassifier.maxFrames,
+    timeoutSec: Number(vc.timeout) || defaultVideoClassifier.timeoutSec,
+    maxVideoSizeMb: Number(vc.max_video_size_mb) || defaultVideoClassifier.maxVideoSizeMb,
+    minConfidence: Number(vc.min_confidence) || defaultVideoClassifier.minConfidence,
+  };
+}
+
+function applyVideoClassifierConfig(
+  currentConfig: Record<string, any>,
+  vc: VideoClassifierConfig,
+): Record<string, any> {
+  return {
+    ...currentConfig,
+    video_classifier: {
+      enable: vc.enable,
+      api_base: vc.apiBase.trim() || defaultVideoClassifier.apiBase,
+      api_key: vc.apiKey.trim(),
+      model: vc.model.trim() || defaultVideoClassifier.model,
+      max_frames: Number(vc.maxFrames) || defaultVideoClassifier.maxFrames,
+      timeout: Number(vc.timeoutSec) || defaultVideoClassifier.timeoutSec,
+      max_video_size_mb: Number(vc.maxVideoSizeMb) || defaultVideoClassifier.maxVideoSizeMb,
+      min_confidence: Number(vc.minConfidence) || defaultVideoClassifier.minConfidence,
+    },
   };
 }
 
@@ -335,6 +377,7 @@ export default function App() {
   const [syncRule, setSyncRule] = useState<SyncRule>(defaultRule);
   const [botAccess, setBotAccess] = useState<BotAccessConfig>(defaultBotAccess);
   const [botStatus, setBotStatus] = useState<BotStatusConfig>(defaultBotStatus);
+  const [videoClassifier, setVideoClassifier] = useState<VideoClassifierConfig>(defaultVideoClassifier);
   const [liveTasks, setLiveTasks] = useState<SyncTask[]>([]);
   const [terminalTasks, setTerminalTasks] = useState<SyncTask[]>([]);
   const [completedFiles, setCompletedFiles] = useState<CompletedFile[]>([]);
@@ -384,6 +427,7 @@ export default function App() {
     setSyncRule(ruleFromConfig(payload.config || {}));
     setBotAccess(botAccessFromConfig(payload.config || {}));
     setBotStatus(botStatusFromConfig(payload.config || {}));
+    setVideoClassifier(videoClassifierFromConfig(payload.config || {}));
     applyAccountStatus(payload.account);
   };
 
@@ -419,10 +463,14 @@ export default function App() {
     return () => source.close();
   }, []);
 
-  const saveConfig = async (cloud: CloudStorageConfig, rule: SyncRule, statusConfig: BotStatusConfig) => {
-    const next = applyBotStatusConfig(
-      applyBotAccessConfig(applyUiConfig(rawConfig, cloud, rule), botAccess),
-      statusConfig,
+  const saveConfig = async (cloud: CloudStorageConfig, rule: SyncRule, statusConfig: BotStatusConfig, vcConfig?: VideoClassifierConfig) => {
+    const nextVideoClassifier = vcConfig || videoClassifier;
+    const next = applyVideoClassifierConfig(
+      applyBotStatusConfig(
+        applyBotAccessConfig(applyUiConfig(rawConfig, cloud, rule), botAccess),
+        statusConfig,
+      ),
+      nextVideoClassifier,
     );
     const result = await postJson<{ status: string; message: string; config?: Record<string, any> }>('/api/config', {
       config: next,
@@ -431,6 +479,7 @@ export default function App() {
     setCloudConfig(cloud);
     setSyncRule(rule);
     setBotStatus(statusConfig);
+    setVideoClassifier(nextVideoClassifier);
     setStatusMessage(result.message || '配置已保存。');
   };
 
@@ -663,12 +712,12 @@ export default function App() {
 
           <section id="files" className="overview-panel min-h-[480px] lg:h-auto lg:min-h-0">
             <div className="overview-title"><span>2</span><div><h2>已归档文件 / 同步记录</h2><p>检索与管理已完成同步的媒体资源</p></div></div>
-            <div className="overview-body px-3 pb-3"><FileManager completedFiles={completedFiles} /></div>
+            <div className="overview-body px-3 pb-3"><FileManager /></div>
           </section>
 
           <section id="settings" className="overview-panel min-h-[540px] lg:h-auto lg:min-h-0">
             <div className="overview-title"><span>3</span><div><h2>同步设置</h2><p>存储挂载、同步规则与 Bot 通知配置</p></div></div>
-            <div className="overview-body px-3 pb-3"><ConfigPanel config={cloudConfig} rule={syncRule} statusConfig={botStatus} onSaveConfig={setCloudConfig} onSaveRule={setSyncRule} onSaveAll={saveConfig} /></div>
+            <div className="overview-body px-3 pb-3"><ConfigPanel config={cloudConfig} rule={syncRule} statusConfig={botStatus} vcConfig={videoClassifier} onSaveConfig={setCloudConfig} onSaveRule={setSyncRule} onSaveAll={saveConfig} /></div>
           </section>
 
           <section id="accounts" className="overview-panel min-h-[540px] lg:h-auto lg:min-h-0">
@@ -847,7 +896,7 @@ export default function App() {
                 <p className="text-[10px] text-slate-500 font-medium">管理、归类检索已成功上传的 Telegram 文件资源</p>
               </div>
               <div className="flex-1 overflow-hidden">
-                <FileManager completedFiles={completedFiles} />
+                <FileManager />
               </div>
             </div>
           )}
@@ -862,6 +911,7 @@ export default function App() {
                 config={cloudConfig}
                 rule={syncRule}
                 statusConfig={botStatus}
+                vcConfig={videoClassifier}
                 onSaveConfig={setCloudConfig}
                 onSaveRule={setSyncRule}
                 onSaveAll={saveConfig}
