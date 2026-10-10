@@ -302,16 +302,44 @@ class BotTaskCardTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(b"\x89PNG\r\n\x1a\n", card.read(8))
 
-    async def test_help_is_sent_as_one_photo_instead_of_text(self):
+    async def test_help_is_sent_as_message(self):
         client = SimpleNamespace(
-            send_photo=mock.AsyncMock(return_value=SimpleNamespace(id=901)),
-            send_message=mock.AsyncMock(),
+            send_photo=mock.AsyncMock(),
+            send_message=mock.AsyncMock(return_value=SimpleNamespace(id=901)),
         )
 
         await send_help_str(client, 200)
 
-        client.send_photo.assert_awaited_once()
-        client.send_message.assert_not_awaited()
+        client.send_message.assert_awaited_once()
+
+    def test_is_help_command_text_recognizes_slash_and_plain_text(self):
+        self.assertTrue(DownloadBot.is_help_command_text("/help"))
+        self.assertTrue(DownloadBot.is_help_command_text("help"))
+        self.assertTrue(DownloadBot.is_help_command_text("Help"))
+        self.assertTrue(DownloadBot.is_help_command_text("/start"))
+        self.assertTrue(DownloadBot.is_help_command_text("start"))
+        self.assertTrue(DownloadBot.is_help_command_text("帮助"))
+        self.assertTrue(DownloadBot.is_help_command_text("/帮助"))
+        self.assertTrue(DownloadBot.is_help_command_text("help@hansiy_twd_bot"))
+        self.assertFalse(DownloadBot.is_help_command_text("hello"))
+        self.assertFalse(DownloadBot.is_help_command_text("https://t.me/c/123"))
+
+    def test_handle_bot_api_message_plain_help(self):
+        bot = DownloadBot()
+        bot.app = SimpleNamespace(loop=mock.Mock(), bot_download_access_mode="public")
+        bot.admin_user_ids = ["200"]
+
+        with mock.patch("asyncio.run_coroutine_threadsafe") as mock_threadsafe:
+            mock_future = mock.Mock()
+            mock_threadsafe.return_value = mock_future
+            bot.handle_bot_api_message({
+                "message_id": 9999,
+                "chat": {"id": 200, "type": "private"},
+                "from": {"id": 200},
+                "text": "help",
+            })
+            mock_threadsafe.assert_called_once()
+            mock_future.result.assert_called_once_with(timeout=60)
 
     async def test_media_group_uses_one_task_card(self):
         bot = DownloadBot()

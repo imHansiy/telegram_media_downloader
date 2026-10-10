@@ -562,6 +562,7 @@ class DownloadBot:
         *,
         reply_to_message_id=None,
         parse_mode=None,
+        reply_markup=None,
     ):
         """Synchronous Bot API send used by the polling thread."""
 
@@ -576,6 +577,9 @@ class DownloadBot:
         api_parse_mode = self._bot_api_parse_mode(parse_mode)
         if api_parse_mode:
             payload["parse_mode"] = api_parse_mode
+        api_reply_markup = self._bot_api_reply_markup(reply_markup)
+        if api_reply_markup:
+            payload["reply_markup"] = api_reply_markup
 
         result = self.bot_api_request_sync("sendMessage", payload)
         return SimpleNamespace(id=result.get("message_id"))
@@ -670,6 +674,26 @@ class DownloadBot:
         )
 
     @staticmethod
+    def is_help_command_text(text: str) -> bool:
+        """Return True if message text represents a help or start command."""
+        if not text:
+            return False
+        normalized = text.strip().lower()
+        first_word = normalized.split()[0] if normalized else ""
+        if "@" in first_word:
+            first_word = first_word.split("@", 1)[0]
+        return first_word in {
+            "/help",
+            "help",
+            "/start",
+            "start",
+            "/帮助",
+            "帮助",
+            "?",
+            "？",
+        }
+
+    @staticmethod
     def _bot_api_adapter_message(message: dict, text: str = None):
         user = message.get("from") or {}
         chat = message.get("chat") or {}
@@ -720,7 +744,7 @@ class DownloadBot:
         )
 
         if not self.can_submit_bot_api_message(message):
-            if text.startswith("/start") or text.startswith("/help"):
+            if self.is_help_command_text(text):
                 self.send_message_sync(
                     chat_id,
                     "当前 Bot 未向你的账号开放。",
@@ -733,7 +757,7 @@ class DownloadBot:
             )
             return
 
-        if text.startswith("/start") or text.startswith("/help"):
+        if self.is_help_command_text(text):
             future = asyncio.run_coroutine_threadsafe(
                 send_help_str(self, chat_id), self.app.loop
             )
@@ -809,7 +833,7 @@ class DownloadBot:
         )
 
         if not self.can_submit_bot_api_message(message):
-            if text.startswith("/start") or text.startswith("/help"):
+            if self.is_help_command_text(text):
                 return self.bot_api_webhook_send_payload(
                     chat_id,
                     "当前 Bot 未向你的账号开放。",
@@ -817,7 +841,7 @@ class DownloadBot:
                 )
             return None
 
-        if text.startswith("/start") or text.startswith("/help"):
+        if self.is_help_command_text(text):
             return self.bot_api_webhook_send_payload(
                 chat_id,
                 "Bot 已开放给你使用。\n\n"
@@ -879,6 +903,7 @@ class DownloadBot:
                     request_method="get",
                     timeout=35,
                 )
+                self.bot_api_poll_error = None
 
                 for update in data or []:
                     update_id = update.get("update_id")
@@ -893,8 +918,8 @@ class DownloadBot:
                             e.__class__.__name__,
                         )
             except Exception as e:
-                self.bot_api_poll_error = e.__class__.__name__
-                logger.warning("Bot API polling error: {}", e.__class__.__name__)
+                self.bot_api_poll_error = str(e) or e.__class__.__name__
+                logger.warning("Bot API polling error: {}", self.bot_api_poll_error)
                 self.bot_api_poll_stop.wait(5)
 
     def update_config(self):
@@ -1128,31 +1153,25 @@ class DownloadBot:
                 & admin_filter,
             )
         )
+        help_commands = ["help", "start", "帮助"]
         self.bot.add_handler(
             MessageHandler(
                 help_command,
-                filters=pyrogram.filters.command(["help"])
+                filters=pyrogram.filters.command(help_commands, prefixes=["/", ""])
                 & admin_filter,
             )
         )
         self.bot.add_handler(
             MessageHandler(
                 get_info,
-                filters=pyrogram.filters.command(["get_info"])
-                & admin_filter,
-            )
-        )
-        self.bot.add_handler(
-            MessageHandler(
-                help_command,
-                filters=pyrogram.filters.command(["start"])
+                filters=pyrogram.filters.command(["get_info"], prefixes=["/", ""])
                 & admin_filter,
             )
         )
         self.bot.add_handler(
             MessageHandler(
                 public_help_command,
-                filters=pyrogram.filters.command(["start", "help"])
+                filters=pyrogram.filters.command(help_commands, prefixes=["/", ""])
                 & non_admin_submitter_filter,
             )
         )
@@ -1193,7 +1212,7 @@ class DownloadBot:
         self.bot.add_handler(
             MessageHandler(
                 system_status,
-                filters=pyrogram.filters.command(["status"])
+                filters=pyrogram.filters.command(["status"], prefixes=["/", ""])
                 & admin_filter,
             )
         )
@@ -1364,6 +1383,8 @@ async def send_help_str(client: pyrogram.Client, chat_id):
         "",
         "1 表示整个聊天的开始，0 表示整个聊天的结束",
         "[ ] 表示可选参数",
+        "",
+        "💡 提示：可发送 /help 或直接发送 help、帮助 查看此信息",
     ]
     help_text = "🤖 帮助与命令\n" + "\n".join(help_lines)
     await client.send_message(chat_id, help_text, reply_markup=update_keyboard)
