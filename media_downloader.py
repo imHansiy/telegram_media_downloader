@@ -2,7 +2,9 @@
 
 import asyncio
 import copy
+import hashlib
 import inspect
+import json
 import logging
 import os
 import shutil
@@ -20,7 +22,13 @@ from module.app import Application, ChatDownloadConfig, DownloadStatus, TaskNode
 from module.bot import start_download_bot, stop_download_bot
 from module.cloud_drive import CloudDrive
 from module.db import db
-from module.video_classifier import classify_video
+from module.resource_analysis import analyze_resource, detect_resource_kind
+from module.resource_analysis.service import analysis_status
+from module.resource_analysis.source import capture_source, source_digest, file_digest
+from module.resource_analysis.paths import archive_path
+from module.resource_analysis.taxonomy import RESOURCE_KINDS
+from module.resource_analysis.library import catalog_store, history_entries
+from module.video_cover import ensure_video_cover, cover_path
 from module.download_stat import (
     add_pending_download,
     bump_upload_auto_retry_count,
@@ -34,8 +42,7 @@ from module.download_stat import (
     prepare_download_retry,
     remove_pending_download,
     set_ai_status,
-    set_ai_summary,
-    set_ai_tags,
+    set_resource_analysis,
     update_download_status,
     verify_and_save_download,
 )
@@ -395,124 +402,135 @@ async def _get_media_meta(
     return truncate_filename(file_name), truncate_filename(temp_file_name), file_format
 
 
-async def _apply_video_category_path(
-    temp_download_path: str,
-    file_name: str,
-    message: pyrogram.types.Message,
-    media_obj,
-    runtime_app: Application,
-    node: TaskNode = None,
+async def _apply_resource_category_path(
+    temp_download_path: str, file_name: str, message: pyrogram.types.Message,
+    media_obj, runtime_app: Application, node: TaskNode = None, media_type: str = "",
 ) -> Optional[str]:
-    """对已完整落地的视频做 AI 分类，返回插入类别目录后的新路径。
-
-    分类关闭、失败或置信度过低时返回 None，调用方沿用原路径。
-    只改最终目录（在 save_path 后插入类别层级），不改文件名，
-    避免 UI 记录里的 ui_file_name 与真实路径脱节。
-    """
-
-    classifier_config = getattr(runtime_app, "video_classifier_config", None) or {}
-    if not classifier_config.get("enable"):
+    """Analyze any supported resource, then plan a non-destructive archive path."""
+    record = {}
+    if node:
+        records = get_download_result().setdefault(node.chat_id, {})
+        record = records.get(message.id)
+        if record is None:
+            size = os.path.getsize(temp_download_path) if os.path.isfile(temp_download_path) else 0
+            record = records.setdefault(message.id, {
+                "profile_id": node.profile_id, "file_name": file_name,
+                "down_byte": size, "total_size": size, "download_speed": 0,
+                "state": "processing", "start_time": time.time(),
+            })
+        elif record.get("profile_id") not in (None, "", node.profile_id):
+            return None
+    source = capture_source(message, runtime_app, node.chat_id if node else getattr(getattr(message, "chat", None), "id", ""),
+                            getattr(media_obj, "file_name", ""))
+    # Preserve metadata even when AI is disabled, before naming/archiving changes.
+    previous_source = record.get("source_context", {})
+    if not isinstance(previous_source, dict):
+        previous_source = {}
+    if (not source["caption"] and source["media_group_id"]
+            and previous_source.get("media_group_id") == source["media_group_id"]
+            and previous_source.get("association") == "media_group" and previous_source.get("caption")):
+        source = previous_source
+    record["source_context"] = source
+    config = getattr(runtime_app, "video_classifier_config", None) or {}
+    if not config.get("enable"):
         return None
-    api_key = (
-        classifier_config.get("api_key")
-        or os.getenv("OPENAI_API_KEY")
-        or ""
+    kind = detect_resource_kind(
+        file_name, getattr(media_obj, "mime_type", "") or "", media_type
     )
-    if not api_key:
-        logger.warning("[video_classifier] 未配置 api_key，跳过视频分类")
+    if kind not in config.get("resource_types", list(RESOURCE_KINDS)):
         return None
 
-    max_size_mb = float(classifier_config.get("max_video_size_mb", 2048))
-    if os.path.getsize(temp_download_path) > max_size_mb * 1024 * 1024:
-        logger.info("[video_classifier] 视频超过大小上限，跳过分类")
-        if node:
-            set_ai_status(node.chat_id, message.id, "分类跳过", node.profile_id)
-        return None
-
-    def _report_ai_stage(stage: str):
+    def report(stage):
         if node:
             set_ai_status(node.chat_id, message.id, stage, node.profile_id)
 
-    result = await classify_video(
-        temp_download_path,
-        api_key,
-        api_base=classifier_config.get("api_base", "https://api.openai.com/v1"),
-        model=classifier_config.get("model", "gpt-4o-mini"),
-        max_frames=int(classifier_config.get("max_frames", 4)),
-        timeout=int(classifier_config.get("timeout", 60)),
-        text_hints={
-            "file_name": os.path.basename(file_name),
-            "chat_title": getattr(getattr(message, "chat", None), "title", "") or "",
-            # caption 优先取媒体组共享的描述（转发相册时真正的标题简介
-            # 通常写在整个组的第一条上，单条 caption 常为空）。
-            "caption": (
-                runtime_app.get_caption_name(
-                    node.chat_id, getattr(message, "media_group_id", None)
-                )
-                or getattr(message, "caption", "")
-                or ""
-            )[:1000],
-        },
-        transcribe=bool(classifier_config.get("transcribe", False)),
-        progress_callback=_report_ai_stage,
-    )
-    if not result:
-        _report_ai_stage("分类跳过")
-        return None
-
-    # 分类成功即存简介与标签（即使置信度不足保持原路径，元数据仍有展示价值）。
-    if node and result.get("summary"):
-        set_ai_summary(
-            node.chat_id, message.id, result["summary"], node.profile_id
-        )
-    if node and result.get("tags"):
-        set_ai_tags(node.chat_id, message.id, result["tags"], node.profile_id)
-
-    min_confidence = float(classifier_config.get("min_confidence", 0.4))
-    if result["confidence"] < min_confidence:
-        logger.info(
-            f"[video_classifier] 置信度 {result['confidence']} 低于阈值 "
-            f"{min_confidence}，保持原路径"
-        )
-        _report_ai_stage("分类跳过")
-        return None
-
-    from module.video_classifier import category_to_dir
-
-    category_dir = category_to_dir(result["category"])
-    if not category_dir:
-        logger.info(
-            f"[video_classifier] 类别 {result['category']!r} 无需归类，保持原路径"
-        )
-        _report_ai_stage("分类跳过")
-        return None
-    save_path = os.path.normpath(runtime_app.save_path)
-    current_path = os.path.normpath(file_name)
-
     try:
-        rel_path = os.path.relpath(current_path, save_path)
-    except ValueError:
+        max_size = float(config.get("max_file_size_mb", config.get("max_video_size_mb", 2048)))
+        if os.path.getsize(temp_download_path) > max_size * 1024 * 1024:
+            report("文件超过分析上限")
+            return None
+        # Upload retries reuse the result from this completed local resource.
+        fingerprint = hashlib.sha256(json.dumps({
+            "analysis_pipeline": 37,
+            "content_sha256": await asyncio.to_thread(file_digest, temp_download_path),
+            "source_sha256": source_digest(source),
+            "name": os.path.basename(file_name), "kind": kind, "size": os.path.getsize(temp_download_path),
+            "options": {key: config.get(key) for key in (
+                "api_base", "model", "max_frames", "narrative_frames", "min_confidence", "transcribe", "max_audio_seconds", "reasoning_effort", "share_source_text", "use_subtitles")},
+        }, sort_keys=True).encode()).hexdigest()
+        result = record.get("resource_analysis") if record.get("analysis_fingerprint") == fingerprint else None
+        if not result or result.get("status") not in ("complete", "needs_review"):
+            result = await analyze_resource(
+                temp_download_path,
+                config.get("api_key") or os.getenv("OPENAI_API_KEY") or "",
+                api_base=config.get("api_base", "https://api.openai.com/v1"),
+                model=config.get("model", "gpt-4o-mini"),
+                reasoning_effort=config.get("reasoning_effort"),
+                max_frames=int(config.get("max_frames", 6)), timeout=int(config.get("timeout", 60)),
+                narrative_frames=int(config.get("narrative_frames", 24)),
+                text_hints={"file_name": os.path.basename(file_name)},
+                source_context=source,
+                share_source_text=config.get("share_source_text") is True,
+                use_subtitles=config.get("use_subtitles") is True,
+                resource_name=os.path.basename(file_name),
+                mime_type=getattr(media_obj, "mime_type", "") or "", media_type=media_type,
+                transcribe=bool(config.get("transcribe", False)),
+                min_confidence=float(config.get("min_confidence", 0.65)),
+                max_audio_seconds=int(config.get("max_audio_seconds", 180)), progress_callback=report,
+            )
+            if node:
+                previous = record.get("resource_analysis") or {}
+                if (previous.get("status") == "complete" and (
+                        result.get("status") != "complete" or
+                        (kind == "video" and result.get("summary_quality", {}).get("status") != "ready"))):
+                    record["analysis_last_attempt"] = {
+                        "status": "review", "reason": result.get("reason", ""),
+                        "issues": result.get("summary_quality", {}).get("issues", []),
+                    }
+                    report("本次分析未通过检查，已保留原分类与简介")
+                    return None
+                record["analysis_fingerprint"] = fingerprint
+                set_resource_analysis(node.chat_id, message.id, result, node.profile_id)
+        if result.get("status") != "complete":
+            report(analysis_status(result))
+            return None
+        report(f"分析完成:{result['category_label']}")
+        if not config.get("organize_folders", True):
+            return None
+        destination = archive_path(runtime_app.save_path, file_name, result)
+        if not destination or os.path.abspath(destination) == os.path.abspath(file_name):
+            return None
+        destination = truncate_filename(destination)
+        if os.path.exists(destination):
+            # Do not overwrite a different resource just because its size matches.
+            report("分析完成，目标已存在，保留原目录")
+            return None
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        return destination
+    except Exception as error:
+        logger.warning(f"Resource analysis skipped ({type(error).__name__})")
+        report("分析未完成")
         return None
-    rel_parts = rel_path.split(os.sep)
-    # 目标结构：频道/nsfw/子类/文件名（去掉日期层，方便按类别浏览）。
-    # rel_parts[0] 是频道目录，文件名是最后一段；中间的日期层直接丢弃。
-    file_part = rel_parts[-1]
-    category_parts = category_dir.split("/")
-    new_parts = [rel_parts[0], *category_parts, file_part]
-    new_path = os.path.join(save_path, *new_parts)
 
-    _report_ai_stage(f"分类完成:{category_dir}")
 
-    os.makedirs(os.path.dirname(new_path), exist_ok=True)
-    if temp_download_path != file_name:
-        # .part 临时文件由后续 _move_to_download_path 负责搬运，这里只算路径。
-        return truncate_filename(new_path)
-    if os.path.exists(new_path) and os.path.getsize(new_path) == os.path.getsize(
-        temp_download_path
-    ):
-        return truncate_filename(new_path)
-    shutil.move(temp_download_path, new_path)
-    return truncate_filename(new_path)
+# Compatibility for integrations that still call the former video-only hook.
+_apply_video_category_path = _apply_resource_category_path
+
+
+async def _prepare_video_cover(source, destination, media_obj, runtime_app, media_type=""):
+    """Independent of AI analysis; only completed local videos cross this seam."""
+    if not getattr(runtime_app, "generate_video_covers", True):
+        return ""
+    if detect_resource_kind(destination, getattr(media_obj, "mime_type", "") or "", media_type) != "video":
+        return ""
+    try:
+        result = await asyncio.to_thread(ensure_video_cover, source, destination)
+    except Exception as error:
+        logger.warning(f"Video cover skipped ({type(error).__name__}); video download can continue.")
+        return ""
+    if not result.path:
+        logger.warning(f"Video cover skipped: {result.error}")
+    return result.path
 
 
 async def add_download_task(
@@ -615,6 +633,11 @@ async def download_task(
             file_name, update_cloud_upload_stat, (node, message.id, ui_file_name)
         ):
             node.upload_success_count += 1
+            saved_cover = cover_path(file_name)
+            if os.path.isfile(saved_cover) and not await CloudDrive.upload_sidecar(
+                runtime_app.cloud_drive_config, runtime_app.save_path, saved_cover
+            ):
+                logger.warning("Video uploaded, but its cover upload failed; local JPEG retained.")
 
     await report_bot_download_status(
         node.bot,
@@ -748,6 +771,7 @@ async def download_media(
                         )
                         # 本地完整时不能直接 Success 返回：WebDAV 场景还要继续上传/重传。
                         if runtime_app.cloud_drive_config.upload_adapter != "webdav":
+                            await _prepare_video_cover(file_name, file_name, _media, runtime_app, _type)
                             return DownloadStatus.SuccessDownload, file_name
             else:
                 return DownloadStatus.SkipDownload, None
@@ -793,6 +817,7 @@ async def download_media(
     for retry in range(3):
 
         try:
+            saved_cover = ""
             # 本地终态文件已完整时直接复用，避免 reset_upload 再次走 Telegram 下载。
             if (
                 _is_exist(file_name)
@@ -828,14 +853,16 @@ async def download_media(
                     ),
                 )
 
-            if temp_download_path and _type == "video":
-                reassigned = await _apply_video_category_path(
+            if temp_download_path:
+                _check_download_finish(media_size, temp_download_path, ui_file_name)
+                reassigned = await _apply_resource_category_path(
                     temp_download_path,
                     file_name,
                     message,
                     _media,
                     runtime_app,
                     node,
+                    media_type=_type,
                 )
                 if reassigned:
                     file_name = reassigned
@@ -843,6 +870,7 @@ async def download_media(
                     logger.info(
                         f"Message[{message.id}]: AI 分类后保存路径 -> {file_name}"
                     )
+                saved_cover = await _prepare_video_cover(temp_download_path, file_name, _media, runtime_app, _type)
 
             if runtime_app.cloud_drive_config.upload_adapter == "webdav":
                 logger.info(f"Uploading completed local file to WebDAV: {ui_file_name}")
@@ -874,13 +902,14 @@ async def download_media(
                         continue
                     break
 
+                if saved_cover and not await CloudDrive.upload_sidecar(
+                    runtime_app.cloud_drive_config, runtime_app.save_path, saved_cover
+                ):
+                    logger.warning("Video uploaded, but its cover upload failed; local JPEG retained for retry.")
+
             # Success handling for standard download (outside try block but inside for loop)
             if temp_download_path:
                 if isinstance(temp_download_path, str):
-                    _check_download_finish(
-                        media_size, temp_download_path, ui_file_name
-                    )
-
                     # 下载完整且云端上传成功后才持久化完成态，失败时保留本地文件供重试。
                     verify_and_save_download(
                         node.chat_id,
@@ -890,6 +919,15 @@ async def download_media(
                         node.task_id,
                         node.profile_id,
                     )
+                    if runtime_app.cloud_drive_config.upload_adapter == "webdav":
+                        try:
+                            record = get_download_result().get(node.chat_id, {}).get(message.id, {})
+                            entries = history_entries({node.chat_id: {message.id: record}},
+                                runtime_app.save_path, CloudDrive.get_relative_upload_path)
+                            for entry in entries.values():
+                                catalog_store(runtime_app.cloud_drive_config).put(entry)
+                        except Exception as error:
+                            logger.warning(f"Resource catalog update failed ({type(error).__name__})")
                     clear_upload_auto_retry_count(
                         node.chat_id, message.id, node.profile_id
                     )
@@ -1074,6 +1112,7 @@ async def download_chat_task(
     async for message in messages_iter:  # type: ignore
         meta_data = MetaData()
 
+        capture_source(message, runtime_app, node.chat_id)
         caption = message.caption
         if caption:
             caption = validate_title(caption)

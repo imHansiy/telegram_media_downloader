@@ -283,6 +283,34 @@ class WebDavPreviewRouteTestCase(unittest.TestCase):
             response.headers["Content-Disposition"].split(";", 1)[0],
         )
 
+    def test_saved_cover_is_proxied_as_private_cached_image(self):
+        from tests.module.test_video_cover import jpeg_bytes
+        data = jpeg_bytes()
+        upstream = FakeWebDavResponse(status_code=200,
+            headers={"Content-Type": "image/jpeg", "Content-Length": str(len(data))}, chunks=[data])
+        with mock.patch.object(web, "_app_instance", SimpleNamespace(cloud_drive_config=self.config)), \
+                mock.patch.object(web.requests, "request", return_value=upstream) as request_mock:
+            response = web._flask_app.test_client().get("/api/webdav/preview",
+                query_string={"path": "/TelegramBackup/channel/video.mp4.cover.jpg"}, buffered=True)
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(data, response.data)
+        self.assertEqual("image/jpeg", response.headers["Content-Type"])
+        self.assertEqual("private, max-age=3600", response.headers["Cache-Control"])
+        self.assertTrue(request_mock.call_args.args[1].endswith("video.mp4.cover.jpg"))
+        self.assertEqual((10, 30), request_mock.call_args.kwargs["timeout"])
+        request_mock.assert_called_once()
+
+    def test_missing_cover_is_not_cached_or_replaced_by_video(self):
+        upstream = FakeWebDavResponse(status_code=404)
+        with mock.patch.object(web, "_app_instance", SimpleNamespace(cloud_drive_config=self.config)), \
+                mock.patch.object(web.requests, "request", return_value=upstream) as request_mock:
+            response = web._flask_app.test_client().get("/api/webdav/preview",
+                query_string={"path": "/TelegramBackup/channel/video.mp4.cover.jpg"}, buffered=True)
+        self.assertEqual(404, response.status_code)
+        self.assertEqual("private, no-store", response.headers["Cache-Control"])
+        request_mock.assert_called_once()
+        self.assertTrue(upstream.closed)
+
 
 if __name__ == "__main__":
     unittest.main()

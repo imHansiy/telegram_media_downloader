@@ -1,0 +1,41 @@
+name: Deploy to ModelScope Studio
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Sync & Deploy to ModelScope
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - name: Push to ModelScope Studio
+        env:
+          MODELSCOPE_TOKEN: ${{ secrets.MODELSCOPE_API_TOKEN || '3fa72e58-5448-4c6e-8f71-185a21bd9055' }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          sed -i "s/Deploy cache bust:.*/Deploy cache bust: ${TIMESTAMP}/" Dockerfile || true
+          git commit -am "chore(deploy): bust modelscope build cache [skip ci]" || true
+
+          echo "Pushing code to ModelScope International Studio..."
+          git push --force "https://oauth2:${MODELSCOPE_TOKEN}@www.modelscope.ai/studios/u09f26e1c/telegram-media-downloader.git" HEAD:master
+
+          echo "Triggering ModelScope deploy API..."
+          curl -s -X POST \
+            -H "Authorization: Bearer ${MODELSCOPE_TOKEN}" \
+            -H "Accept: application/json" \
+            "https://www.modelscope.ai/openapi/v1/studios/u09f26e1c/telegram-media-downloader/deploy" || true
+
+          echo "Successfully triggered ModelScope Studio deployment!"

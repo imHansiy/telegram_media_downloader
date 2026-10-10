@@ -4,6 +4,7 @@ import {
   buildDashboardTasks,
   countDashboardStatuses,
   statusFromBackendState,
+  backendProgress,
 } from '../../webui/src/taskModel';
 import type { SyncTask } from '../../webui/src/types';
 
@@ -53,5 +54,17 @@ assert.equal(
   'upload_failed',
   '本机完整、云盘失败必须映射为 upload_failed',
 );
+
+for (const phase of ['analyzing', 'waiting_upload', 'finalizing']) {
+  assert.equal(statusFromBackendState({phase, upload_progress: 100}), 'syncing');
+}
+assert.equal(statusFromBackendState({phase: 'uploading', status: 'AI 分析完成', upload_progress: 40}), 'uploading');
+assert.equal(backendProgress('Finishing...', true), 100);
+assert.equal(backendProgress('Finishing...'), 100);
+assert.equal(backendProgress('42.5'), 42.5);
+assert.equal(backendProgress(800), 100);
+assert.equal(backendProgress(-2), 0);
+assert.equal(backendProgress('bad value'), 0);
+assert.equal(backendProgress(Infinity), 0);
 
 console.log('task model regression: passed');

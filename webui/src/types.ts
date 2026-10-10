@@ -11,34 +11,41 @@ export interface TelegramAccount {
   phoneNumber: string;
   username: string;
   firstName: string;
-  status: 'connected' | 'disconnected' | 'connecting';
+  status: "connected" | "disconnected" | "connecting";
   sessionName: string;
   createdAt: string;
   hasSession?: boolean;
   isRunning?: boolean;
-  runtimeStatus?: 'starting' | 'running' | 'stopping' | 'stopped' | 'error' | string;
+  runtimeStatus?:
+    | "starting"
+    | "running"
+    | "stopping"
+    | "stopped"
+    | "error"
+    | string;
   runtimeMessage?: string;
   botRunning?: boolean;
   runtimeEnabled?: boolean;
   botAccess?: BotAccessConfig;
 }
 
-export type MediaType = 'photo' | 'video' | 'document' | 'audio' | 'voice';
+export type MediaType = "photo" | "video" | "document" | "audio" | "voice";
 
 export interface SyncRule {
   id: string;
-  sourceType: 'channel' | 'group' | 'all';
+  sourceType: "channel" | "group" | "all";
   targetChannels: string[]; // List of telegram usernames or group IDs
   mediaTypes: MediaType[];
   minSizeMb: number;
   maxSizeMb: number;
-  savePathPattern: 'channel_media' | 'channel_date' | 'date_channel';
+  savePathPattern: "channel_media" | "channel_date" | "date_channel";
   autoSync: boolean;
+  generateVideoCovers: boolean;
   dateThreshold: string; // ISO date string
 }
 
 export interface CloudStorageConfig {
-  type: 'webdav' | 'onedrive' | 's3';
+  type: "webdav" | "onedrive" | "s3";
   url: string;
   username: string;
   password?: string;
@@ -48,14 +55,14 @@ export interface CloudStorageConfig {
   uploadRateLimitKb: number; // 0 for unlimited
 }
 
-export type BotAccessMode = 'self' | 'allowed' | 'public';
+export type BotAccessMode = "self" | "allowed" | "public";
 
 export interface BotAccessConfig {
   mode: BotAccessMode;
   allowedUsers: string[];
 }
 
-export type BotStartupNotificationMode = 'off' | 'admin' | 'status_chat';
+export type BotStartupNotificationMode = "off" | "admin" | "status_chat";
 
 export interface VideoClassifierConfig {
   enable: boolean;
@@ -63,20 +70,34 @@ export interface VideoClassifierConfig {
   apiKey: string;
   model: string;
   maxFrames: number;
+  narrativeFrames: number;
   timeoutSec: number;
   maxVideoSizeMb: number;
   minConfidence: number;
+  resourceTypes: import("./library/model").ResourceKind[];
+  transcribe: boolean;
+  shareSourceText: boolean;
+  useSubtitles: boolean;
+  maxAudioSeconds: number;
+  organizeFolders: boolean;
 }
 
 export const defaultVideoClassifier: VideoClassifierConfig = {
   enable: false,
-  apiBase: 'https://api.openai.com/v1',
-  apiKey: '',
-  model: 'gpt-4o-mini',
-  maxFrames: 4,
+  apiBase: "https://api.openai.com/v1",
+  apiKey: "",
+  model: "gpt-4o-mini",
+  maxFrames: 6,
+  narrativeFrames: 24,
   timeoutSec: 60,
   maxVideoSizeMb: 2048,
-  minConfidence: 0.4,
+  minConfidence: 0.65,
+  resourceTypes: ["video", "image", "audio", "document", "archive", "software"],
+  transcribe: false,
+  shareSourceText: false,
+  useSubtitles: false,
+  maxAudioSeconds: 180,
+  organizeFolders: true,
 };
 
 export interface BotStatusConfig {
@@ -95,9 +116,19 @@ export interface SyncTask {
   createdAt: string;
   downloadProgress: number; // 0 to 100
   uploadProgress: number; // 0 to 100
-  status: 'pending' | 'downloading' | 'uploading' | 'syncing' | 'completed' | 'paused' | 'failed' | 'upload_failed';
+  phase?: string; // Backend-verified workflow stage, independent of byte percentages.
+  phaseLabel?: string;
+  status:
+    | "pending"
+    | "downloading"
+    | "uploading"
+    | "syncing"
+    | "completed"
+    | "paused"
+    | "failed"
+    | "upload_failed";
   aiStatus?: string; // AI 分类阶段：抽帧中 / 语音转写中 / AI 识图中 / 分类完成:nsfw/子类
-  aiSummary?: string; // AI 生成的视频一句话简介（基于转写文本）
+  aiSummary?: string; // 按内容分类生成的资源简介
   aiTags?: string[]; // AI 内容标签
   speedKb: number; // Download / Upload current combined transfer speed
   remotePath: string; // Target location on cloud drive

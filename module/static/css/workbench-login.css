@@ -1,0 +1,183 @@
+:root {
+  font-family:
+    "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Segoe UI",
+    sans-serif;
+  color: #202b3d;
+  background: #f4f6fa;
+  color-scheme: light;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+button,
+input {
+  font: inherit;
+}
+button {
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+:focus-visible {
+  outline: 3px solid #3664d9;
+  outline-offset: 3px;
+}
+.login-surface {
+  width: min(448px, calc(100% - 36px));
+  margin: 0 auto;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 36px 0 70px;
+}
+.login-brand {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 11px;
+  color: inherit;
+  text-decoration: none;
+  font-size: 18px;
+  font-weight: 700;
+  margin-bottom: 32px;
+}
+.login-brand > span {
+  display: grid;
+  place-items: center;
+  background: #3664d9;
+  color: white;
+  width: 41px;
+  height: 41px;
+  border-radius: 11px;
+  font-size: 27px;
+}
+.login-brand small {
+  display: block;
+  color: #647187;
+  font-size: 9px;
+  letter-spacing: 0.13em;
+  margin-top: 4px;
+}
+.login-panel {
+  background: white;
+  border: 1px solid #e2e7ef;
+  padding: 34px;
+  border-radius: 15px;
+  box-shadow: 0 12px 36px #1d2f4908;
+}
+.login-mark {
+  width: 47px;
+  height: 47px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: #eaf0ff;
+  color: #3664d9;
+  margin-bottom: 23px;
+}
+h1 {
+  margin: 0;
+  font-size: 27px;
+  line-height: 1.5;
+  letter-spacing: -0.025em;
+}
+.login-description {
+  color: #647187;
+  font-size: 14px;
+  line-height: 1.8;
+  margin: 10px 0 27px;
+}
+form label {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 9px;
+}
+.password-field {
+  display: flex;
+  align-items: center;
+  border: 1px solid #d8dfeb;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.password-field:focus-within {
+  border-color: #3664d9;
+  box-shadow: 0 0 0 3px #eaf0ff;
+}
+.password-field input {
+  width: 100%;
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 14px;
+  font-size: 15px;
+  outline: 0;
+}
+.password-field button {
+  flex-shrink: 0;
+  border: 0;
+  background: transparent;
+  color: #647187;
+  font-size: 12px;
+  padding: 13px;
+}
+#login-submit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  min-height: 46px;
+  background: #3664d9;
+  color: white;
+  font-size: 15px;
+  font-weight: 600;
+  padding: 12px;
+  margin-top: 20px;
+}
+#login-submit:hover:not(:disabled) {
+  background: #2853bf;
+}
+#login-error {
+  background: #fff0f1;
+  color: #b93748;
+  padding: 10px 12px;
+  border-radius: 7px;
+  font-size: 13px;
+  line-height: 1.7;
+  margin: 13px 0;
+}
+.login-note {
+  color: #647187;
+  font-size: 12px;
+  line-height: 1.8;
+  border-top: 1px solid #e2e7ef;
+  padding-top: 20px;
+  margin: 23px 0 0;
+}
+@media (max-width: 480px) {
+  .login-panel {
+    padding: 26px;
+  }
+  h1 {
+    font-size: 24px;
+  }
+  .login-surface {
+    padding-bottom: 36px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  * {
+    scroll-behavior: auto !important;
+  }
+}

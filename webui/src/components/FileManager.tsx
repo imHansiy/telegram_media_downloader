@@ -1,595 +1,1154 @@
-/**
- * WebDAV 实时文件浏览器（完全重构版）。
- *
- * 数据流：
- *   /api/webdav/browse  → 目录列表（文件夹 + 文件）
- *   /api/webdav/summary → 选中文件时按远程路径补拉 AI 简介
- *   /api/webdav/preview → 预览/下载代理（路径 = browse 返回的 entry.path 前加 root）
- */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowUpRight, Calendar, ChevronLeft, ChevronRight, Clock, Copy, Check,
-  Eye, FileText, Folder, FolderOpen, HardDrive, Image as ImageIcon,
-  LayoutGrid, List, Mic, Music, RefreshCw, Search, Video, X,
-} from 'lucide-react';
-import { MediaType } from '../types';
+  Heart,
+  History,
+  Grid2X2,
+  Search,
+  X,
+  EyeOff,
+  Eye,
+  FolderOpen,
+  RefreshCw,
+  ChevronLeft,
+  ChevronRight,
+  Info,
+  Play,
+  Trash2,
+  Pause,
+  SlidersHorizontal,
+} from "lucide-react";
+import { libraryRequest } from "../library/api";
+import { useLibraryActivity } from "../library/activity";
+import {
+  LibraryResponse,
+  ResourceEntry,
+  Taxonomy,
+  formatSize,
+  formatDuration,
+  historyDay,
+  kindLabels,
+  parentPath,
+} from "../library/model";
+import { ResourceCover, CoverScope } from "../library/ResourceCover";
+import { HoverPreview } from "../library/HoverPreview";
+import { ResourceDetails, ResourcePreview } from "../library/ResourceDetails";
+import { ResourceDeleteDialog } from "../library/ResourceDeleteDialog";
+import { DirectoryBrowser } from "../library/DirectoryBrowser";
+import { Modal } from "./ui/Modal";
 
-/* ---------- 类型 ---------- */
-
-interface DavEntry {
-  name: string;
-  path: string;
-}
-
-interface DavFileEntry extends DavEntry {
-  size: number;
-  modified: string;
-  content_type: string;
-}
-
-interface BrowseResult {
-  success: boolean;
-  path: string;
-  root?: string;
-  folders: DavEntry[];
-  files: DavFileEntry[];
-  message?: string;
-}
-
-interface FileMeta {
-  entry: DavFileEntry;
-  type: MediaType;
-  summary: string;
-  summaryLoading: boolean;
+type Scope = "adult" | "movie" | "other";
+type View = "all" | "favorites" | "history";
+interface Filters {
+  view: View;
+  category: string;
+  subtype: string;
+  kind: string;
+  status: string;
   tags: string[];
-  tagsLoading: boolean;
+  search: string;
+  tagSearch: string;
+  sort: string;
+  page: number;
+  historyKind: "opened" | "watched";
+  scroll: number;
 }
-
-/* ---------- 工具 ---------- */
-
-function formatSize(bytes: number): string {
-  if (bytes <= 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  return `${(bytes / 1024 ** i).toFixed(i === 0 ? 0 : 2)} ${units[i]}`;
+const defaults = (): Filters => ({
+  view: "all",
+  category: "",
+  subtype: "",
+  kind: "",
+  status: "",
+  tags: [],
+  search: "",
+  tagSearch: "",
+  sort: "newest",
+  page: 1,
+  historyKind: "opened",
+  scroll: 0,
+});
+// Navigation continuity is memory-only; favorites/history live on the server.
+let saved = {
+  scope: "adult" as Scope,
+  filters: { adult: defaults(), movie: defaults(), other: defaults() },
+};
+function useDebounced(value: string) {
+  const [result, setResult] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setResult(value), 220);
+    return () => clearTimeout(timer);
+  }, [value]);
+  return result;
 }
-
-function formatDate(gmt: string): string {
-  if (!gmt) return '-';
-  const d = new Date(gmt);
-  if (Number.isNaN(d.getTime())) return '-';
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-}
-
-const VIDEO_EXT = ['mp4', 'mkv', 'mov', 'avi', 'webm', 'ts', 'flv', 'wmv'];
-const IMAGE_EXT = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'avif'];
-const AUDIO_EXT = ['mp3', 'flac', 'wav', 'm4a', 'aac'];
-const VOICE_EXT = ['ogg', 'oga', 'opus'];
-
-function extOf(name: string): string {
-  const idx = name.lastIndexOf('.');
-  return idx >= 0 ? name.slice(idx + 1).toLowerCase() : '';
-}
-
-function mediaTypeOf(entry: DavFileEntry): MediaType {
-  const ext = extOf(entry.name);
-  if (VIDEO_EXT.includes(ext)) return 'video';
-  if (IMAGE_EXT.includes(ext)) return 'photo';
-  if (VOICE_EXT.includes(ext)) return 'voice';
-  if (AUDIO_EXT.includes(ext)) return 'audio';
-  return 'document';
-}
-
-function typeIcon(type: MediaType, cls = 'w-4 h-4') {
-  switch (type) {
-    case 'video': return <Video className={`${cls} text-indigo-400`} />;
-    case 'photo': return <ImageIcon className={`${cls} text-emerald-400`} />;
-    case 'audio': return <Music className={`${cls} text-amber-400`} />;
-    case 'voice': return <Mic className={`${cls} text-rose-400`} />;
-    default: return <FileText className={`${cls} text-sky-400`} />;
-  }
-}
-
-function previewUrl(root: string | undefined, entryPath: string, download = false): string {
-  const full = root ? `${root}/${entryPath}` : entryPath;
-  const q = new URLSearchParams({ path: `/${full}` });
-  if (download) q.set('download', '1');
-  return `/api/webdav/preview?${q.toString()}`;
-}
-
-/* ---------- 主组件 ---------- */
 
 export function FileManager() {
-  const [path, setPath] = useState<string[]>([]);       // 当前目录（相对 remote_dir 的段）
-  const [root, setRoot] = useState<string>('');         // remote_dir，预览 URL 前缀
-  const [folders, setFolders] = useState<DavEntry[]>([]);
-  const [files, setFiles] = useState<DavFileEntry[]>([]);
+  const [scope, setScope] = useState<Scope>(saved.scope);
+  const [filters, setFilters] = useState(saved.filters);
+  const filter = filters[scope];
+  const [taxonomy, setTaxonomy] = useState<Taxonomy | null>(null);
+  const [taxonomyError, setTaxonomyError] = useState("");
+  const [data, setData] = useState<LibraryResponse>({ files: [], root: "" });
+  const [loaded, setLoaded] = useState("");
+  const [loadedScope, setLoadedScope] = useState<Scope | null>(null);
+  const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [search, setSearch] = useState('');
-  const [view, setView] = useState<'grid' | 'list'>('grid');
-  const [selected, setSelected] = useState<FileMeta | null>(null);
-  const [preview, setPreview] = useState<FileMeta | null>(null);
-
-  /* 目录加载 */
-  const load = useCallback(async (segs: string[]) => {
-    setLoading(true);
-    setError('');
-    try {
-      const resp = await fetch(`/api/webdav/browse?path=${encodeURIComponent(segs.join('/'))}`);
-      const data: BrowseResult = await resp.json();
-      if (!data.success) throw new Error(data.message || '目录读取失败');
-      setRoot(data.root || '');
-      setFolders(data.folders || []);
-      setFiles(data.files || []);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      setFolders([]);
-      setFiles([]);
-    } finally {
-      setLoading(false);
-    }
+  const [revision, setRevision] = useState(0);
+  const [filterPanel, setFilterPanel] = useState(false);
+  const [privateMode, setPrivateMode] = useState(
+    () => localStorage.getItem("library_privacy") === "true",
+  );
+  const [directory, setDirectory] = useState<string | null>(null);
+  const [detail, setDetail] = useState<{
+    entry: ResourceEntry;
+    root: string;
+  } | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [deleting, setDeleting] = useState<ResourceEntry | null>(null);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [hover, setHover] = useState<{
+    entry: ResourceEntry;
+    anchor: HTMLElement;
+  } | null>(null);
+  const timers = useRef<{
+    enter?: ReturnType<typeof setTimeout>;
+    leave?: ReturnType<typeof setTimeout>;
+  }>({});
+  const scroll = useRef<HTMLDivElement>(null);
+  const focusedCard = useRef<HTMLElement | null>(null);
+  const scrollPosition = useRef(filter.scroll);
+  const activity = useLibraryActivity();
+  const query = useDebounced(filter.search);
+  const tagQuery = useDebounced(filter.tagSearch);
+  const refresh = useCallback(() => setRevision((value) => value + 1), []);
+  const closeHover = useCallback(() => {
+    clearTimeout(timers.current.enter);
+    clearTimeout(timers.current.leave);
+    setHover(null);
   }, []);
-
-  useEffect(() => { load(path); }, [path, load]);
-
-  /* 选中：附上 AI 简介与标签（异步补拉） */
-  const select = useCallback(async (entry: DavFileEntry) => {
-    setSelected({ entry, type: mediaTypeOf(entry), summary: '', summaryLoading: true, tags: [], tagsLoading: true });
-    try {
-      const resp = await fetch(`/api/webdav/summary?path=${encodeURIComponent(entry.path)}`);
-      const data = await resp.json();
-      const summary = data && data.success ? data.ai_summary || '' : '';
-      const tags = data && data.success ? data.ai_tags || [] : [];
-      setSelected(prev => (prev && prev.entry.path === entry.path ? { ...prev, summary, summaryLoading: false, tags, tagsLoading: false } : prev));
-    } catch {
-      setSelected(prev => (prev && prev.entry.path === entry.path ? { ...prev, summaryLoading: false, tagsLoading: false } : prev));
-    }
-  }, []);
-
-  const enter = (folder: DavEntry) => setPath(folder.path.split('/').filter(Boolean));
-  const goRoot = () => setPath([]);
-  const goUp = () => setPath(p => p.slice(0, -1));
-  const goTo = (i: number) => setPath(p => p.slice(0, i + 1));
-  const openPreview = (entry: DavFileEntry) => {
-    select(entry);
-    setPreview({ entry, type: mediaTypeOf(entry), summary: '', summaryLoading: true, tags: [], tagsLoading: true });
+  const askDelete = (entry: ResourceEntry) => {
+    closeHover();
+    setPlaying(false);
+    setDetail(null);
+    setDirectory(null);
+    setDeleting(entry);
   };
-
-  /* 搜索过滤（仅当前目录内） */
-  const q = search.trim().toLowerCase();
-  const visibleFolders = useMemo(() => (q ? folders.filter(f => f.name.toLowerCase().includes(q)) : folders), [folders, q]);
-  const visibleFiles = useMemo(() => (q ? files.filter(f => f.name.toLowerCase().includes(q)) : files), [files, q]);
+  const keepHover = () => {
+    clearTimeout(timers.current.enter);
+    clearTimeout(timers.current.leave);
+  };
+  const leaveHover = () => {
+    clearTimeout(timers.current.enter);
+    clearTimeout(timers.current.leave);
+    timers.current.leave = setTimeout(() => setHover(null), 220);
+  };
+  const scheduleHover = (
+    entry: ResourceEntry,
+    anchor: HTMLElement,
+    immediate = false,
+  ) => {
+    keepHover();
+    if (immediate) setHover({ entry, anchor });
+    else
+      timers.current.enter = setTimeout(() => setHover({ entry, anchor }), 320);
+  };
+  const update = (patch: Partial<Filters>) => {
+    closeHover();
+    scrollPosition.current = 0;
+    setFilters((values) => ({
+      ...values,
+      [scope]: { ...values[scope], page: 1, scroll: 0, ...patch },
+    }));
+  };
+  const switchScope = (next: Scope) => {
+    closeHover();
+    setFilters((values) => ({
+      ...values,
+      [scope]: { ...values[scope], scroll: scrollPosition.current },
+    }));
+    scrollPosition.current = filters[next].scroll;
+    setScope(next);
+  };
+  const toggleTag = (tag: string) =>
+    update({
+      tags: filter.tags.includes(tag)
+        ? filter.tags.filter((item) => item !== tag)
+        : [...filter.tags, tag],
+    });
+  const snapshot = useRef(saved);
+  snapshot.current = { scope, filters };
+  useEffect(
+    () => () => {
+      const current = snapshot.current;
+      saved = {
+        ...current,
+        filters: {
+          ...current.filters,
+          [current.scope]: {
+            ...current.filters[current.scope],
+            scroll: scrollPosition.current,
+          },
+        },
+      };
+      clearTimeout(timers.current.enter);
+      clearTimeout(timers.current.leave);
+    },
+    [],
+  );
+  useEffect(() => {
+    localStorage.setItem("library_privacy", String(privateMode));
+  }, [privateMode]);
+  useEffect(() => {
+    const controller = new AbortController();
+    libraryRequest<Taxonomy>("/api/library/taxonomy", {
+      signal: controller.signal,
+    })
+      .then((value) => {
+        if (!controller.signal.aborted) {
+          setTaxonomy(value);
+          setTaxonomyError("");
+        }
+      })
+      .catch((reason) => {
+        if (!controller.signal.aborted) setTaxonomyError(reason.message);
+      });
+    return () => controller.abort();
+  }, [revision]);
+  const endpoint = useMemo(() => {
+    const params = new URLSearchParams({
+      scope,
+      view: filter.view,
+      category: filter.category,
+      subtype: filter.subtype,
+      kind: filter.kind,
+      status: filter.status,
+      q: query,
+      tag_q: tagQuery,
+      sort: filter.sort,
+      page: String(filter.page),
+      page_size: "48",
+      history_kind: filter.historyKind,
+    });
+    filter.tags.forEach((tag) => params.append("tag", tag));
+    return "/api/library?" + params;
+  }, [scope, filter, query, tagQuery]);
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setError("");
+    closeHover();
+    const epoch = activity.version.current;
+    libraryRequest<LibraryResponse>(endpoint, { signal: controller.signal })
+      .then((result) => {
+        if (controller.signal.aborted) return;
+        setData(result);
+        setLoadedScope(scope);
+        setLoaded(endpoint);
+        activity.hydrate(result.files, !!result.paused, epoch);
+      })
+      .catch((reason) => {
+        if (!controller.signal.aborted) {
+          setError(reason.message);
+          setLoaded(endpoint);
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [endpoint, revision, closeHover, activity.hydrate]);
+  const pending =
+    loading ||
+    loaded !== endpoint ||
+    query !== filter.search ||
+    tagQuery !== filter.tagSearch;
+  useEffect(() => {
+    if (!pending && scroll.current)
+      scroll.current.scrollTop = scrollPosition.current;
+  }, [pending]);
+  const resolved = (entry: ResourceEntry): ResourceEntry => ({
+    ...entry,
+    activity: activity.overrides[entry.path] ?? entry.activity,
+  });
+  const favorite = async (entry: ResourceEntry) => {
+    if (
+      await activity.mutate({
+        action: "favorite",
+        path: entry.path,
+        value: !resolved(entry).activity?.favorite,
+      })
+    ) {
+      if (filter.view === "favorites") refresh();
+    }
+  };
+  const open = (entry: ResourceEntry, root = data.root, play = false) => {
+    focusedCard.current = document.activeElement as HTMLElement;
+    closeHover();
+    setDirectory(null);
+    setDetail({ entry, root });
+    setPlaying(play);
+    void activity.mutate({ action: "open", path: entry.path });
+  };
+  const closeDetail = () => {
+    setDetail(null);
+    setPlaying(false);
+    if (filter.view === "history") refresh();
+    requestAnimationFrame(() => {
+      if (focusedCard.current?.isConnected) focusedCard.current.focus();
+    });
+  };
+  const clearFilters = () =>
+    update({
+      category: "",
+      subtype: "",
+      kind: "",
+      status: "",
+      search: "",
+      tagSearch: "",
+      tags: [],
+    });
+  const categories =
+    scope === "adult"
+      ? taxonomy?.adult_subtypes || []
+      : scope === "other"
+        ? taxonomy?.categories.filter(
+            (item) => !["adult", "movie"].includes(item.id),
+          ) || []
+        : [];
+  const activeCategory = scope === "adult" ? filter.subtype : filter.category;
+  const hasFilters = !!(
+    activeCategory ||
+    filter.kind ||
+    filter.status ||
+    filter.tags.length ||
+    filter.search
+  );
+  const tagFacets = loadedScope === scope ? data.tag_facets || [] : [];
+  const visibleTags = tagFacets.filter(
+    (tag) => !filter.tags.includes(tag.name),
+  );
+  const extraFilterCount = Number(!!filter.kind) + Number(!!filter.status);
+  const files = data.files.map(resolved);
+  const groups = new Map<string, ResourceEntry[]>();
+  if (filter.view === "history")
+    for (const entry of files) {
+      const day = historyDay(
+        entry.activity?.[
+          filter.historyKind === "opened" ? "opened_at" : "watched_at"
+        ],
+      );
+      groups.set(day, [...(groups.get(day) || []), entry]);
+    }
+  const favoriteButton = (entry: ResourceEntry) => (
+    <button
+      className="poster-favorite"
+      disabled={activity.pending.has(entry.path)}
+      aria-label={
+        (entry.activity?.favorite ? "取消收藏 " : "收藏 ") +
+        (privateMode ? "此资源" : entry.name)
+      }
+      aria-pressed={!!entry.activity?.favorite}
+      onClick={() => void favorite(entry)}
+    >
+      <Heart
+        size={21}
+        fill={entry.activity?.favorite ? "currentColor" : "none"}
+      />
+    </button>
+  );
 
   return (
-    <div className="flex flex-col lg:flex-row gap-4 h-auto lg:h-[calc(100vh-220px)] lg:min-h-[520px] animate-fadeIn">
-
-      {/* 主浏览面板 */}
-      <div className="flex-1 flex flex-col bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-xl min-w-0">
-
-        {/* 顶部：搜索 + 视图切换 */}
-        <div className="bg-slate-950/70 p-3 border-b border-slate-800 flex flex-col sm:flex-row gap-3 items-stretch sm:items-center justify-between shrink-0">
-          <div className="relative max-w-xs w-full sm:w-64">
-            <Search className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none text-slate-500 w-3.5 h-3.5" />
-            <input
-              id="files-browser-search"
-              type="text"
-              className="block w-full pl-8 pr-3 py-1.5 bg-slate-900 border border-slate-700/80 rounded-lg text-xs text-slate-300 placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition-colors"
-              placeholder="过滤当前目录…"
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-            />
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              id="btn-refresh-dir"
-              onClick={() => load(path)}
-              className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
-              title="刷新目录"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin text-indigo-400' : ''}`} />
-            </button>
-            <div className="flex bg-slate-900 p-0.5 rounded-lg border border-slate-800 shrink-0">
-              <button
-                id="btn-view-grid"
-                onClick={() => setView('grid')}
-                className={`p-1.5 rounded transition-all cursor-pointer ${view === 'grid' ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-slate-300'}`}
-                title="图标视图"
-              ><LayoutGrid className="w-3.5 h-3.5" /></button>
-              <button
-                id="btn-view-list"
-                onClick={() => setView('list')}
-                className={`p-1.5 rounded transition-all cursor-pointer ${view === 'list' ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-slate-300'}`}
-                title="列表视图"
-              ><List className="w-3.5 h-3.5" /></button>
-            </div>
-          </div>
-        </div>
-
-        {/* 面包屑 */}
-        <div className="bg-slate-950/20 px-4 py-2 border-b border-slate-800/70 text-xs flex items-center gap-1.5 overflow-x-auto scrollbar-none select-none shrink-0">
-          <button
-            id="btn-breadcrumb-root"
-            onClick={goRoot}
-            className={`hover:text-indigo-400 px-1 py-0.5 rounded transition-colors cursor-pointer flex items-center gap-1 font-medium shrink-0 ${path.length === 0 ? 'text-slate-100' : 'text-slate-400'}`}
-          >
-            <HardDrive className="w-3.5 h-3.5" />
-            云盘根目录
-          </button>
-          {path.map((seg, i) => (
-            <span key={i} className="flex items-center gap-1.5 shrink-0">
-              <ChevronRight className="w-3 h-3 text-slate-600" />
-              {i === path.length - 1 ? (
-                <span className="text-slate-100 font-semibold px-1 py-0.5 bg-slate-800 border border-slate-700 rounded max-w-[200px] truncate">{seg}</span>
-              ) : (
+    <CoverScope.Provider value={data.scope_id || data.root}>
+      <div className="cinema-library" data-scope={scope}>
+        <header className="cinema-header">
+          <div className="cinema-primary">
+            <nav className="library-scopes" aria-label="片库切换">
+              {(
+                [
+                  ["adult", "NSFW"],
+                  ["movie", "电影"],
+                  ["other", "其他资源"],
+                ] as const
+              ).map(([id, name]) => (
                 <button
-                  id={`btn-breadcrumb-${seg}`}
-                  onClick={() => goTo(i)}
-                  className="hover:text-indigo-400 px-1 py-0.5 rounded transition-colors cursor-pointer text-slate-400 max-w-[140px] truncate"
-                >{seg}</button>
-              )}
-            </span>
-          ))}
-          {path.length > 0 && (
-            <button
-              id="btn-dir-up"
-              onClick={goUp}
-              className="ml-auto flex items-center gap-1 px-2 py-0.5 text-[10px] font-bold text-indigo-400 hover:text-indigo-300 bg-slate-950 border border-slate-800 rounded transition-colors cursor-pointer shrink-0"
-            >
-              <ChevronLeft className="w-3 h-3" /> 上一级
-            </button>
-          )}
-        </div>
-
-        {/* 内容区 */}
-        <div className="flex-1 overflow-y-auto p-4 custom-scrollbar bg-slate-950/15">
-          {loading ? (
-            <div className="h-full flex flex-col items-center justify-center gap-3 py-16">
-              <Clock className="w-10 h-10 text-indigo-400/70 animate-pulse" />
-              <p className="text-xs text-slate-400 font-medium">正在读取云端目录…</p>
-            </div>
-          ) : error ? (
-            <div className="h-full flex flex-col items-center justify-center gap-3 py-16">
-              <FolderOpen className="w-12 h-12 text-rose-400/70" />
-              <p className="text-xs font-semibold text-rose-400">目录读取失败</p>
-              <p className="text-[10px] text-slate-500 max-w-sm break-all">{error}</p>
-              <button onClick={() => load(path)} className="mt-1 text-[10px] font-bold text-indigo-400 hover:underline cursor-pointer">重试</button>
-            </div>
-          ) : visibleFolders.length === 0 && visibleFiles.length === 0 ? (
-            <div className="h-full flex flex-col items-center justify-center gap-2 py-16 text-center">
-              <FolderOpen className="w-12 h-12 text-slate-700" />
-              <h4 className="text-xs font-semibold text-slate-400">
-                {search ? '没有匹配的条目' : '这是一个空目录'}
-              </h4>
-              {search && (
-                <button onClick={() => setSearch('')} className="mt-1 text-[10px] font-bold text-indigo-400 hover:underline cursor-pointer">
-                  清除过滤词
-                </button>
-              )}
-            </div>
-          ) : view === 'grid' ? (
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-              {visibleFolders.map(folder => (
-                <button
-                  key={folder.path}
-                  id={`folder-card-${folder.name}`}
-                  onClick={() => enter(folder)}
-                  className="text-left p-3.5 bg-slate-900 border border-slate-800 hover:border-indigo-500/40 rounded-xl space-y-3 cursor-pointer select-none transition-all hover:scale-[1.02] group shadow-sm"
+                  key={id}
+                  aria-pressed={scope === id}
+                  onClick={() => switchScope(id)}
                 >
-                  <div className="flex items-start justify-between">
-                    <div className="p-2.5 rounded-xl bg-indigo-500/5 group-hover:bg-indigo-500/10 border border-indigo-500/10 text-indigo-400 transition-colors">
-                      <Folder className="w-6 h-6" />
-                    </div>
-                  </div>
-                  <p className="text-xs font-semibold text-slate-200 truncate" title={folder.name}>{folder.name}</p>
+                  {name}
                 </button>
               ))}
-              {visibleFiles.map(file => (
-                <div
-                  key={file.path}
-                  id={`file-card-${file.name}`}
-                  onClick={() => select(file)}
-                  onDoubleClick={() => openPreview(file)}
-                  className={`p-3 bg-slate-900 border rounded-xl space-y-3 cursor-pointer select-none transition-all group hover:scale-[1.01] ${
-                    selected?.entry.path === file.path
-                      ? 'border-indigo-500/80 ring-1 ring-indigo-500/20'
-                      : 'border-slate-800 hover:border-slate-700'
-                  }`}
+            </nav>
+            <label className="cinema-search">
+              <Search size={19} />
+              <input
+                aria-label="搜索资源"
+                placeholder="搜索标题、标签、文件名"
+                value={filter.search}
+                onChange={(event) => update({ search: event.target.value })}
+              />
+              {filter.search && (
+                <button
+                  className="icon-button"
+                  aria-label="清空搜索"
+                  onClick={() => update({ search: "" })}
                 >
-                  <div className="flex items-start justify-between">
-                    <div className="p-2 bg-slate-950 border border-slate-800 rounded-lg shrink-0">{typeIcon(mediaTypeOf(file))}</div>
-                    <span className="text-[9px] font-mono text-slate-500">{formatSize(file.size)}</span>
-                  </div>
-                  <p className="text-xs text-slate-300 font-medium truncate" title={file.name}>{file.name}</p>
-                  <div className="flex gap-1.5">
+                  <X size={16} />
+                </button>
+              )}
+            </label>
+            <nav aria-label="资源视图" className="cinema-views">
+              {(
+                [
+                  { id: "all", label: "全部资源", Icon: Grid2X2 },
+                  { id: "favorites", label: "收藏", Icon: Heart },
+                  { id: "history", label: "历史记录", Icon: History },
+                ] as const
+              ).map(({ id, label, Icon }) => (
+                <button
+                  key={id}
+                  aria-label={label}
+                  title={label}
+                  aria-current={filter.view === id ? "page" : undefined}
+                  onClick={() => update({ view: id })}
+                >
+                  <Icon size={18} />
+                  <span>{label}</span>
+                </button>
+              ))}
+            </nav>
+            <span className="result-count" aria-live="polite">
+              {pending ? "读取中…" : (data.total || 0) + " 项"}
+            </span>
+            <div className="library-tools">
+              {hasFilters && (
+                <button
+                  className="icon-button clear-filters"
+                  aria-label="清除筛选"
+                  title="清除筛选"
+                  onClick={clearFilters}
+                >
+                  <X size={17} />
+                </button>
+              )}
+              <button
+                className="icon-button privacy-toggle"
+                aria-label="隐私模式"
+                title={privateMode ? "关闭隐私模式" : "开启隐私模式"}
+                aria-pressed={privateMode}
+                onClick={() => {
+                  closeHover();
+                  setPrivateMode((value) => !value);
+                }}
+              >
+                {privateMode ? <EyeOff size={18} /> : <Eye size={18} />}
+              </button>
+              <button
+                className="icon-button library-filter-toggle"
+                aria-label="筛选与排序"
+                title="筛选、排序与来源目录"
+                aria-haspopup="dialog"
+                aria-expanded={filterPanel}
+                onClick={() => {
+                  closeHover();
+                  setFilterPanel(true);
+                }}
+              >
+                <SlidersHorizontal size={18} />
+                {extraFilterCount > 0 && (
+                  <span className="filter-badge">{extraFilterCount}</span>
+                )}
+              </button>
+            </div>
+          </div>
+          <section className="quick-filters" aria-label="分类和标签筛选">
+            {categories.length > 0 && (
+              <div className="quick-filter-row">
+                <span className="filter-caption">分类</span>
+                <div className="filter-options categories">
+                  <button
+                    className="filter-chip"
+                    aria-pressed={!activeCategory}
+                    onClick={() => update({ subtype: "", category: "" })}
+                  >
+                    全部
+                  </button>
+                  {categories.map((item) => (
                     <button
-                      onClick={e => { e.stopPropagation(); openPreview(file); }}
-                      className="flex-1 py-1 px-2 bg-indigo-500/10 hover:bg-indigo-500/20 text-[10px] text-indigo-400 font-semibold rounded border border-indigo-500/20 flex items-center justify-center gap-1 transition-all cursor-pointer"
-                    ><Eye className="w-3 h-3" />预览</button>
-                    <a
-                      href={previewUrl(root, file.path)}
-                      target="_blank"
-                      rel="noreferrer"
-                      onClick={e => e.stopPropagation()}
-                      className="p-1.5 bg-slate-950 border border-slate-800 hover:bg-slate-900 text-slate-400 hover:text-white rounded transition-colors"
-                      title="新窗口打开"
-                    ><ArrowUpRight className="w-3.5 h-3.5" /></a>
-                  </div>
+                      key={item.id}
+                      className="filter-chip"
+                      aria-pressed={activeCategory === item.id}
+                      onClick={() =>
+                        update(
+                          scope === "adult"
+                            ? {
+                                subtype:
+                                  activeCategory === item.id ? "" : item.id,
+                              }
+                            : {
+                                category:
+                                  activeCategory === item.id ? "" : item.id,
+                              },
+                        )
+                      }
+                    >
+                      {item.label}
+                    </button>
+                  ))}
                 </div>
+              </div>
+            )}
+            {(tagFacets.length > 0 ||
+              filter.tags.length > 0 ||
+              filter.tagSearch) && (
+              <div className="quick-filter-row">
+                <span className="filter-caption">标签</span>
+                <div className="filter-options tags">
+                  {filter.tags.map((tag) => (
+                    <button
+                      key={tag}
+                      className="filter-chip"
+                      aria-pressed="true"
+                      aria-label={"移除标签 " + tag}
+                      onClick={() => toggleTag(tag)}
+                    >
+                      {tag}
+                      <X size={13} />
+                    </button>
+                  ))}
+                  {visibleTags.slice(0, 8).map((tag) => (
+                    <button
+                      key={tag.name}
+                      className="filter-chip"
+                      aria-pressed={filter.tags.includes(tag.name)}
+                      onClick={() => toggleTag(tag.name)}
+                    >
+                      {tag.name}
+                      <small>{tag.count}</small>
+                    </button>
+                  ))}
+                  {!pending && filter.tagSearch && !tagFacets.length && (
+                    <span className="filter-hint">没有匹配的标签</span>
+                  )}
+                  <button
+                    className="text-button tag-search-toggle"
+                    onClick={() => {
+                      closeHover();
+                      setFilterPanel(true);
+                    }}
+                  >
+                    <Search size={14} />
+                    {visibleTags.length > 8 ? "更多标签" : "查找标签"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </section>
+          {filter.view === "history" && (
+            <div className="history-toolbar">
+              <div className="history-tabs">
+                <button
+                  aria-pressed={filter.historyKind === "opened"}
+                  onClick={() => update({ historyKind: "opened" })}
+                >
+                  最近打开
+                </button>
+                <button
+                  aria-pressed={filter.historyKind === "watched"}
+                  onClick={() => update({ historyKind: "watched" })}
+                >
+                  观看记录
+                </button>
+              </div>
+              <button
+                className="button"
+                disabled={activity.pending.has("pause")}
+                aria-pressed={activity.paused}
+                onClick={() =>
+                  void activity.mutate({
+                    action: "pause",
+                    value: !activity.paused,
+                  })
+                }
+              >
+                {activity.paused ? <Play size={15} /> : <Pause size={15} />}{" "}
+                {activity.paused ? "恢复记录" : "暂停记录"}
+              </button>
+              <button className="button" onClick={() => setConfirmClear(true)}>
+                <Trash2 size={15} />
+                清空记录
+              </button>
+            </div>
+          )}
+          {(taxonomyError || activity.error) && (
+            <p role="alert" className="notice error">
+              {taxonomyError || activity.error}
+              <button
+                className="text-button"
+                onClick={() => {
+                  activity.setError("");
+                  refresh();
+                }}
+              >
+                重新读取
+              </button>
+            </p>
+          )}
+          {activity.paused && (
+            <p className="history-paused" role="status">
+              历史记录已暂停，收藏不受影响。
+              <button
+                className="text-button"
+                onClick={() =>
+                  void activity.mutate({ action: "pause", value: false })
+                }
+              >
+                恢复记录
+              </button>
+            </p>
+          )}
+        </header>
+        <div
+          className="cinema-scroll"
+          ref={scroll}
+          aria-label="资源列表"
+          aria-busy={pending}
+          onScroll={(event) => {
+            if (!pending)
+              scrollPosition.current = event.currentTarget.scrollTop;
+          }}
+        >
+          {error ? (
+            <div className="empty-state" role="alert">
+              <FolderOpen size={36} />
+              <h2>暂时无法读取资源</h2>
+              <p>{error}</p>
+              <button className="button primary" onClick={refresh}>
+                重新加载
+              </button>
+            </div>
+          ) : pending ? (
+            <div
+              className="poster-grid"
+              role="status"
+              aria-label="正在读取资源"
+            >
+              {Array.from({ length: 12 }, (_, index) => (
+                <div key={index} className="poster-skeleton" />
+              ))}
+            </div>
+          ) : !files.length ? (
+            <div className="empty-state">
+              <FolderOpen size={38} />
+              <h2>
+                {hasFilters
+                  ? "没有匹配的资源"
+                  : filter.view === "favorites"
+                    ? "还没有收藏"
+                    : filter.view === "history"
+                      ? "还没有历史记录"
+                      : "此片库还没有资源"}
+              </h2>
+              <p>
+                {filter.view === "favorites"
+                  ? "点击卡片上的爱心收藏，之后可在这里继续筛选。"
+                  : filter.view === "history"
+                    ? "打开详情或播放后记录会出现在这里；悬停不会留下记录。"
+                    : "从来源目录打开已有文件并分析，资源会按对应分类归档。"}
+              </p>
+              <button
+                className="button"
+                onClick={hasFilters ? clearFilters : () => setDirectory("")}
+              >
+                {hasFilters ? "清除筛选" : "浏览来源目录"}
+              </button>
+            </div>
+          ) : filter.view === "history" ? (
+            <div className="history-groups">
+              {Array.from(groups).map(([day, items]) => (
+                <section key={day}>
+                  <h2>{day}</h2>
+                  {items.map((entry) => (
+                    <article className="history-entry" key={entry.path}>
+                      <button
+                        className="history-cover"
+                        aria-label={
+                          "打开 " + (privateMode ? "此资源" : entry.name)
+                        }
+                        onClick={() => open(entry)}
+                      >
+                        <ResourceCover
+                          entry={entry}
+                          root={data.root}
+                          hidden={privateMode}
+                        />
+                      </button>
+                      <div className="history-main">
+                        <button
+                          className="history-title"
+                          title={privateMode ? undefined : entry.name}
+                          onClick={() => open(entry)}
+                        >
+                          {privateMode ? "内容已隐藏" : entry.name}
+                        </button>
+                        <div className="poster-meta">
+                          <span>
+                            {entry.analysis.category === "adult"
+                              ? "NSFW"
+                              : entry.analysis.category_label}
+                          </span>
+                          <span>
+                            {kindLabels[entry.analysis.resource_kind]}
+                          </span>
+                          <span>{formatSize(entry.size)}</span>
+                        </div>
+                        {filter.historyKind === "watched" && (
+                          <div className="history-progress">
+                            <progress
+                              value={entry.activity?.position || 0}
+                              max={entry.activity?.duration || 1}
+                            />
+                            <span>
+                              {entry.activity?.completed
+                                ? "已看完"
+                                : formatDuration(entry.activity?.position) +
+                                  " / " +
+                                  formatDuration(entry.activity?.duration)}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        className="button resume-button"
+                        onClick={() =>
+                          open(
+                            entry,
+                            data.root,
+                            filter.historyKind === "watched",
+                          )
+                        }
+                      >
+                        <Play size={16} />
+                        {filter.historyKind === "opened"
+                          ? "打开详情"
+                          : entry.activity?.completed
+                            ? "重新观看"
+                            : "继续观看"}
+                      </button>
+                      <time>
+                        {new Date(
+                          entry.activity?.[
+                            filter.historyKind === "opened"
+                              ? "opened_at"
+                              : "watched_at"
+                          ] || "",
+                        ).toLocaleTimeString([], {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                      </time>
+                      {favoriteButton(entry)}
+                      <button
+                        className="icon-button remove-record"
+                        aria-label={
+                          "移除记录 " + (privateMode ? "此资源" : entry.name)
+                        }
+                        disabled={activity.pending.has(entry.path)}
+                        onClick={async () => {
+                          if (
+                            await activity.mutate({
+                              action: "remove",
+                              path: entry.path,
+                              history_kind: filter.historyKind,
+                              scope,
+                            })
+                          )
+                            refresh();
+                        }}
+                      >
+                        <Trash2 size={17} />
+                      </button>
+                    </article>
+                  ))}
+                </section>
               ))}
             </div>
           ) : (
-            <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-x-auto custom-scrollbar shadow-inner">
-              <table className="w-full min-w-[640px] text-left border-collapse">
-                <thead>
-                  <tr className="border-b border-slate-800 bg-slate-950/60 text-[10px] text-slate-500 font-bold uppercase tracking-wider">
-                    <th className="py-2.5 px-4">名称</th>
-                    <th className="py-2.5 px-3">类型</th>
-                    <th className="py-2.5 px-3">大小</th>
-                    <th className="py-2.5 px-3">修改时间</th>
-                    <th className="py-2.5 px-4 text-right">操作</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800 text-xs text-slate-400">
-                  {visibleFolders.map(folder => (
-                    <tr key={folder.path} id={`folder-row-${folder.name}`} onClick={() => enter(folder)} className="hover:bg-slate-800/40 cursor-pointer transition-colors">
-                      <td className="py-2.5 px-4 font-semibold text-slate-200">
-                        <span className="flex items-center gap-2"><Folder className="w-4 h-4 text-indigo-400 shrink-0" /><span className="truncate">{folder.name}</span></span>
-                      </td>
-                      <td className="py-2.5 px-3"><span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-950/65 border border-slate-800">目录</span></td>
-                      <td className="py-2.5 px-3 font-mono text-slate-500">-</td>
-                      <td className="py-2.5 px-3 font-mono text-[10px]">-</td>
-                      <td className="py-2.5 px-4"></td>
-                    </tr>
-                  ))}
-                  {visibleFiles.map(file => {
-                    const type = mediaTypeOf(file);
-                    const isSel = selected?.entry.path === file.path;
-                    return (
-                      <tr
-                        key={file.path}
-                        id={`file-row-${file.name}`}
-                        onClick={() => select(file)}
-                        className={`hover:bg-slate-800/30 cursor-pointer transition-colors ${isSel ? 'bg-slate-800/30' : ''}`}
+            <div className="poster-grid">
+              {files.map((entry) => (
+                <article
+                  key={entry.path}
+                  className={
+                    "poster-card" +
+                    (hover?.entry.path === entry.path ? " is-hovered" : "")
+                  }
+                  onPointerEnter={(event) => {
+                    if (event.pointerType === "mouse")
+                      scheduleHover(entry, event.currentTarget);
+                  }}
+                  onPointerLeave={leaveHover}
+                >
+                  <button
+                    className="poster-open"
+                    title={privateMode ? undefined : entry.name}
+                    onClick={() => open(entry)}
+                  >
+                    <ResourceCover
+                      entry={entry}
+                      root={data.root}
+                      hidden={privateMode}
+                    />
+                    <div className="poster-copy">
+                      <h2>{privateMode ? "内容已隐藏" : entry.name}</h2>
+                      <span
+                        className={
+                          "poster-status" +
+                          (entry.analysis.status === "complete" && !synopsisView(entry.analysis).needsUpdate
+                            ? ""
+                            : " review")
+                        }
                       >
-                        <td className="py-2.5 px-4 font-medium">
-                          <span className="flex items-center gap-2 truncate max-w-xs">{typeIcon(type)}<span className="truncate text-slate-300" title={file.name}>{file.name}</span></span>
-                        </td>
-                        <td className="py-2.5 px-3 uppercase text-[10px] font-mono text-slate-500">{type}</td>
-                        <td className="py-2.5 px-3 font-mono text-slate-300">{formatSize(file.size)}</td>
-                        <td className="py-2.5 px-3 font-mono text-[10px] text-slate-500">{formatDate(file.modified)}</td>
-                        <td className="py-2.5 px-4 text-right" onClick={e => e.stopPropagation()}>
-                          <span className="flex items-center justify-end gap-1.5">
-                            <button
-                              onClick={() => openPreview(file)}
-                              className="py-1 px-2.5 bg-indigo-500/10 hover:bg-indigo-500/20 text-[11px] text-indigo-400 font-semibold rounded border border-indigo-500/20 flex items-center gap-1 transition-all cursor-pointer"
-                            ><Eye className="w-3.5 h-3.5" />预览</button>
-                            <a
-                              href={previewUrl(root, file.path)}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="p-1 bg-slate-950 border border-slate-800 hover:bg-slate-900 text-slate-400 hover:text-white rounded transition-colors"
-                              title="新窗口打开"
-                            ><ArrowUpRight className="w-3.5 h-3.5" /></a>
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+                        {entry.analysis.subtype_label ||
+                          entry.analysis.category_label}
+                        {entry.analysis.status !== "complete"
+                          ? " · 待核对"
+                          : synopsisView(entry.analysis).needsUpdate
+                            ? ` · ${synopsisView(entry.analysis).stateLabel.replace("分类完成·", "")}`
+                            : ""}
+                      </span>
+                    </div>
+                  </button>
+                  {favoriteButton(entry)}
+                  <button
+                    className="poster-delete"
+                    aria-label={
+                      "删除资源 " + (privateMode ? "此资源" : entry.name)
+                    }
+                    aria-haspopup="dialog"
+                    disabled={privateMode}
+                    title={
+                      privateMode
+                        ? "关闭隐私模式后才能核对删除范围"
+                        : "删除资源及封面"
+                    }
+                    onPointerEnter={closeHover}
+                    onClick={() => askDelete(entry)}
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                  <button
+                    className="poster-info"
+                    aria-label={
+                      "查看简介 " + (privateMode ? "此资源" : entry.name)
+                    }
+                    aria-haspopup="dialog"
+                    onClick={(event) =>
+                      scheduleHover(
+                        entry,
+                        event.currentTarget.closest("article")!,
+                        true,
+                      )
+                    }
+                  >
+                    <Info size={19} />
+                  </button>
+                </article>
+              ))}
             </div>
           )}
         </div>
-      </div>
-
-      {/* 详情侧栏（仅选中后显示） */}
-      {selected && (
-        <DetailsPanel
-          meta={selected}
-          root={root}
-          onPreview={() => setPreview(selected)}
-          onClose={() => setSelected(null)}
-        />
-      )}
-
-      {/* 预览灯箱 */}
-      {preview && (
-        <PreviewLightbox meta={preview} root={root} onClose={() => setPreview(null)} />
-      )}
-    </div>
-  );
-}
-
-/* ---------- 详情侧栏 ---------- */
-
-function DetailsPanel({ meta, root, onPreview, onClose }: {
-  meta: FileMeta;
-  root: string;
-  onPreview: () => void;
-  onClose: () => void;
-}) {
-  const [copied, setCopied] = useState(false);
-  const { entry, type } = meta;
-  const remotePath = `/${root ? root + '/' : ''}${entry.path}`;
-
-  const copy = () => {
-    navigator.clipboard.writeText(remotePath);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  return (
-    <aside id="file-details-panel" className="w-full lg:w-80 shrink-0 bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-4 overflow-y-auto custom-scrollbar max-h-[60vh] lg:max-h-none">
-      {/* 标题 */}
-      <div className="flex items-start gap-3 border-b border-slate-800 pb-3">
-        <div className="p-2.5 rounded-xl bg-slate-950 border border-slate-800 text-indigo-400 shrink-0">{typeIcon(type, 'w-5 h-5')}</div>
-        <div className="min-w-0 flex-1">
-          <h4 className="text-xs font-bold text-slate-100 break-words leading-relaxed" title={entry.name}>{entry.name}</h4>
-          <span className="text-[9px] uppercase font-bold text-indigo-400 bg-indigo-500/10 px-1.5 py-0.5 rounded border border-indigo-500/20 inline-block mt-1">{type}</span>
-        </div>
-        <button onClick={onClose} className="p-1 text-slate-400 hover:text-rose-400 rounded-lg hover:bg-slate-800 transition-colors cursor-pointer shrink-0" title="关闭详情">
-          <X className="w-4 h-4" />
-        </button>
-      </div>
-
-      {/* 媒体缩略预览 */}
-      {type === 'photo' && (
-        <img
-          src={previewUrl(root, entry.path)}
-          alt={entry.name}
-          className="w-full rounded-xl border border-slate-800 object-contain max-h-48 bg-slate-950"
-        />
-      )}
-      {type === 'video' && (
-        <video
-          src={previewUrl(root, entry.path)}
-          controls preload="metadata" playsInline
-          className="w-full rounded-xl border border-slate-800 max-h-48 bg-black"
-        />
-      )}
-
-      {/* AI 内容标签 */}
-      <div>
-        <span className="text-[10px] text-slate-500 block uppercase font-mono tracking-wider font-bold mb-1.5">AI 标签</span>
-        {meta.tagsLoading ? (
-          <p className="text-[11px] text-slate-500 italic flex items-center gap-2">
-            <Clock className="w-3 h-3 animate-pulse" /> 正在获取标签…
-          </p>
-        ) : meta.tags.length > 0 ? (
-          <div className="flex flex-wrap gap-1.5">
-            {meta.tags.map(tag => (
-              <span
-                key={tag}
-                className="text-[10px] font-medium text-violet-300 bg-violet-500/10 border border-violet-500/25 rounded-full px-2 py-0.5"
-              >{tag}</span>
-            ))}
-          </div>
+        {(data.pages || 1) > 1 && (
+          <footer className="cinema-footer">
+            <div className="button-row">
+              <button
+                className="icon-button"
+                aria-label="上一页资源"
+                disabled={pending || (data.page || 1) <= 1}
+                onClick={() => update({ page: (data.page || 1) - 1 })}
+              >
+                <ChevronLeft size={18} />
+              </button>
+              <span>
+                {data.page || 1} / {data.pages || 1}
+              </span>
+              <button
+                className="icon-button"
+                aria-label="下一页资源"
+                disabled={pending || (data.page || 1) >= (data.pages || 1)}
+                onClick={() => update({ page: (data.page || 1) + 1 })}
+              >
+                <ChevronRight size={18} />
+              </button>
+            </div>
+          </footer>
+        )}
+        {filterPanel && (
+          <Modal title="筛选与排序" onClose={() => setFilterPanel(false)}>
+            <div className="library-filter-panel">
+              <div className="library-filter-fields">
+                <label>
+                  资源格式
+                  <select
+                    aria-label="资源类型"
+                    value={filter.kind}
+                    onChange={(event) => update({ kind: event.target.value })}
+                  >
+                    <option value="">全部格式</option>
+                    {Object.entries(kindLabels).map(([id, label]) => (
+                      <option key={id} value={id}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  分析状态
+                  <select
+                    aria-label="分析状态"
+                    value={filter.status}
+                    onChange={(event) => update({ status: event.target.value })}
+                  >
+                    <option value="">全部分析状态</option>
+                    <option value="complete">已分析</option>
+                    <option value="review">待核对 / 未分析</option>
+                    <option value="failed">分析失败</option>
+                  </select>
+                </label>
+                {filter.view !== "history" && (
+                  <label>
+                    排序
+                    <select
+                      aria-label="排序方式"
+                      value={filter.sort}
+                      onChange={(event) => update({ sort: event.target.value })}
+                    >
+                      <option value="newest">
+                        {filter.view === "favorites" ? "最近收藏" : "最近加入"}
+                      </option>
+                      <option value="name">名称排序</option>
+                      <option value="size">大小排序</option>
+                    </select>
+                  </label>
+                )}
+              </div>
+              <label className="library-tag-search">
+                标签 · 同时匹配
+                <input
+                  aria-label="搜索标签"
+                  placeholder="输入标签名称"
+                  value={filter.tagSearch}
+                  onChange={(event) =>
+                    update({ tagSearch: event.target.value })
+                  }
+                />
+              </label>
+              <div className="library-tag-picker">
+                {filter.tags.map((tag) => (
+                  <button
+                    key={tag}
+                    className="filter-chip"
+                    aria-pressed="true"
+                    onClick={() => toggleTag(tag)}
+                  >
+                    {tag}
+                    <X size={13} />
+                  </button>
+                ))}
+                {visibleTags.map((tag) => (
+                  <button
+                    key={tag.name}
+                    className="filter-chip"
+                    aria-pressed="false"
+                    onClick={() => toggleTag(tag.name)}
+                  >
+                    {tag.name}
+                    <small>{tag.count}</small>
+                  </button>
+                ))}
+                {!pending && !tagFacets.length && (
+                  <span className="filter-hint">
+                    {filter.tagSearch
+                      ? "没有匹配的标签"
+                      : "当前资源暂无已分析标签"}
+                  </span>
+                )}
+              </div>
+              <div className="library-source-actions">
+                <button
+                  className="button"
+                  aria-label="来源目录"
+                  onClick={() => {
+                    setFilterPanel(false);
+                    setDirectory("");
+                  }}
+                >
+                  <FolderOpen size={17} />
+                  来源目录
+                </button>
+                <button
+                  className="button"
+                  aria-label="刷新资源库"
+                  onClick={() => {
+                    refresh();
+                    setFilterPanel(false);
+                  }}
+                >
+                  <RefreshCw size={17} />
+                  刷新资源库
+                </button>
+              </div>
+              <div className="dialog-actions">
+                <button className="button" onClick={clearFilters}>
+                  重置筛选
+                </button>
+                <button
+                  className="button primary"
+                  onClick={() => setFilterPanel(false)}
+                >
+                  {pending ? "读取中…" : `查看 ${data.total || 0} 项资源`}
+                </button>
+              </div>
+            </div>
+          </Modal>
+        )}
+        {hover && !pending && !detail && !filterPanel && !deleting && (
+          <HoverPreview
+            entry={resolved(hover.entry)}
+            root={data.root}
+            anchor={hover.anchor}
+            privateMode={privateMode}
+            busy={activity.pending.has(hover.entry.path)}
+            onEnter={keepHover}
+            onLeave={leaveHover}
+            onClose={closeHover}
+            onOpen={() => open(hover.entry)}
+            onFavorite={() => void favorite(hover.entry)}
+          />
+        )}
+        {directory !== null && (
+          <DirectoryBrowser
+            initialPath={directory}
+            onClose={() => setDirectory(null)}
+            onOpen={open}
+          />
+        )}
+        {detail && privateMode ? (
+          <Modal title="隐私模式" onClose={closeDetail}>
+            <p>封面与内容简介已隐藏。只有主动关闭隐私模式后才显示内容。</p>
+            <div className="dialog-actions">
+              <button
+                className="button primary"
+                onClick={() => setPrivateMode(false)}
+              >
+                关闭隐私模式并查看
+              </button>
+            </div>
+          </Modal>
+        ) : detail && playing ? (
+          <ResourcePreview
+            entry={resolved(detail.entry)}
+            root={detail.root}
+            onClose={() => setPlaying(false)}
+            progressError={activity.error}
+            onProgress={(position, duration) => {
+              if (!activity.paused)
+                void activity.mutate({
+                  action: "progress",
+                  path: detail.entry.path,
+                  position,
+                  duration,
+                });
+            }}
+          />
         ) : (
-          <p className="text-[11px] text-slate-500 italic">暂无标签。</p>
+          detail && (
+            <Modal title="资源详情" wide onClose={closeDetail}>
+              {activity.error && (
+                <p className="notice error" role="alert">
+                  {activity.error}
+                </p>
+              )}
+              <ResourceDetails
+                entry={resolved(detail.entry)}
+                root={detail.root}
+                onClose={closeDetail}
+                onPreview={() => setPlaying(true)}
+                onChanged={refresh}
+                onFavorite={() => void favorite(detail.entry)}
+                favoriteBusy={activity.pending.has(detail.entry.path)}
+                onDelete={() => askDelete(detail.entry)}
+                onLocate={() => {
+                  setDirectory(parentPath(detail.entry.path));
+                  setDetail(null);
+                }}
+              />
+            </Modal>
+          )
+        )}
+        {deleting && (
+          <ResourceDeleteDialog
+            entry={deleting}
+            scopeId={data.scope_id || ""}
+            onClose={() => setDeleting(null)}
+            onDeleted={() => {
+              activity.forget(deleting.path);
+              setData((value) => ({
+                ...value,
+                files: value.files.filter(
+                  (entry) => entry.path !== deleting.path,
+                ),
+              }));
+              refresh();
+            }}
+          />
+        )}
+        {confirmClear && (
+          <Modal
+            title="清空历史记录"
+            busy={activity.pending.has("clear")}
+            onClose={() => setConfirmClear(false)}
+          >
+            <p>
+              清空当前
+              {scope === "adult"
+                ? " NSFW "
+                : scope === "movie"
+                  ? "电影"
+                  : "其他资源"}
+              库的全部{filter.historyKind === "opened" ? "最近打开" : "观看"}
+              记录？包括当前筛选条件以外的记录。
+            </p>
+            <p className="muted">不会删除媒体文件或收藏；操作不可撤销。</p>
+            <div className="dialog-actions">
+              <button className="button" onClick={() => setConfirmClear(false)}>
+                取消
+              </button>
+              <button
+                className="button danger"
+                disabled={activity.pending.has("clear")}
+                onClick={async () => {
+                  if (
+                    await activity.mutate({
+                      action: "clear",
+                      history_kind: filter.historyKind,
+                      scope,
+                    })
+                  ) {
+                    setConfirmClear(false);
+                    refresh();
+                  }
+                }}
+              >
+                确认清空
+              </button>
+            </div>
+            {activity.error && (
+              <p className="notice error" role="alert">
+                {activity.error}
+              </p>
+            )}
+          </Modal>
         )}
       </div>
-
-      {/* AI 简介（一级数据：选中即拉取，直接渲染） */}
-      <div>
-        <span className="text-[10px] text-slate-500 block uppercase font-mono tracking-wider font-bold mb-1.5">AI 简介</span>
-        {meta.summaryLoading ? (
-          <p className="text-[11px] text-slate-500 italic flex items-center gap-2">
-            <Clock className="w-3 h-3 animate-pulse" /> 正在获取简介…
-          </p>
-        ) : meta.summary ? (
-          <p className="text-[11px] text-slate-200 leading-relaxed bg-indigo-500/5 border border-indigo-500/15 rounded-lg p-2.5">
-            {meta.summary}
-          </p>
-        ) : (
-          <p className="text-[11px] text-slate-500 italic">该文件没有 AI 简介（未经分类流程或非下载器归档）。</p>
-        )}
-      </div>
-
-      {/* 属性 */}
-      <div className="space-y-3 text-xs">
-        <div className="space-y-1">
-          <span className="text-[10px] text-slate-500 block uppercase font-mono tracking-wider font-bold">大小</span>
-          <span className="text-slate-300 font-mono">{formatSize(entry.size)} <span className="opacity-45">({entry.size.toLocaleString()} bytes)</span></span>
-        </div>
-        <div className="space-y-1">
-          <span className="text-[10px] text-slate-500 block uppercase font-mono tracking-wider font-bold">云端修改时间</span>
-          <span className="text-slate-300 font-mono flex items-center gap-1.5"><Calendar className="w-3.5 h-3.5 text-slate-500" />{formatDate(entry.modified)}</span>
-        </div>
-        <div className="space-y-1.5">
-          <span className="text-[10px] text-slate-500 block uppercase font-mono tracking-wider font-bold">远程路径</span>
-          <div className="relative">
-            <textarea
-              readOnly rows={3}
-              className="w-full text-[10px] font-mono bg-slate-950/90 border border-slate-800 rounded-lg p-2.5 pr-14 text-slate-400 focus:outline-none resize-none leading-relaxed"
-              value={remotePath}
-            />
-            <button
-              onClick={copy}
-              className="absolute bottom-2 right-2 px-2 py-1 text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-indigo-400 border border-slate-700 rounded flex items-center gap-1 cursor-pointer"
-            >
-              {copied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
-              {copied ? '已复制' : '复制'}
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* 操作 */}
-      <div className="pt-3 border-t border-slate-800 space-y-2">
-        <button
-          onClick={onPreview}
-          className="w-full py-2 bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-400 hover:to-violet-500 text-slate-50 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-md"
-        ><Eye className="w-3.5 h-3.5" />预览媒体</button>
-        <a
-          href={previewUrl(root, entry.path, true)}
-          target="_blank"
-          rel="noreferrer"
-          className="w-full py-2 bg-slate-950 border border-slate-800 hover:bg-slate-800 text-slate-300 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer"
-        ><ArrowUpRight className="w-3.5 h-3.5" />下载原文件</a>
-      </div>
-    </aside>
+    </CoverScope.Provider>
   );
 }
-
-/* ---------- 预览灯箱 ---------- */
-
-function PreviewLightbox({ meta, root, onClose }: {
-  meta: FileMeta;
-  root: string;
-  onClose: () => void;
-}) {
-  const [failed, setFailed] = useState(false);
-  const { entry, type } = meta;
-  const url = previewUrl(root, entry.path);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
-
-  return (
-    <div
-      id="media-preview-lightbox"
-      className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-sm flex flex-col animate-fadeIn"
-      onClick={onClose}
-    >
-      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800/60" onClick={e => e.stopPropagation()}>
-        <p className="text-xs text-slate-300 font-medium truncate pr-4" title={entry.name}>{entry.name}</p>
-        <div className="flex items-center gap-2 shrink-0">
-          <a
-            href={previewUrl(root, entry.path, true)}
-            target="_blank"
-            rel="noreferrer"
-            className="py-1.5 px-3 bg-slate-900 border border-slate-800 hover:bg-slate-800 text-[11px] text-slate-300 rounded flex items-center gap-1.5 transition-colors cursor-pointer"
-          >下载原文件</a>
-          <button onClick={onClose} className="p-2 bg-slate-900 border border-slate-800 hover:bg-slate-800 text-slate-400 hover:text-white rounded-lg transition-colors cursor-pointer" title="关闭 (Esc)">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-      </div>
-      <div className="flex-1 flex items-center justify-center p-4 overflow-hidden" onClick={e => e.stopPropagation()}>
-        {failed ? (
-          <div className="text-center space-y-2">
-            <p className="text-xs text-rose-400 font-semibold">媒体加载失败</p>
-            <p className="text-[10px] text-slate-500">文件可能已被移动或云链路暂不可用。</p>
-          </div>
-        ) : type === 'photo' ? (
-          <img src={url} alt={entry.name} onError={() => setFailed(true)} className="max-w-full max-h-[70vh] rounded-xl border border-slate-800 shadow-2xl" />
-        ) : type === 'video' ? (
-          <video src={url} controls autoPlay playsInline onError={() => setFailed(true)} className="max-w-full max-h-[70vh] rounded-xl border border-slate-800 shadow-2xl bg-black" />
-        ) : type === 'audio' || type === 'voice' ? (
-          <audio src={url} controls autoPlay onError={() => setFailed(true)} className="w-full max-w-md" />
-        ) : (
-          <div className="text-center space-y-3 max-w-md">
-            {typeIcon(type, 'w-12 h-12 mx-auto text-slate-600')}
-            <p className="text-xs text-slate-400">此文件类型不支持在线预览，请下载后查看。</p>
-            <a href={previewUrl(root, entry.path, true)} target="_blank" rel="noreferrer" className="inline-block py-2 px-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold transition-colors">下载原文件</a>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
+import { synopsisView } from "../library/synopsis";

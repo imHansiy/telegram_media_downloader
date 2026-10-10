@@ -6,6 +6,7 @@
 *.env
 .DS_Store
 .cache/
+node_modules/
 .mypy_cache/
 .coverage
 settings.json
@@ -76,3 +77,7 @@ run_db.bat
 
 # Logs
 *.log
+# Private favorites and viewing history (not source files).
+/data/library-activity/
+.resource-trash/
+.claude/

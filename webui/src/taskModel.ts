@@ -10,6 +10,7 @@ export interface DashboardStatusCounts {
 }
 
 export interface BackendTaskState {
+  phase?: string;
   state?: string;
   status?: string;
   upload_progress?: string | number;
@@ -23,12 +24,25 @@ export function statusFromBackendState(item: BackendTaskState): SyncTask['status
   // 终态优先于数值进度；完成记录的上传进度也是 100%，不能再次判成上传中。
   if (item.state === 'finished' || item.status === '已完成') return 'completed';
   if (item.state === 'paused' || item.status === '已暂停') return 'paused';
+  if (['analyzing', 'waiting_upload', 'finalizing'].includes(item.phase || '')) return 'syncing';
+  if (item.phase === 'uploading') return 'uploading';
+  if (item.phase === 'downloading') return 'downloading';
+  if (item.phase === 'pending') return 'pending';
   if (item.status === '正在完成...') return 'syncing';
   // AI 分类阶段（后端 status 形如 "AI 抽帧中"）是下载后的处理步骤，按传输中显示。
-  if (item.status && item.status.startsWith('AI ')) return 'syncing';
+  if (item.status && (item.status.startsWith('AI ') || item.status === 'AI分析中')) return 'syncing';
   if (item.status === '上传中' || Number(item.upload_progress) > 0) return 'uploading';
   if (item.status === '等待中') return 'pending';
   return 'downloading';
+}
+
+
+export function backendProgress(value: unknown, completed = false): number {
+  // Compatibility with an in-flight response from the previous backend. Full
+  // bytes do not imply completion: the explicit task phase carries that state.
+  if (completed || value === 'Finishing...') return 100;
+  const progress = typeof value === 'number' ? value : Number.parseFloat(String(value));
+  return Number.isFinite(progress) ? Math.max(0, Math.min(100, progress)) : 0;
 }
 
 

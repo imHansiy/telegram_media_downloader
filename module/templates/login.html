@@ -1,96 +1,65 @@
-<!DOCTYPE html>
-<html lang="en">
-
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Login - TDL</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/modern.css') }}">
-  <style>
-    body {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 100vh;
-      background:
-        radial-gradient(circle at top left, rgba(79, 70, 229, 0.18), transparent 34rem),
-        radial-gradient(circle at bottom right, rgba(16, 185, 129, 0.1), transparent 30rem),
-        var(--bg-primary);
-    }
-  </style>
-</head>
-
-<body>
-  <div class="card login-card">
-    <div class="text-center mb-4">
-      <div class="eyebrow">Telegram Media Sync</div>
-      <h1 style="color: var(--accent); margin-bottom: 0.5rem;">同步控制台</h1>
-      <p>请输入密码以继续。</p>
-    </div>
-
-    <div class="mb-4">
-      <label class="d-block mb-1 text-sm text-secondary">密码</label>
-      <input type="password" id="password" class="input" placeholder="输入密码...">
-    </div>
-
-    <button onclick="login()" class="btn btn-primary" style="width: 100%;">
-      解锁
-    </button>
-  </div>
-
-  <!-- Crypto Direct Imports -->
-  <script src="{{ url_for('static', filename='aes/crypto-js-master/crypto-js.js') }}"></script>
-  <script>
-    // Encryption matching backend
-    const encrypt = (word) => {
-      const key = CryptoJS.enc.Utf8.parse("1234123412ABCDEF"); // Hardcoded as per original
-      const iv = CryptoJS.enc.Utf8.parse('ABCDEF1234123412');
-      let srcs = CryptoJS.enc.Utf8.parse(word);
-      let encrypted = CryptoJS.AES.encrypt(srcs, key, { iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 });
-      let hexStr = encrypted.ciphertext.toString();
-      let base64Str = CryptoJS.enc.Base64.stringify(CryptoJS.enc.Hex.parse(hexStr));
-      return base64Str;
-    }
-
-    const login = async () => {
-      const passwordInput = document.getElementById('password');
-      const password = passwordInput.value;
-
-      if (!password) {
-        alert('请输入密码！');
-        return;
-      }
-
-      try {
-        const encryptedPassword = encrypt(password);
-
-        const response = await fetch('login', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({ password: encryptedPassword })
-        });
-
-        const res = await response.json();
-
-        if (res.code === '1') {
-          window.location.href = '/';
-        } else {
-          alert('密码错误！');
-          passwordInput.value = '';
-        }
-      } catch (e) {
-        console.error(e);
-        alert('登录失败: ' + e.message);
-      }
-    }
-
-    // Enter key support
-    document.getElementById('password').addEventListener('keyup', (e) => {
-      if (e.key === 'Enter') login();
-    });
-  </script>
-</body>
-
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>解锁工作台 · Telegram Sync</title>
+    <link
+      rel="stylesheet"
+      href="{{ url_for('static', filename='css/workbench-login.css') }}"
+    />
+  </head>
+  <body>
+    <main class="login-surface">
+      <a class="login-brand" href="/files"
+        ><span aria-hidden="true">↓</span>
+        <div>媒体工作台<small>TELEGRAM SYNC</small></div></a
+      >
+      <section class="login-panel" aria-labelledby="login-title">
+        <div class="login-mark" aria-hidden="true">
+          <svg
+            width="25"
+            height="25"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+          >
+            <rect x="5" y="10" width="14" height="11" rx="3" />
+            <path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3" />
+          </svg>
+        </div>
+        <h1 id="login-title">解锁你的工作台</h1>
+        <p class="login-description">输入管理密码，继续浏览资源与管理同步。</p>
+        <form id="login-form" method="post" action="{{ url_for('login') }}">
+          <label for="password">管理密码</label>
+          <div class="password-field">
+            <input
+              type="password"
+              id="password"
+              name="password"
+              autocomplete="current-password"
+              required
+              autofocus
+              placeholder="输入管理密码"
+            /><button
+              type="button"
+              id="toggle-password"
+              aria-label="显示密码"
+              aria-pressed="false"
+            >
+              显示
+            </button>
+          </div>
+          <p id="login-error" role="alert" {% if not login_error %}hidden{% endif %}>{{ login_error or '' }}</p>
+          <button type="submit" id="login-submit" aria-label="解锁工作台">
+            解锁工作台 <span aria-hidden="true">→</span>
+          </button>
+        </form>
+        <p class="login-note">这是工作台管理密码，不是 Telegram 登录密码。</p>
+      </section>
+    </main>
+    <script src="{{ url_for('static', filename='aes/crypto-js-master/crypto-js.js') }}"></script>
+    <script src="{{ url_for('static', filename='login/workbench-login.js') }}"></script>
+  </body>
 </html>

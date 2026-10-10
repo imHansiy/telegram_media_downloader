@@ -31,6 +31,7 @@ from module.app import (
 )
 from module.db import db
 from module.download_stat import get_download_result
+from module.task_progress import task_record_matches
 from module.filter import Filter
 from module.get_chat_history_v2 import get_chat_history_v2
 from module.language import Language, _t
@@ -49,6 +50,21 @@ from utils.format import replace_date_time, validate_title
 from utils.meta_data import MetaData
 
 # pylint: disable = C0301, R0902
+
+
+class BotApiRequestError(RuntimeError):
+    """Retain safe retry metadata without retaining URLs, tokens or payloads."""
+
+    def __init__(self, method, data):
+        description = data.get("description") or "unknown error"
+        super().__init__(f"Telegram Bot API {method} failed: {description}")
+        self.error_code = data.get("error_code")
+        try:
+            self.retry_after = max(
+                0, int((data.get("parameters") or {}).get("retry_after", 0))
+            )
+        except (TypeError, ValueError, OverflowError):
+            self.retry_after = 0
 
 
 class DownloadBot:
@@ -78,7 +94,9 @@ class DownloadBot:
 
         self.download_filter: List[str] = []
         self.task_id: int = 0
+        self._task_id_lock = threading.Lock()
         self.reply_task = None
+        self._task_status_retry_at = 0.0
         self.admin_user_ids: List[Union[int, str]] = []
         self.bot_api_poll_thread = None
         self.bot_api_poll_stop = threading.Event()
@@ -89,9 +107,13 @@ class DownloadBot:
         self.processed_private_message_lock = threading.Lock()
 
     def gen_task_id(self) -> int:
-        """Gen task id"""
-        self.task_id += 1
-        return self.task_id
+        """Allocate beyond persisted history, including after an idle restart."""
+        with self._task_id_lock:
+            identifiers = [self.task_id, *list(self.task_node)]
+            for records in list(get_download_result().values()):
+                identifiers.extend(record.get("task_id", 0) for record in list(records.values()))
+            self.task_id = max(int(value) for value in identifiers if str(value).isdigit()) + 1
+            return self.task_id
 
     def add_task_node(self, node: TaskNode):
         """Add task node"""
@@ -152,12 +174,7 @@ class DownloadBot:
         record = chat_tasks.get(message_id)
         if not record:
             return False
-        if record.get("task_id", 0) != node.task_id:
-            return False
-        record_profile_id = record.get("profile_id")
-        if profile_id and record_profile_id not in (profile_id, None):
-            return False
-        return True
+        return task_record_matches(node, message_id, record)
 
     def _finalize_deleted_task_card(self, node: TaskNode, message_id: int) -> None:
         """把 Bot 状态卡片改成终态，避免删除后仍每 3 秒刷新旧进度。"""
@@ -227,7 +244,12 @@ class DownloadBot:
                     await report_bot_status(self, value)
 
             for key, value in self.task_node.copy().items():
-                if value.is_running and value.is_finish():
+                if value.is_running and value.is_finish() and (
+                    value.final_status_delivered
+                    or value.status_delivery_unavailable
+                    or not value.reply_message_id
+                    or not value.bot
+                ):
                     self.remove_task_node(key)
             await asyncio.sleep(3)
 
@@ -452,7 +474,15 @@ class DownloadBot:
 
         if not data.get("ok"):
             description = data.get("description") or "unknown error"
-            raise RuntimeError(f"Telegram Bot API {method} failed: {description}")
+            # A previous request may have succeeded remotely while its response
+            # was lost. Telegram confirms that this exact edit is already there.
+            if (
+                method == "editMessageText"
+                and data.get("error_code") == 400
+                and "message is not modified" in description.lower()
+            ):
+                return {"message_id": (payload or {}).get("message_id")}
+            raise BotApiRequestError(method, data)
         return data.get("result")
 
     @staticmethod

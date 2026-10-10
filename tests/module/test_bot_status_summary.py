@@ -27,15 +27,19 @@ class BotTaskSummaryTestCase(unittest.TestCase):
                 {
                     "down_byte": 142 * 1024 * 1024,
                     "total_size": 142 * 1024 * 1024,
+                    "state": "completed",
                 }
             ],
             now=1065,
         )
 
         self.assertIn("✅ 全部完成", summary)
-        self.assertIn("[██████████] 100%  (1/1)", summary)
+        self.assertIn("📥 下载  [██████████] 100%", summary)
+        self.assertIn("📤 上传  [██████████] 100%", summary)
+        self.assertIn("任务结果 (1/1)", summary)
         self.assertIn("💾 数据  142.0MB / 142.0MB", summary)
-        self.assertIn("⚡ 速度  ↓ 2.0MB/s  ↑ 3.0MB/s", summary)
+        self.assertIn("⚡ 速度  任务已结束", summary)
+        self.assertNotIn("MB/s", summary)
         self.assertIn("🕒 耗时  1分05秒", summary)
         self.assertIn("👤 账号  account-siy-han", summary)
 
@@ -49,8 +53,9 @@ class BotTaskSummaryTestCase(unittest.TestCase):
 
         summary = build_bot_task_summary(node, now=1005)
 
-        self.assertIn("🔄 传输中", summary)
-        self.assertIn("[███████░░░] 75%  (3/4)", summary)
+        self.assertIn("🔄 进行中", summary)
+        self.assertIn("任务结果 (3/4)", summary)
+        self.assertNotIn("75%", summary)
         self.assertIn("├─ ❌ 失败  1", summary)
         self.assertIn("└─ ⏳ 剩余  1", summary)
 

@@ -12,6 +12,7 @@ import re
 import time
 import urllib.parse
 from datetime import datetime, timezone, timedelta
+from functools import wraps
 from flask import (
     Flask,
     jsonify,
@@ -25,7 +26,7 @@ from flask import (
     stream_with_context,
     send_from_directory,
 )
-from flask_login import LoginManager, UserMixin, login_required, login_user
+from flask_login import LoginManager, UserMixin, login_required, login_user, current_user
 from pyrogram import Client, errors
 import requests
 import utils
@@ -56,9 +57,18 @@ from module.download_stat import (
     remove_download_task,
     set_task_state,
     get_task_state,
+    set_resource_analysis,
+    set_ai_status,
 )
 from module.upload_stat import get_upload_result, get_total_upload_speed
 from module.cloud_drive import CloudDrive
+from module.resource_analysis import taxonomy_payload
+from module.resource_analysis.library import catalog_store, clean_path, legacy_analysis, merged_entries, query_library
+from module.resource_analysis.jobs import analysis_jobs
+from module.task_progress import project_task_progress
+from module.resource_analysis.service import analysis_status
+from module.resource_analysis.activity import activity_store, with_activity
+from module.resource_analysis.deletion import DeletionContext, resource_deletions
 from utils.crypto import AesBase64
 from utils.format import format_byte
 
@@ -116,7 +126,28 @@ def _render_spa():
     spa_dir = os.path.join(_flask_app.static_folder, "newui")
     index_file = os.path.join(spa_dir, "index.html")
     if os.path.exists(index_file):
-        return send_from_directory(spa_dir, "index.html")
+        # Deliver the built entry with the document. Some embedded browsers
+        # stall external script responses even while HTML and CSS load normally.
+        # Only embed flat Vite asset names from our own build, never user paths.
+        with open(index_file, encoding="utf-8") as handle:
+            html = handle.read()
+        # Same authenticated payload as /api/bootstrap, delivered atomically
+        # with the page when embedded browsers stall background responses.
+        initial = json.dumps(_bootstrap_payload(), ensure_ascii=True).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+        bootstrap_tag = '<script id="app-bootstrap" type="application/json">' + initial + '</script>'
+
+        def embed_entry(match):
+            with open(os.path.join(spa_dir, "assets", match.group(1)), encoding="utf-8") as handle:
+                script = handle.read()
+            script = re.sub(r"</script", r"<\\/script", script, flags=re.IGNORECASE)
+            return bootstrap_tag + '<script type="module">' + script + '</script>'
+
+        html = re.sub(
+            r'<script\s+type="module"\s+crossorigin\s+src="/static/newui/assets/([A-Za-z0-9_-]+\.js)"></script>',
+            embed_entry,
+            html,
+        )
+        return Response(html, mimetype="text/html", headers={"Cache-Control": "no-store"})
     return (
         "New UI has not been built yet. Run `npm install && npm run build` in webui/.",
         503,
@@ -385,6 +416,7 @@ def init_web(
 
 @_flask_app.route("/")
 @_flask_app.route("/files")
+@_flask_app.route("/tasks")
 @_flask_app.route("/accounts")
 @login_required
 def index():
@@ -396,14 +428,22 @@ def index():
 def login():
     """login"""
     if request.method == "POST":
-        password = request.json.get("password")
-        if password:
-            if web_login_users.get("root") == deAesCrypt.decrypt(password):
-                user = User()
-                login_user(user)
-                return jsonify({"code": "1"})
-
-        return jsonify({"code": "0"})
+        # Native POST remains usable when browser scripts cannot load. Never put
+        # the password in a query string or echo it in an error response.
+        is_json = request.is_json
+        data = request.get_json(silent=True) if is_json else request.form
+        password = data.get("password") if hasattr(data, "get") else None
+        if is_json and isinstance(password, str):
+            try:
+                password = deAesCrypt.decrypt(password)
+            except (ValueError, TypeError, UnicodeError):
+                password = None
+        if isinstance(password, str) and password and web_login_users.get("root") == password:
+            login_user(User())
+            return jsonify({"code": "1"}) if is_json else redirect("/files")
+        if is_json:
+            return jsonify({"code": "0"})
+        return render_template("login.html", login_error="管理密码不正确，请重新输入。"), 401
     return render_template("login.html")
 
 
@@ -515,14 +555,16 @@ def restart():
 @login_required
 def api_bootstrap():
     """Return initial data for the React app."""
-    return jsonify(
-        {
+    return jsonify(_bootstrap_payload())
+
+
+def _bootstrap_payload():
+    return {
             "version": utils.__version__,
             "db": db.get_heartbeat_status(),
             "config": _load_current_config(),
             "account": _get_telegram_account_status(),
         }
-    )
 
 
 @_flask_app.route("/api/config", methods=["GET", "POST"])
@@ -626,6 +668,7 @@ def api_webdav_browse():
         return jsonify({
             "success": True,
             "path": rel_path,
+            "root": remote_root,
             "folders": [],
             "files": [],
             "message": "目录不存在或为空",
@@ -657,7 +700,7 @@ def api_webdav_browse():
 
     # PROPFIND 返回的 href 是 URL 编码的全路径（含 webdav_url 前缀），
     # 只取 remote_root 之后的部分作为展示/导航用的相对路径。
-    root_prefix = urllib.parse.quote(full_path, safe="/").rstrip("/") + "/"
+    requested_path = urllib.parse.unquote(urllib.parse.urlsplit(remote_url).path).rstrip("/")
 
     for response_el in root_xml.iter():
         if _localname(response_el.tag) != "response":
@@ -669,15 +712,11 @@ def api_webdav_browse():
                 break
         if not href_raw:
             continue
-        href_decoded = urllib.parse.unquote(href_raw)
-        # 跳过目录自身（href 与请求路径相同，即以 full_path 结尾且无更多段）
-        rel_from_root = href_decoded
-        if full_path and full_path + "/" in href_decoded:
-            rel_from_root = href_decoded.split(full_path + "/", 1)[1]
-        elif full_path and href_decoded.rstrip("/").endswith("/" + full_path):
-            continue  # the collection itself
-        name = rel_from_root.rstrip("/")
-        if not name:
+        href_decoded = urllib.parse.unquote(urllib.parse.urlsplit(href_raw).path).rstrip("/")
+        if not href_decoded.startswith(requested_path + "/"):
+            continue
+        name = href_decoded[len(requested_path) + 1:]
+        if not name or "/" in name or name in (".", ".."):
             continue
 
         is_collection = False
@@ -714,6 +753,11 @@ def api_webdav_browse():
 
     folders.sort(key=lambda item: item["name"])
     files.sort(key=lambda item: item["name"])
+    indexed = with_activity(_resource_entries(), _library_activity().snapshot(), "favorites",
+                            catalog_store(drive_config).deleted_paths())
+    for entry in files:
+        entry["analysis"] = indexed.get(entry["path"], {}).get("analysis") or legacy_analysis(entry["path"], mime_type=entry["content_type"])
+        entry["activity"] = indexed.get(entry["path"], {}).get("activity", {})
     return jsonify({
         "success": True,
         "path": rel_path,
@@ -723,44 +767,263 @@ def api_webdav_browse():
     })
 
 
+def _resource_entries():
+    if not _app_instance or not getattr(_app_instance, "cloud_drive_config", None):
+        return {}
+    return merged_entries(get_download_result(), _app_instance.save_path,
+                          CloudDrive.get_relative_upload_path, catalog_store(_app_instance.cloud_drive_config))
+
+
+@_flask_app.route("/api/library/taxonomy", methods=["GET"])
+@login_required
+def api_library_taxonomy():
+    return jsonify({"success": True, **taxonomy_payload()})
+
+
+@_flask_app.route("/api/library", methods=["GET"])
+@login_required
+def api_resource_library():
+    if not _app_instance or not getattr(_app_instance, "cloud_drive_config", None):
+        return jsonify({"success": False, "message": "资源库未初始化"}), 503
+    try:
+        view = request.args.get("view", "all")
+        scope = request.args.get("scope", "all")
+        history_kind = request.args.get("history_kind", "opened")
+        if view not in ("all", "favorites", "history") or scope not in ("all", "adult", "movie", "other") or history_kind not in ("opened", "watched"):
+            raise ValueError("筛选参数无效")
+        state = _library_activity().snapshot()
+        result = query_library(with_activity(_resource_entries(), state, view, catalog_store(_app_instance.cloud_drive_config).deleted_paths()), category=request.args.get("category", ""),
+            subtype=request.args.get("subtype", ""), kind=request.args.get("kind", ""),
+            status=request.args.get("status", ""), query=request.args.get("q", ""),
+            page=int(request.args.get("page", 1)), page_size=int(request.args.get("page_size", 60)),
+            sort=request.args.get("sort", "newest"), tags=request.args.getlist("tag"),
+            tag_query=request.args.get("tag_q", ""), scope=scope, view=view, history_kind=history_kind)
+    except (ValueError, TypeError):
+        return jsonify({"success": False, "message": "筛选参数或收藏存储格式无效"}), 400
+    except OSError:
+        return jsonify({"success": False, "message": "收藏与历史存储暂时不可用"}), 503
+    return jsonify({"success": True, "paused": state.get("paused", False), "scope_id": _library_activity().path.stem,
+                    "root": (_app_instance.cloud_drive_config.remote_dir or "").strip("/"), **result})
+
+
+def _library_activity():
+    return activity_store(_app_instance.cloud_drive_config, current_user.get_id())
+
+
+def _deletion_scope():
+    drive = _app_instance.cloud_drive_config
+    return json.dumps([current_user.get_id(), drive.upload_adapter, drive.webdav_url,
+                       drive.remote_dir, drive.webdav_username, os.path.abspath(_app_instance.save_path)])
+
+
+def _resource_task_records(path, history=None):
+    for chat_id, messages in list((get_download_result() if history is None else history).items()):
+        for message_id, record in list(messages.items()):
+            try:
+                relative = clean_path(CloudDrive.get_relative_upload_path(_app_instance.save_path, record.get("file_name", "")))
+            except ValueError:
+                continue
+            if relative == path:
+                yield chat_id, message_id, record
+
+
+def _assert_resource_idle(path):
+    for _, _, record in _resource_task_records(path):
+        completed = record.get("state") == "completed" or (
+            not record.get("state") and record.get("total_size", 0) > 0
+            and record.get("down_byte", 0) >= record.get("total_size", 0))
+        if not completed:
+            raise ValueError("资源存在未完成的下载或重试任务，请先在传输任务中取消")
+    for _, _, record in _resource_task_records(path, get_upload_result()):
+        if record.get("state") not in ("success", "completed"):
+            raise ValueError("资源仍有上传或重试任务，请先在传输任务中取消")
+    store = catalog_store(_app_instance.cloud_drive_config)
+    if analysis_jobs.status((str(store.path), path)).get("status") in ("queued", "running"):
+        raise ValueError("资源正在分析，请等待完成后删除")
+
+
+def _deletion_context():
+    catalog = catalog_store(_app_instance.cloud_drive_config)
+    activity = _library_activity()
+    scope = _deletion_scope()
+    def assert_idle(path):
+        if _deletion_scope() != scope:
+            raise ValueError("云盘或下载目录配置已变化，已停止删除，请重新确认")
+        _assert_resource_idle(path)
+    def lookup(path):
+        return _resource_entries().get(path) or activity.snapshot()["entries"].get(path, {}).get("entry")
+    def cleanup(paths):
+        for path in paths:
+            assert_idle(path)
+        activity.forget_paths(paths)
+        for path in paths:
+            for chat_id, message_id, record in list(_resource_task_records(path)):
+                profile_id = record.get("profile_id")
+                set_task_state(chat_id, message_id, "deleted", profile_id)
+                cancel_bot_tasks_for_message(chat_id, message_id, profile_id)
+                remove_download_task(chat_id, message_id, profile_id)
+        catalog.mark_deleted(paths)
+    return DeletionContext(scope, copy.copy(_app_instance.cloud_drive_config),
+                           _app_instance.save_path, lookup, assert_idle, cleanup)
+
+
+def _resource_mutation_guard(function):
+    @wraps(function)
+    def guarded(*args, **kwargs):
+        data = request.get_json(silent=True)
+        if (request.method == "POST" and isinstance(data, dict) and data.get("path")
+                and _app_instance and getattr(_app_instance, "cloud_drive_config", None)):
+            try:
+                path = clean_path(data["path"])
+                with resource_deletions.guard(_deletion_scope(), path):
+                    if path in catalog_store(_app_instance.cloud_drive_config).deleted_paths():
+                        return jsonify({"success": False, "message": "资源已删除，请刷新页面"}), 409
+                    return function(*args, **kwargs)
+            except (ValueError, TypeError):
+                return jsonify({"success": False, "message": "资源路径无效"}), 400
+        return function(*args, **kwargs)
+    return guarded
+
+
+@_flask_app.route("/api/library/delete/preview", methods=["POST"])
+@_flask_app.route("/api/library/delete", methods=["POST"])
+@login_required
+def api_delete_library_resource():
+    if not _app_instance or not getattr(_app_instance, "cloud_drive_config", None):
+        return jsonify({"success": False, "message": "资源库未初始化"}), 503
+    origin = request.headers.get("Origin")
+    if ((origin and origin.rstrip("/") != request.host_url.rstrip("/"))
+            or request.headers.get("Sec-Fetch-Site") == "cross-site"):
+        return jsonify({"success": False, "message": "不允许跨站删除资源"}), 403
+    data = request.get_json(silent=True)
+    if not request.is_json or not isinstance(data, dict):
+        return jsonify({"success": False, "message": "需要 JSON 请求"}), 400
+    try:
+        context = _deletion_context()
+        if request.path.endswith("/preview"):
+            if data.get("scope_id") != _library_activity().path.stem:
+                return jsonify({"success": False, "message": "资源库配置已变化，请刷新页面后重试"}), 409
+            return jsonify({"success": True, **resource_deletions.prepare(context, data.get("path"))})
+        if data.get("confirmed") is not True:
+            raise ValueError("请先确认云盘文件、本地副本和封面的删除范围")
+        result = resource_deletions.execute(context, data.get("token"))
+        return jsonify(result), 200 if result["success"] else 409
+    except (ValueError, TypeError) as error:
+        return jsonify({"success": False, "message": str(error)}), 400
+    except (OSError, requests.RequestException) as error:
+        return jsonify({"success": False, "message": f"无法核实删除范围（{type(error).__name__}），未执行删除"}), 503
+
+
+@_flask_app.after_request
+def _private_library_response(response):
+    if request.path.startswith("/api/library") or request.path in ("/api/webdav/browse", "/api/webdav/summary"):
+        response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
+@_flask_app.route("/api/library/activity", methods=["GET", "POST"])
+@login_required
+@_resource_mutation_guard
+def api_library_activity():
+    if not _app_instance or not getattr(_app_instance, "cloud_drive_config", None):
+        return jsonify({"success": False, "message": "资源库未初始化"}), 503
+    try:
+        store = _library_activity()
+        if request.method == "GET":
+            return jsonify({"success": True, "paused": store.snapshot().get("paused", False)})
+        # JSON plus same-origin checks prevent cross-site form/fetch writes.
+        origin = request.headers.get("Origin")
+        if origin and origin.rstrip("/") != request.host_url.rstrip("/"):
+            return jsonify({"success": False, "message": "不允许跨站修改记录"}), 403
+        data = request.get_json(silent=True)
+        if not request.is_json or not isinstance(data, dict):
+            raise ValueError("需要 JSON 请求")
+        action = data.get("action")
+        path, entry = None, None
+        if action not in ("clear", "pause"):
+            path = clean_path(data.get("path"))
+            drive = _app_instance.cloud_drive_config
+            full_path = f"{(drive.remote_dir or '').strip('/')}/{path}".strip("/")
+            remote_url = CloudDrive.build_webdav_remote_url(drive, full_path)
+            entry = _resource_entries().get(path) or store.snapshot()["entries"].get(path, {}).get("entry")
+            if not entry and action in ("favorite", "open", "progress"):
+                auth = (drive.webdav_username, drive.webdav_password) if drive.webdav_username else None
+                with requests.head(remote_url, auth=auth, timeout=(10, 20), allow_redirects=False) as response:
+                    if response.status_code != 200:
+                        return jsonify({"success": False, "message": "此资源不可访问，未修改记录"}), 404
+                    entry = {"path": path, "name": path.rsplit("/", 1)[-1],
+                             "size": int(response.headers.get("Content-Length", 0)),
+                             "modified": response.headers.get("Last-Modified", ""),
+                             "content_type": response.headers.get("Content-Type", ""),
+                             "analysis": legacy_analysis(path, mime_type=response.headers.get("Content-Type", ""))}
+        state = store.update(action, path=path, entry=entry, value=data.get("value"),
+                             position=data.get("position"), duration=data.get("duration"),
+                             history_kind=data.get("history_kind", "all"), scope=data.get("scope", "all"))
+        item = {k: v for k, v in state["entries"].get(path, {}).items() if k != "entry"}
+        return jsonify({"success": True, "paused": state.get("paused", False), "activity": item})
+    except (ValueError, TypeError) as error:
+        return jsonify({"success": False, "message": str(error)}), 400
+    except (OSError, requests.RequestException):
+        return jsonify({"success": False, "message": "记录保存失败，请稍后重试"}), 503
+
+
 @_flask_app.route("/api/webdav/summary", methods=["GET"])
 @login_required
 def api_webdav_summary():
-    """Look up the AI summary for a real WebDAV file by its relative upload path.
+    try:
+        path = clean_path(request.args.get("path"))
+    except ValueError as error:
+        return jsonify({"success": False, "message": str(error)}), 400
+    analysis = _resource_entries().get(path, {}).get("analysis") or legacy_analysis(path)
+    job = {}
+    if _app_instance and getattr(_app_instance, "cloud_drive_config", None):
+        store = catalog_store(_app_instance.cloud_drive_config)
+        job = analysis_jobs.status((str(store.path), path))
+    return jsonify({"success": True, "analysis": analysis, "job": job,
+                    "ai_summary": analysis.get("summary", ""), "ai_tags": analysis.get("tags", []),
+                    "ai_status": analysis.get("status", "")})
 
-    The file browser lists live WebDAV entries; summaries live on download
-    history records. Match by relative_path (channel/.../file).
-    """
-    rel_path = (request.args.get("path") or "").strip().strip("/")
-    if not rel_path:
-        return jsonify({"success": False, "message": "path is required"}), 400
 
-    download_result = get_download_result()
-    remote_dir = ""
-    if _app_instance and hasattr(_app_instance, "cloud_drive_config"):
-        remote_dir = (_app_instance.cloud_drive_config.remote_dir or "").strip("/")
-
-    match_name = os.path.basename(rel_path)
-    for chat_id, messages in download_result.items():
-        for msg_id, record in (messages or {}).items():
-            file_name = (record or {}).get("file_name") or ""
-            base_name = os.path.basename(file_name.replace("\\", "/"))
-            if base_name != match_name:
-                continue
-            # 以远程根为参照的相对路径要一致，避免同名文件误配。
-            record_rel = CloudDrive.get_relative_upload_path(
-                getattr(_app_instance, "save_path", "") if _app_instance else "",
-                file_name,
-            )
-            if record_rel != rel_path:
-                continue
-            return jsonify({
-                "success": True,
-                "ai_summary": (record or {}).get("ai_summary") or "",
-                "ai_status": (record or {}).get("ai_status") or "",
-                "ai_tags": (record or {}).get("ai_tags") or [],
-            })
-    return jsonify({"success": True, "ai_summary": "", "ai_status": "", "ai_tags": []})
+@_flask_app.route("/api/library/analyze", methods=["POST"])
+@login_required
+@_resource_mutation_guard
+def api_analyze_resource():
+    if not _app_instance or not getattr(_app_instance, "cloud_drive_config", None):
+        return jsonify({"success": False, "message": "WebDAV 未初始化"}), 503
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "message": "需要 JSON 请求"}), 400
+    try:
+        path = clean_path(data.get("path"))
+        drive = _app_instance.cloud_drive_config
+        full_path = f"{(drive.remote_dir or '').strip('/')}/{path}".strip("/")
+        remote_url = CloudDrive.build_webdav_remote_url(drive, full_path)
+        store = catalog_store(drive)
+        entry = _resource_entries().get(path) or {"name": path.rsplit("/", 1)[-1],
+                "path": path, "size": 0, "modified": "", "content_type": ""}
+        auth = (drive.webdav_username, drive.webdav_password) if drive.webdav_username else None
+        # Capture exact task identities. A later download at the same path must not
+        # receive this older job's progress or result, even when IDs are reused.
+        matches = [(chat, message, record, record.get("file_name"))
+                   for chat, message, record in _resource_task_records(path)]
+        def current_matches():
+            for chat, message, record, filename in matches:
+                current = get_download_result().get(chat, {}).get(message)
+                if current is record and current.get("file_name") == filename:
+                    yield chat, message, current.get("profile_id")
+        def on_progress(stage):
+            for chat, message, profile in current_matches():
+                set_ai_status(chat, message, stage, profile)
+        def on_result(analysis):
+            for chat, message, profile in current_matches():
+                set_ai_status(chat, message, analysis_status(analysis), profile)
+                set_resource_analysis(chat, message, analysis, profile)
+        job = analysis_jobs.submit((str(store.path), path), entry, remote_url, auth,
+                                   getattr(_app_instance, "video_classifier_config", {}) or {}, store,
+                                   on_result=on_result, on_progress=on_progress, mode=data.get("mode", "full"))
+    except ValueError as error:
+        return jsonify({"success": False, "message": str(error)}), 400
+    return jsonify({"success": True, "job": job}), 202
 
 
 @_flask_app.route("/api/webdav/preview", methods=["GET", "HEAD"])
@@ -814,7 +1077,7 @@ def api_webdav_preview():
             auth=auth,
             stream=True,
             allow_redirects=True,
-            timeout=(10, 3600),
+            timeout=(10, 30 if remote_path.lower().endswith(".cover.jpg") else 3600),
         )
     except requests.RequestException as error:
         return jsonify(
@@ -832,7 +1095,9 @@ def api_webdav_preview():
             message = "WebDAV 不接受该字节范围"
         else:
             message = f"WebDAV 返回状态 {status_code}"
-        return jsonify({"success": False, "message": message}), status_code
+        return jsonify({"success": False, "message": message}), status_code, {
+            "Cache-Control": "private, no-store"
+        }
 
     guessed_type = mimetypes.guess_type(remote_path)[0]
     content_type = upstream.headers.get("Content-Type") or guessed_type or "application/octet-stream"
@@ -1896,79 +2161,15 @@ def _get_formatted_list(already_down=False):
         profile_id = (d_item or {}).get("profile_id") or (u_item or {}).get(
             "profile_id"
         )
-        task_record_state = (u_item or {}).get("state") or (d_item or {}).get(
-            "state"
-        )
-        is_failed = is_retryable_failure_state(task_record_state or "")
-        is_upload_failed = task_record_state == "upload_failed"
-
-        # Extract basic info
+        control = get_task_state(chat_id, idx, profile_id)
+        progress = project_task_progress(d_item, u_item, control=control)
+        phase = progress["phase"]
+        is_failed = phase in ("failed", "upload_failed")
+        is_truly_finished = progress["completed"]
         file_name = base_item.get("file_name", "Unknown")
-        total_size = base_item.get("total_size") or base_item.get("total_bytes", 0)
-        
-        # --- Download Status ---
-        down_byte = 0
-        download_speed_val = 0
-        if d_item:
-            down_byte = d_item.get("down_byte", 0)
-            download_speed_val = d_item.get("download_speed", 0)
-        elif u_item:
-            # If no download record but uploading (Streaming), assume download matches upload
-            down_byte = u_item.get("processed_bytes", 0)
-            # Streaming mode: download speed equals upload speed (data flows simultaneously)
-            download_speed_val = u_item.get("upload_speed", 0)
-        
-        # --- Upload Status ---
-        upload_speed_val = 0
-        upload_processed = 0
-        upload_total = total_size
-        is_uploading = False
-        
-        if u_item:
-            is_uploading = True
-            upload_speed_val = u_item.get("upload_speed", 0)
-            upload_processed = u_item.get("processed_bytes", 0)
-            upload_total = u_item.get("total_bytes", total_size)
-            
-        # --- Progress Calculation ---
-        download_progress = 0
-        if total_size > 0:
-            download_progress = min(round(down_byte / total_size * 100, 1), 100.0)
-            
-        upload_progress = 0
-        if is_uploading:
-            if upload_total > 0:
-                upload_progress = min(round(upload_processed / upload_total * 100, 1), 100.0)
-        else:
-            # Fallback simulation for non-uploading tasks (old logic)
-            if download_progress >= 100:
-                upload_progress = 100.0
-            else:
-                upload_progress = min(download_progress, 99.9)
-
-        # --- Activity/Completion Check ---
-        download_complete = bool(
-            d_item
-            and d_item.get("down_byte", 0) >= d_item.get("total_size", 1)
-        )
-        # WebDAV 上传是下载任务的第二阶段；下载到 100% 但上传未完成时仍属于活动任务。
-        # 下载记录还是 pending（未走完上传确认流程）时，即使内存里没有上传记录，
-        # 也不能当成已完成——那是断电/崩溃留下的半程任务，需要等 resume 重跑。
-        upload_complete = bool(
-            task_record_state == "completed"
-            or (
-                u_item
-                and upload_total > 0
-                and upload_processed >= upload_total
-            )
-        )
-        is_truly_finished = download_complete and upload_complete
-        
-        # If it's effectively 100% data transfer but NOT yet marked finished in history,
-        # it means it's "Finishing" (waiting for server to close the stream/confirm receipt)
-        is_finishing = False
-        if download_complete and is_uploading and upload_progress >= 99.9:
-            is_finishing = True
+        total_size = progress["total_bytes"]
+        download_progress = progress["download_progress"]
+        upload_progress = progress["upload_progress"]
 
         # Filter based on requested list type
         if already_down:
@@ -1981,8 +2182,8 @@ def _get_formatted_list(already_down=False):
                 continue
 
         # --- Strings Formatting ---
-        download_speed_str = format_byte(download_speed_val) + "/s"
-        upload_speed_str = format_byte(upload_speed_val) + "/s"
+        download_speed_str = (format_byte(progress["download_speed"]) if progress["download_speed"] else "0B") + "/s"
+        upload_speed_str = (format_byte(progress["upload_speed"]) if progress["upload_speed"] else "0B") + "/s"
         
         # Paths
         local_path = file_name.replace("\\", "/")
@@ -2008,52 +2209,12 @@ def _get_formatted_list(already_down=False):
         created_at_fmt = datetime.fromtimestamp(created_ts, tz=beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
         completed_at_fmt = datetime.fromtimestamp(completed_ts, tz=beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
 
-        # Custom progress string for finishing state
+        # Keep percentages numeric even while awaiting the server acknowledgement.
         display_download_progress = str(download_progress)
         display_upload_progress = str(upload_progress)
-        if is_finishing:
-             display_download_progress = "Finishing..."
-             display_upload_progress = "Finishing..."
-
-        # Determine status text
-        # 本机已完整、仅云盘失败时单独文案，便于仪表盘区分“下载失败”和“上传失败”。
-        # AI 分类阶段（抽帧/转写/识图）发生在下载完成后、上传开始前，优先展示。
         ai_status = (d_item or {}).get("ai_status") or ""
-        status_text = ""
-        if is_upload_failed:
-            status_text = "上传失败"
-        elif is_failed:
-            status_text = "失败"
-        elif is_truly_finished:
-            status_text = "已完成"
-        elif ai_status:
-            status_text = f"AI {ai_status}"
-        elif is_uploading:
-            if is_finishing:
-                status_text = "正在完成..."
-            elif upload_progress > 0:
-                status_text = "上传中"
-            else:
-                status_text = "准备上传"
-        elif download_progress > 0:
-            status_text = "下载中"
-        else:
-            status_text = "等待中"
-
-        # 上传失败时本机进度应为 100%，避免 UI 看起来像没下完。
-        if is_upload_failed and total_size > 0:
-            download_progress = 100.0
-            display_download_progress = "100.0"
-
-        projected_state = (
-            task_record_state
-            if is_failed
-            else (
-                get_task_state(chat_id, idx, profile_id)
-                if not already_down
-                else "finished"
-            )
-        )
+        status_text = "失败" if phase == "failed" else progress["phase_label"]
+        projected_state = phase if is_failed or phase == "paused" else "finished" if is_truly_finished else control
 
         item = {
             "chat": str(chat_id),
@@ -2062,8 +2223,8 @@ def _get_formatted_list(already_down=False):
             "total_size": format_byte(total_size),
             "download_progress": display_download_progress,
             "upload_progress": display_upload_progress,
-            "download_speed": download_speed_str if not is_finishing else "0.0b/s",
-            "upload_speed": upload_speed_str if not is_finishing else "0.0b/s",
+            "download_speed": download_speed_str,
+            "upload_speed": upload_speed_str,
             "save_path": local_path,
             "remote_path": remote_path,
             "relative_path": relative_path,
@@ -2075,10 +2236,13 @@ def _get_formatted_list(already_down=False):
             "profileId": profile_id,
             "state": projected_state,
             "status": status_text,
+            "phase": phase,
+            "phase_label": progress["phase_label"],
             "ai_status": ai_status,
             "ai_summary": (d_item or {}).get("ai_summary") or "",
+            "resource_analysis": (d_item or {}).get("resource_analysis"),
             "ai_tags": (d_item or {}).get("ai_tags") or [],
-            "error": (u_item or {}).get("error") or (d_item or {}).get("error") or "",
+            "error": progress["error"],
         }
         data.append(item)
     return data
@@ -2212,6 +2376,13 @@ def api_task_control():
             set_task_state(chat_id, message_id, "deleted", profile_id)
             cancel_bot_tasks_for_message(chat_id, message_id, profile_id)
             remove_download_task(chat_id, message_id, profile_id)
+            if _app_instance and getattr(_app_instance, "cloud_drive_config", None):
+                relative_path = matched_task.get("relative_path")
+                if relative_path:
+                    try:
+                        catalog_store(_app_instance.cloud_drive_config).remove(relative_path)
+                    except (OSError, ValueError):
+                        log.warning("Remote resource deleted but catalog cleanup was unavailable")
             return jsonify(
                 {"success": True, "message": "任务及远程资源已删除"}
             )

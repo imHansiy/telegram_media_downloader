@@ -77,6 +77,25 @@ def set_ai_tags(chat_id: int, message_id: int, tags: list, profile_id=None):
         logger.debug(f"set_ai_tags failed: {e}")
 
 
+def set_resource_analysis(chat_id, message_id, analysis, profile_id=None):
+    """Replace all derived fields together; failed reanalysis clears stale prose."""
+    record = _download_result.get(chat_id, {}).get(message_id)
+    if record is None or (profile_id and record.get("profile_id") not in (None, profile_id)):
+        return
+    record["resource_analysis"] = analysis
+    record["ai_summary"] = analysis.get("summary", "")
+    if analysis.get("status") != "complete" and analysis.get("content_description"):
+        record["ai_summary"] = (
+            "内容观察（分类未确认）：" + analysis["content_description"]
+            + "\n" + record["ai_summary"]
+        )
+    if analysis.get("status") == "needs_review" and analysis.get("review_note"):
+        record["ai_summary"] += "\n模型说明：" + analysis["review_note"]
+    record["ai_tags"] = analysis.get("tags", [])
+    if db.conn:
+        db.save_setting("download_history", _download_result)
+
+
 def get_total_download_speed() -> int:
     """get total download speed. Uses sum of active task speeds as fallback."""
     global _total_download_speed
@@ -454,6 +473,8 @@ def verify_and_save_download(
             item["profile_id"] = profile_id or item.get("profile_id")
             item["state"] = "completed"
             item["error"] = ""
+            if file_name:
+                item["file_name"] = file_name
             print(
                 f"DEBUG: [stat] Updated existing record for chat={chat_id}, msg={message_id}"
             )

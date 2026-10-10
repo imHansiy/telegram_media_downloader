@@ -1,5 +1,6 @@
 """provide upload cloud drive"""
 import asyncio
+import copy
 import functools
 import importlib
 import inspect
@@ -7,6 +8,7 @@ import os
 import posixpath
 import re
 import urllib.parse
+import uuid
 from asyncio import subprocess
 from subprocess import Popen
 from typing import Callable, Optional
@@ -16,6 +18,7 @@ import aiohttp
 from loguru import logger
 
 from utils import platform
+from module.video_cover import read_cover
 
 
 # pylint: disable = R0902
@@ -393,6 +396,77 @@ class CloudDrive:
             ret = CloudDrive.aligo_upload_file(drive_config, save_path, local_file_path)
 
         return ret
+
+    @staticmethod
+    async def upload_sidecar(drive_config: CloudDriveConfig, save_path: str, local_file_path: str) -> bool:
+        """Publish a small saved cover next to its video without replacing remote files.
+
+        Called after the parent video upload, so the destination directory exists.
+        A UUID staging object plus MOVE Overwrite:F prevents partial final JPEGs.
+        The local cover is retained, including when publication fails.
+        """
+        data = await asyncio.to_thread(read_cover, local_file_path)
+        if data is None:
+            return False
+        if drive_config.upload_adapter != "webdav":
+            if not drive_config.enable_upload_file:
+                return False
+            options = copy.copy(drive_config)
+            options.before_upload_file_zip = False
+            options.after_upload_file_delete = False
+            if options.upload_adapter == "rclone":
+                return await CloudDrive.rclone_upload_file(options, save_path, local_file_path)
+            if options.upload_adapter == "aligo":
+                return await asyncio.to_thread(CloudDrive.aligo_upload_file, options, save_path, local_file_path)
+            return False
+
+        try:
+            relative = CloudDrive.get_relative_upload_path(save_path, local_file_path)
+            final_path = f"{drive_config.remote_dir.strip('/')}/{relative}".strip("/")
+            final_url = CloudDrive.build_webdav_remote_url(drive_config, final_path)
+            staging_path = f"{final_path}.upload-{uuid.uuid4().hex}.tmp"
+            staging_url = CloudDrive.build_webdav_remote_url(drive_config, staging_path)
+            auth = (aiohttp.BasicAuth(drive_config.webdav_username, drive_config.webdav_password)
+                    if drive_config.webdav_username else None)
+            timeout = aiohttp.ClientTimeout(total=30, connect=10)
+            async with aiohttp.ClientSession(auth=auth, timeout=timeout) as session:
+                async with session.head(final_url, allow_redirects=True) as response:
+                    if response.status in (200, 204):
+                        return True  # Preserve any existing cover, even when its size differs.
+                    if response.status != 404:
+                        return False
+                cleanup_staging = False
+                try:
+                    async with session.put(staging_url, data=data, headers={
+                        "Content-Type": "image/jpeg", "If-None-Match": "*"
+                    }) as response:
+                        if response.status not in (200, 201, 204):
+                            return False
+                        cleanup_staging = True
+                    async with session.head(staging_url) as response:
+                        if response.status not in (200, 204) or int(response.headers.get("Content-Length", -1)) != len(data):
+                            return False
+                    async with session.request("MOVE", staging_url, headers={
+                        "Destination": final_url, "Overwrite": "F"
+                    }) as response:
+                        status = response.status
+                        if status not in (200, 201, 204, 412):
+                            return False
+                    async with session.head(final_url) as response:
+                        return response.status in (200, 204) and (
+                            status == 412 or int(response.headers.get("Content-Length", -1)) == len(data)
+                        )
+                finally:
+                    # Do not delete a staging object when PUT refused ownership.
+                    if cleanup_staging:
+                        try:
+                            async with session.delete(staging_url) as response:
+                                await response.read()
+                        except (aiohttp.ClientError, asyncio.TimeoutError):
+                            logger.warning("Cover staging cleanup failed; final video and cover were not removed.")
+        except (OSError, ValueError, aiohttp.ClientError, asyncio.TimeoutError) as error:
+            logger.warning(f"Cover upload failed ({type(error).__name__}); local JPEG retained.")
+            return False
 
     @staticmethod
     async def webdav_head_size(

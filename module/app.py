@@ -162,6 +162,12 @@ class TaskNode:
         self.skip_download_task = 0
         self.last_reply_time = time.time()
         self.last_edit_msg: str = ""
+        # Delivery acknowledgements are separate from the download lifecycle.
+        # These are runtime-only: an unsent final card must remain retryable.
+        self.status_update_inflight = False
+        self.status_retry_at = 0.0
+        self.final_status_delivered = False
+        self.status_delivery_unavailable = False
         self.total_download_byte = 0
         self.forward_msg_detail_str: str = ""
         self.upload_user = None
@@ -449,6 +455,7 @@ class Application:
         self.profile_id: str = None
         self.file_path_prefix: List[str] = ["chat_title", "media_datetime"]
         self.video_classifier_config: dict = {}
+        self.generate_video_covers = True
         self.file_name_prefix: List[str] = ["message_id", "file_name"]
         self.file_name_prefix_split: str = " - "
         self.log_file_path = os.path.join(os.path.abspath("."), "log")
@@ -540,6 +547,7 @@ class Application:
         self.file_formats = _config.get("file_formats", {})
 
         self.hide_file_name = _config.get("hide_file_name", False)
+        self.generate_video_covers = _config.get("generate_video_covers", True) is not False
 
         # option
         if _config.get("proxy"):
@@ -878,11 +886,11 @@ class Application:
                 progress_args,
             )
         elif self.cloud_drive_config.upload_adapter == "aligo":
-            ret = await self.loop.run_in_executor(
-                self.executor,
-                CloudDrive.aligo_upload_file(
-                    self.cloud_drive_config, self.save_path, local_file_path
-                ),
+            ret = await asyncio.to_thread(
+                CloudDrive.aligo_upload_file,
+                self.cloud_drive_config,
+                self.save_path,
+                local_file_path,
             )
 
         return ret
@@ -1046,6 +1054,7 @@ class Application:
             idx += 1
 
         self.config["save_path"] = self.save_path
+        self.config["generate_video_covers"] = self.generate_video_covers
         self.config["file_path_prefix"] = self.file_path_prefix
         if self.video_classifier_config:
             self.config["video_classifier"] = self.video_classifier_config

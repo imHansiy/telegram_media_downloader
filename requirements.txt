@@ -18,3 +18,5 @@ python-dotenv
 aiohttp
 psutil
 Pillow>=10.0.0,<12
+pypdf>=5.0,<6
+jsonschema>=4.23,<5

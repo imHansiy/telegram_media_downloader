@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState } from "react";
+import { kindLabels, ResourceKind } from "../library/model";
 import {
   BotStatusConfig,
   BotStartupNotificationMode,
@@ -12,22 +13,16 @@ import {
   MediaType,
   VideoClassifierConfig,
   defaultVideoClassifier,
-} from '../types';
+} from "../types";
 import {
   Bell,
-  Save,
-  RefreshCw,
   Check,
-  Sliders,
   Cloud,
-  AlertTriangle,
-  Lock,
-  Key,
-  CheckCircle2,
-  HelpCircle,
-  FolderSync,
+  RefreshCw,
+  Save,
+  Settings2,
   Sparkles,
-} from 'lucide-react';
+} from "lucide-react";
 
 interface ConfigPanelProps {
   config: CloudStorageConfig;
@@ -36,7 +31,12 @@ interface ConfigPanelProps {
   vcConfig: VideoClassifierConfig;
   onSaveConfig: (config: CloudStorageConfig) => void;
   onSaveRule: (rule: SyncRule) => void;
-  onSaveAll?: (config: CloudStorageConfig, rule: SyncRule, statusConfig: BotStatusConfig, vcConfig?: VideoClassifierConfig) => void;
+  onSaveAll?: (
+    config: CloudStorageConfig,
+    rule: SyncRule,
+    statusConfig: BotStatusConfig,
+    vcConfig?: VideoClassifierConfig,
+  ) => Promise<void> | void;
 }
 
 export function ConfigPanel({
@@ -51,19 +51,17 @@ export function ConfigPanel({
   // Local states for cloud storage config
   const [davUrl, setDavUrl] = useState(config.url);
   const [davUser, setDavUser] = useState(config.username);
-  const [davPass, setDavPass] = useState(config.password || '');
+  const [davPass, setDavPass] = useState(config.password || "");
   const [davDir, setDavDir] = useState(config.remoteDir);
-  const [dlRate, setDlRate] = useState(config.downloadRateLimitKb);
-  const [ulRate, setUlRate] = useState(config.uploadRateLimitKb);
 
   // Local states for Sync rules
   const [mediaTypes, setMediaTypes] = useState<MediaType[]>(rule.mediaTypes);
-  const [minSize, setMinSize] = useState(rule.minSizeMb);
-  const [maxSize, setMaxSize] = useState(rule.maxSizeMb);
   const [savePathPattern, setSavePathPattern] = useState(rule.savePathPattern);
-  const [autoSync, setAutoSync] = useState(rule.autoSync);
-  const [dateThreshold, setDateThreshold] = useState(rule.dateThreshold);
-  const [startupNotificationMode, setStartupNotificationMode] = useState<BotStartupNotificationMode>(statusConfig.startupNotificationMode);
+  const [generateVideoCovers, setGenerateVideoCovers] = useState(
+    rule.generateVideoCovers,
+  );
+  const [startupNotificationMode, setStartupNotificationMode] =
+    useState<BotStartupNotificationMode>(statusConfig.startupNotificationMode);
   const [statusChatId, setStatusChatId] = useState(statusConfig.statusChatId);
 
   // Local states for video AI classifier
@@ -72,66 +70,99 @@ export function ConfigPanel({
   const [vcApiKey, setVcApiKey] = useState(vcConfig.apiKey);
   const [vcModel, setVcModel] = useState(vcConfig.model);
   const [vcMaxFrames, setVcMaxFrames] = useState(vcConfig.maxFrames);
+  const [vcNarrativeFrames, setVcNarrativeFrames] = useState(vcConfig.narrativeFrames);
   const [vcTimeout, setVcTimeout] = useState(vcConfig.timeoutSec);
   const [vcMaxSize, setVcMaxSize] = useState(vcConfig.maxVideoSizeMb);
-  const [vcMinConfidence, setVcMinConfidence] = useState(vcConfig.minConfidence);
+  const [vcMinConfidence, setVcMinConfidence] = useState(
+    vcConfig.minConfidence,
+  );
+  const [vcTypes, setVcTypes] = useState<ResourceKind[]>(
+    vcConfig.resourceTypes,
+  );
+  const [vcTranscribe, setVcTranscribe] = useState(vcConfig.transcribe);
+  const [vcShareSourceText, setVcShareSourceText] = useState(vcConfig.shareSourceText === true);
+  const [vcUseSubtitles, setVcUseSubtitles] = useState(vcConfig.useSubtitles === true);
+  const [vcAudioSeconds, setVcAudioSeconds] = useState(
+    vcConfig.maxAudioSeconds,
+  );
+  const [vcOrganize, setVcOrganize] = useState(vcConfig.organizeFolders);
 
   // Connection testing state
-  const [testState, setTestState] = useState<'idle' | 'checking' | 'success' | 'failed'>('idle');
-  const [testMsg, setTestMsg] = useState('');
+  const [testState, setTestState] = useState<
+    "idle" | "checking" | "success" | "failed"
+  >("idle");
+  const [testMsg, setTestMsg] = useState("");
 
   // Notification feedbacks
   const [saveFeedback, setSaveFeedback] = useState(false);
+  const [section, setSection] = useState("storage");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const [dirty, setDirty] = useState(false);
+  useEffect(() => {
+    if (!dirty) return;
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => window.removeEventListener("beforeunload", beforeUnload);
+  }, [dirty]);
 
   useEffect(() => {
-    setDavUrl(config.url || '');
-    setDavUser(config.username || '');
-    setDavPass(config.password || '');
-    setDavDir(config.remoteDir || '');
-    setDlRate(config.downloadRateLimitKb || 0);
-    setUlRate(config.uploadRateLimitKb || 0);
+    setDavUrl(config.url || "");
+    setDavUser(config.username || "");
+    setDavPass(config.password || "");
+    setDavDir(config.remoteDir || "");
   }, [config]);
 
   useEffect(() => {
     setMediaTypes(rule.mediaTypes || []);
-    setMinSize(rule.minSizeMb || 0);
-    setMaxSize(rule.maxSizeMb || 0);
     setSavePathPattern(rule.savePathPattern);
-    setAutoSync(rule.autoSync);
-    setDateThreshold(rule.dateThreshold);
+    setGenerateVideoCovers(rule.generateVideoCovers);
   }, [rule]);
 
   useEffect(() => {
-    setStartupNotificationMode(statusConfig.startupNotificationMode || 'off');
-    setStatusChatId(statusConfig.statusChatId || '');
+    setStartupNotificationMode(statusConfig.startupNotificationMode || "off");
+    setStatusChatId(statusConfig.statusChatId || "");
   }, [statusConfig]);
 
   useEffect(() => {
     setVcEnable(vcConfig.enable === true);
     setVcApiBase(vcConfig.apiBase || defaultVideoClassifier.apiBase);
-    setVcApiKey(vcConfig.apiKey || '');
+    setVcApiKey(vcConfig.apiKey || "");
     setVcModel(vcConfig.model || defaultVideoClassifier.model);
     setVcMaxFrames(vcConfig.maxFrames || defaultVideoClassifier.maxFrames);
+    setVcNarrativeFrames(vcConfig.narrativeFrames || defaultVideoClassifier.narrativeFrames);
     setVcTimeout(vcConfig.timeoutSec || defaultVideoClassifier.timeoutSec);
-    setVcMaxSize(vcConfig.maxVideoSizeMb || defaultVideoClassifier.maxVideoSizeMb);
-    setVcMinConfidence(vcConfig.minConfidence || defaultVideoClassifier.minConfidence);
+    setVcMaxSize(
+      vcConfig.maxVideoSizeMb || defaultVideoClassifier.maxVideoSizeMb,
+    );
+    setVcMinConfidence(
+      vcConfig.minConfidence ?? defaultVideoClassifier.minConfidence,
+    );
+    setVcTypes(vcConfig.resourceTypes ?? defaultVideoClassifier.resourceTypes);
+    setVcTranscribe(vcConfig.transcribe);
+    setVcShareSourceText(vcConfig.shareSourceText === true);
+    setVcUseSubtitles(vcConfig.useSubtitles === true);
+    setVcAudioSeconds(vcConfig.maxAudioSeconds ?? 180);
+    setVcOrganize(vcConfig.organizeFolders !== false);
   }, [vcConfig]);
 
   const handleTestConnection = async (e: React.MouseEvent) => {
     e.preventDefault();
     if (!davUrl || !davUser) {
-      setTestState('failed');
-      setTestMsg('错误: 必须填写 WebDAV 服务器地址和账号名！');
+      setTestState("failed");
+      setTestMsg("错误: 必须填写 WebDAV 服务器地址和账号名！");
       return;
     }
 
-    setTestState('checking');
-    setTestMsg('正在连接 WebDAV 服务器...');
+    setTestState("checking");
+    setTestMsg("正在连接 WebDAV 服务器...");
 
     try {
-      const response = await fetch('/test_webdav', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      const response = await fetch("/test_webdav", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           url: davUrl,
           username: davUser,
@@ -139,43 +170,56 @@ export function ConfigPanel({
         }),
       });
       const data = await response.json();
-      setTestState(data.success ? 'success' : 'failed');
-      setTestMsg(data.message || (data.success ? '连接测试成功。' : '连接测试失败。'));
+      setTestState(response.ok && data.success ? "success" : "failed");
+      setTestMsg(
+        data.message || (data.success ? "连接测试成功。" : "连接测试失败。"),
+      );
     } catch (error) {
-      setTestState('failed');
+      setTestState("failed");
       setTestMsg(error instanceof Error ? error.message : String(error));
     }
   };
 
   const toggleMediaType = (type: MediaType) => {
     if (mediaTypes.includes(type)) {
-      setMediaTypes(mediaTypes.filter(t => t !== type));
+      setMediaTypes(mediaTypes.filter((t) => t !== type));
     } else {
       setMediaTypes([...mediaTypes, type]);
     }
   };
 
-  const handleSaveAll = (e: React.FormEvent) => {
+  const handleSaveAll = async (e: React.FormEvent) => {
     e.preventDefault();
+    const invalid = e.currentTarget.querySelector<HTMLInputElement>(
+      "input:invalid, select:invalid, textarea:invalid",
+    );
+    if (invalid) {
+      const target =
+        invalid.closest<HTMLElement>("[data-section]")?.dataset.section;
+      if (target) setSection(target);
+      const advanced = invalid.closest("details");
+      if (advanced) advanced.open = true;
+      requestAnimationFrame(() => {
+        invalid.focus();
+        invalid.reportValidity();
+      });
+      return;
+    }
 
     const nextConfig = {
-      type: 'webdav',
+      ...config,
+      type: "webdav",
       url: davUrl,
       username: davUser,
       password: davPass,
       remoteDir: davDir,
-      downloadRateLimitKb: Number(dlRate),
-      uploadRateLimitKb: Number(ulRate)
     } as CloudStorageConfig;
 
     const nextRule = {
       ...rule,
       mediaTypes,
-      minSizeMb: Number(minSize),
-      maxSizeMb: Number(maxSize),
       savePathPattern,
-      autoSync,
-      dateThreshold
+      generateVideoCovers,
     } as SyncRule;
 
     const nextStatusConfig = {
@@ -189,532 +233,585 @@ export function ConfigPanel({
       apiKey: vcApiKey.trim(),
       model: vcModel.trim(),
       maxFrames: Number(vcMaxFrames) || defaultVideoClassifier.maxFrames,
+      narrativeFrames: Number(vcNarrativeFrames) || defaultVideoClassifier.narrativeFrames,
       timeoutSec: Number(vcTimeout) || defaultVideoClassifier.timeoutSec,
-      maxVideoSizeMb: Number(vcMaxSize) || defaultVideoClassifier.maxVideoSizeMb,
-      minConfidence: Number(vcMinConfidence) || defaultVideoClassifier.minConfidence,
+      maxVideoSizeMb:
+        Number(vcMaxSize) || defaultVideoClassifier.maxVideoSizeMb,
+      minConfidence: Number(vcMinConfidence),
+      resourceTypes: vcTypes,
+      transcribe: vcTranscribe,
+      shareSourceText: vcShareSourceText,
+      useSubtitles: vcUseSubtitles,
+      maxAudioSeconds: Number(vcAudioSeconds) || 180,
+      organizeFolders: vcOrganize,
     } as VideoClassifierConfig;
 
-    if (onSaveAll) {
-      onSaveAll(nextConfig, nextRule, nextStatusConfig, nextVcConfig);
-    } else {
-      onSaveConfig(nextConfig);
-      onSaveRule(nextRule);
+    if (vcEnable && vcTypes.length === 0) {
+      setSaveError("请至少选择一种需要分析的资源类型。");
+      setSection("analysis");
+      return;
     }
-
-    // Show feedback popup toast
-    setSaveFeedback(true);
-    setTimeout(() => setSaveFeedback(false), 3000);
+    setSaving(true);
+    setSaveError("");
+    setSaveFeedback(false);
+    try {
+      if (onSaveAll)
+        await onSaveAll(nextConfig, nextRule, nextStatusConfig, nextVcConfig);
+      else {
+        onSaveConfig(nextConfig);
+        onSaveRule(nextRule);
+      }
+      setSaveFeedback(true);
+      setDirty(false);
+    } catch (reason) {
+      setSaveError(
+        reason instanceof Error ? reason.message : "保存失败，请重试。",
+      );
+    } finally {
+      setSaving(false);
+    }
   };
 
+  const sections = [
+    {
+      id: "storage",
+      label: "云盘连接",
+      icon: Cloud,
+      description: "配置归档文件的位置与云盘连接。",
+    },
+    {
+      id: "rules",
+      label: "下载规则",
+      icon: Settings2,
+      description: "选择要同步的媒体，以及归档方式。",
+    },
+    {
+      id: "analysis",
+      label: "资源分析",
+      icon: Sparkles,
+      description: "先识别类型，再按类别生成内容分析。",
+    },
+    {
+      id: "notifications",
+      label: "通知",
+      icon: Bell,
+      description: "决定启动消息发送到哪里。",
+    },
+  ];
+  const active = sections.find((item) => item.id === section)!;
   return (
-    <form id="form-config-settings" onSubmit={handleSaveAll} className="space-y-6">
-      
-      {/* Save state notification banner */}
-      {saveFeedback && (
-        <div id="toast-save-success" className="bg-emerald-500/10 border border-emerald-500/30 p-3 rounded-lg flex items-center gap-2.5 text-xs text-emerald-400 font-medium animate-fadeIn">
-          <Check className="w-4 h-4 bg-emerald-500/20 rounded-full p-0.5" />
-          <span>同步策略与 WebDAV 云端挂载参数已成功保存并同步！后台服务将即时应用新规则。</span>
-        </div>
-      )}
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-
-        {/* Column 1: WebDAV Cloud Drive Config */}
-        <div className="space-y-4 bg-slate-900 border border-slate-800 p-5 rounded-xl">
-          <div className="flex items-center gap-2 border-b border-slate-800 pb-3">
-            <Cloud className="w-4 h-4 text-indigo-400" />
+    <form
+      id="form-config-settings"
+      noValidate
+      data-unsaved={dirty}
+      onSubmit={handleSaveAll}
+      onChangeCapture={() => {
+        setDirty(true);
+        setSaveFeedback(false);
+      }}
+      className="settings-workspace"
+    >
+      <nav className="settings-navigation" aria-label="设置分区">
+        <div className="library-nav-heading">工作台设置</div>
+        {sections.map(({ id, label, icon: Icon }) => (
+          <button
+            type="button"
+            key={id}
+            className={`category-link ${section === id ? "active" : ""}`}
+            aria-current={section === id ? "true" : undefined}
+            onClick={() => setSection(id)}
+          >
+            <Icon size={19} />
+            {label}
+          </button>
+        ))}
+      </nav>
+      <div className="settings-main">
+        <header className="workspace-page-header">
+          <div className="page-heading">
             <div>
-              <h3 className="text-xs font-semibold text-slate-200">云盘挂载配置 (WebDAV Target)</h3>
-              <p className="text-[10px] text-slate-500">将电报文件自动传输并备份到支持 WebDAV 协议的存储提供商</p>
+              <div className="eyebrow">设置</div>
+              <h1>{active.label}</h1>
+              <p>{active.description}</p>
             </div>
+            <span
+              className={`save-state ${dirty ? "unsaved" : ""}`}
+              role="status"
+            >
+              {saving
+                ? "正在保存…"
+                : dirty
+                  ? "有未保存的更改"
+                  : saveFeedback
+                    ? "已保存"
+                    : "当前配置"}
+            </span>
           </div>
-
-          <div className="space-y-3 text-xs">
-            {/* Host url input */}
-            <div className="space-y-1">
-              <label className="block text-slate-400 font-medium">WebDAV 服务器地址 (Host URL)</label>
-              <input
-                id="input-dav-url"
-                type="text"
-                required
-                className="w-full bg-slate-950/70 border border-slate-800 focus:border-indigo-500 rounded-lg p-2.5 text-slate-300 font-mono focus:outline-none"
-                placeholder="例如: https://dav.jianguoyun.com/dav/"
-                value={davUrl}
-                onChange={(e) => setDavUrl(e.target.value)}
-              />
-              <span className="text-[10px] text-slate-500 block">
-                支持坚果云、Nextcloud、OwnCloud、Alist、OneDrive WebDAV 等
-              </span>
-            </div>
-
-            {/* Username password grids */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div className="space-y-1">
-                <label className="block text-slate-400 font-medium">账号/电子邮箱 (Username)</label>
-                <input
-                  id="input-dav-user"
-                  type="text"
-                  required
-                  className="w-full bg-slate-950/70 border border-slate-800 focus:border-indigo-500 rounded-lg p-2.5 text-slate-300 focus:outline-none"
-                  placeholder="name@example.com"
-                  value={davUser}
-                  onChange={(e) => setDavUser(e.target.value)}
-                />
+        </header>
+        <div className="settings-scroll">
+          <fieldset disabled={saving} className="settings-fields">
+            <section
+              hidden={section !== "storage"}
+              data-section="storage"
+              className="settings-section"
+              aria-label="云盘连接设置"
+            >
+              <div className="section-title">
+                <h2>WebDAV 连接</h2>
+                <p>用于归档文件和浏览真实目录。</p>
               </div>
-              <div className="space-y-1">
-                <label className="block text-slate-400 font-medium flex items-center gap-1">
-                  应用授权密码 (Password)
-                  <Lock className="w-3 h-3 text-slate-600" />
-                </label>
-                <input
-                  id="input-dav-pass"
-                  type="password"
-                  required
-                  className="w-full bg-slate-950/70 border border-slate-800 focus:border-indigo-500 rounded-lg p-2.5 text-slate-300 focus:outline-none font-mono"
-                  placeholder="••••••••••••••••"
-                  value={davPass}
-                  onChange={(e) => setDavPass(e.target.value)}
-                />
+              <div className="field-grid">
+                <Field
+                  label="服务器地址"
+                  wide
+                  hint="填写完整的 WebDAV 服务地址。"
+                >
+                  <input
+                    type="url"
+                    value={davUrl}
+                    onChange={(event) => setDavUrl(event.target.value)}
+                    placeholder="https://cloud.example.com/dav"
+                  />
+                </Field>
+                <Field label="账号">
+                  <input
+                    autoComplete="username"
+                    value={davUser}
+                    onChange={(event) => setDavUser(event.target.value)}
+                  />
+                </Field>
+                <Field label="密码">
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    value={davPass}
+                    onChange={(event) => setDavPass(event.target.value)}
+                  />
+                </Field>
+                <Field label="远端根目录" wide hint="资源将归档在这个目录下。">
+                  <input
+                    value={davDir}
+                    onChange={(event) => setDavDir(event.target.value)}
+                    placeholder="telegram"
+                  />
+                </Field>
               </div>
-            </div>
-
-            {/* Sync Directory Path */}
-            <div className="space-y-1">
-              <label className="block text-slate-400 font-medium">云盘存储根路径 (Remote Base Directory)</label>
-              <input
-                id="input-dav-dir"
-                type="text"
-                required
-                className="w-full bg-slate-950/70 border border-slate-800 focus:border-indigo-500 rounded-lg p-2.5 text-slate-300 font-mono focus:outline-none"
-                placeholder="/TelegramSync"
-                value={davDir}
-                onChange={(e) => setDavDir(e.target.value)}
-              />
-            </div>
-
-            {/* Throttles speed limit setup */}
-            <div className="border-t border-slate-800 my-4 pt-3">
-              <span className="text-[11px] font-semibold text-slate-400 block mb-3 uppercase tracking-wider font-mono">
-                并发传输限速管理
-              </span>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <label className="block text-slate-400">下载速率上限 (0 代表不限速)</label>
-                  <div className="relative">
-                    <input
-                      id="input-dl-rate"
-                      type="number"
-                      min="0"
-                      className="w-full bg-slate-950/70 border border-slate-800 focus:border-indigo-500 rounded-lg p-2 pr-12 text-slate-300 font-mono focus:outline-none"
-                      value={dlRate}
-                      onChange={(e) => setDlRate(Number(e.target.value) || 0)}
-                    />
-                    <span className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-500 pointer-events-none font-mono">
-                      KB/s
-                    </span>
-                  </div>
-                </div>
-                <div className="space-y-1">
-                  <label className="block text-slate-400">同步上传速率 (0 代表最大带宽)</label>
-                  <div className="relative">
-                    <input
-                      id="input-ul-rate"
-                      type="number"
-                      min="0"
-                      className="w-full bg-slate-950/70 border border-slate-800 focus:border-indigo-500 rounded-lg p-2 pr-12 text-slate-300 font-mono focus:outline-none"
-                      value={ulRate}
-                      onChange={(e) => setUlRate(Number(e.target.value) || 0)}
-                    />
-                    <span className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-500 pointer-events-none font-mono">
-                      KB/s
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Test button and results info panel */}
-            <div className="pt-2">
-              <button
-                id="btn-test-dav-conn"
-                type="button"
-                onClick={handleTestConnection}
-                disabled={testState === 'checking'}
-                className="w-full py-2 bg-slate-800 hover:bg-slate-755 border border-slate-700/80 hover:border-slate-650 text-slate-200 hover:text-white rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-              >
-                {testState === 'checking' ? (
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-indigo-400" />
-                ) : (
-                  <FolderSync className="w-3.5 h-3.5 text-indigo-400" />
+              <div className="connection-test">
+                <button
+                  type="button"
+                  id="btn-test-dav-conn"
+                  className="button"
+                  disabled={testState === "checking"}
+                  onClick={handleTestConnection}
+                >
+                  <RefreshCw
+                    size={17}
+                    className={testState === "checking" ? "spin" : ""}
+                  />
+                  {testState === "checking" ? "测试中…" : "测试连接"}
+                </button>
+                {testState !== "idle" && (
+                  <p
+                    role={testState === "failed" ? "alert" : "status"}
+                    className={testState === "failed" ? "danger-text" : "muted"}
+                  >
+                    {testMsg}
+                  </p>
                 )}
-                验证并测试 WebDAV 联通性
-              </button>
-
-              {testState !== 'idle' && (
-                <div id="dav-test-feedback-box" className={`mt-3 p-3 rounded-lg border text-[11px] ${
-                  testState === 'checking' 
-                    ? 'bg-slate-950/40 text-slate-400 border-slate-800' 
-                    : testState === 'success'
-                    ? 'bg-emerald-500/5 text-emerald-400 border-emerald-500/10'
-                    : 'bg-rose-500/5 text-rose-400 border-rose-500/10'
-                }`}>
-                  <p className="font-medium font-mono leading-relaxed">{testMsg}</p>
-                </div>
-              )}
-            </div>
-
-          </div>
-        </div>
-
-        {/* Column 2: Telegram Downloader rule config */}
-        <div className="space-y-4 bg-slate-900 border border-slate-800 p-5 rounded-xl">
-          <div className="flex items-center gap-2 border-b border-slate-800 pb-3">
-            <Sliders className="w-4 h-4 text-indigo-400" />
-            <div>
-              <h3 className="text-xs font-semibold text-slate-200">媒体下载过滤器与目录结构 (Sync Filters)</h3>
-              <p className="text-[10px] text-slate-550">定制您想要拉取的媒体文件库类型、单文件大小限额和存储归类等</p>
-            </div>
-          </div>
-
-          <div className="space-y-4 text-xs">
-            {/* Enable/Disable global daemon process */}
-            <div className="flex items-center justify-between bg-slate-950/40 p-3 rounded-lg border border-slate-800">
-              <div className="space-y-0.5 pr-2">
-                <span className="text-xs font-semibold text-slate-300 block">新消息发布时自动运行 (Real-time daemon)</span>
-                <span className="text-[10px] text-slate-500">当关联的频道出现新媒体资源时，是否秒级启动 WebDAV 同步服务</span>
               </div>
-              <label className="relative inline-flex items-center cursor-pointer select-none">
-                <input
-                  id="checkbox-auto-sync"
-                  type="checkbox"
-                  checked={autoSync}
-                  className="sr-only peer"
-                  onChange={(e) => setAutoSync(e.target.checked)}
-                />
-                <div className="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-300 after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600" />
-              </label>
-            </div>
-
-            {/* Checkboxes: Media types selection */}
-            <div className="space-y-2">
-              <label className="block text-slate-400 font-medium">同步的特定媒体品类 (Media Categories)</label>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                {[
-                  { key: 'photo', label: '图片 (Photos)' },
-                  { key: 'video', label: '视频 (Videos)' },
-                  { key: 'document', label: '文档 (Documents)' },
-                  { key: 'audio', label: '音乐/音频 (Music)' },
-                  { key: 'voice', label: '语音消息 (Voice Notes)' }
-                ].map(item => {
-                  const active = mediaTypes.includes(item.key as MediaType);
-                  return (
-                    <button
-                      id={`btn-toggle-media-${item.key}`}
-                      key={item.key}
-                      type="button"
-                      onClick={() => toggleMediaType(item.key as MediaType)}
-                      className={`py-2 px-3 rounded-lg border text-left transition-all font-medium flex items-center justify-between cursor-pointer ${
-                        active 
-                          ? 'bg-indigo-950/50 border-indigo-500/50 text-indigo-400' 
-                          : 'bg-slate-950/40 border-slate-800 text-slate-500 hover:border-slate-700 hover:text-slate-400'
-                      }`}
-                    >
-                      <span>{item.label}</span>
-                      <input
-                        id={`chk-${item.key}`}
-                        type="checkbox"
-                        checked={active}
-                        readOnly
-                        className="rounded border-slate-700 bg-slate-900 text-indigo-600 focus:ring-0 w-3 h-3 pointer-events-none"
-                      />
-                    </button>
-                  );
-                })}
+            </section>
+            <section
+              hidden={section !== "rules"}
+              data-section="rules"
+              className="settings-section"
+              aria-label="下载规则设置"
+            >
+              <div className="section-title">
+                <h2>同步哪些媒体</h2>
+                <p>选择 Telegram 下载器接收的媒体类型。</p>
               </div>
-            </div>
-
-            {/* Structure Presets option key */}
-            <div className="space-y-1.5">
-              <label className="block text-slate-400 font-medium">
-                层级分类目录布局模板 (Path Pattern Structure)
-              </label>
-              <div className="space-y-2">
+              <div className="choice-grid">
                 {[
-                  { 
-                    key: 'channel_media', 
-                    title: '按来源与媒体归类 (推荐)', 
-                    example: `${davDir}/[数据源_频道名称]/[媒体类型]/[文件名.格式]` 
-                  },
-                  { 
-                    key: 'channel_date', 
-                    title: '按来源与年月归档', 
-                    example: `${davDir}/[数据源_频道名称]/[年-月]/[文件名.格式]` 
-                  },
-                  { 
-                    key: 'date_channel', 
-                    title: '按年月份合并展示', 
-                    example: `${davDir}/[年-月]/[数据源_频道名称]/[文件名.格式]` 
-                  }
-                ].map(pattern => (
-                  <label 
-                    id={`label-pattern-${pattern.key}`}
-                    key={pattern.key}
-                    onClick={() => setSavePathPattern(pattern.key as any)}
-                    className={`flex items-start gap-3 p-2.5 rounded-lg border cursor-pointer transition-all ${
-                      savePathPattern === pattern.key
-                        ? 'bg-slate-850 border-indigo-500/80 text-slate-100'
-                        : 'bg-slate-950/60 border-slate-800/80 text-slate-400 hover:bg-slate-850/60'
-                    }`}
+                  ["photo", "图片"],
+                  ["video", "视频"],
+                  ["document", "文档"],
+                  ["audio", "音乐 / 音频"],
+                  ["voice", "语音消息"],
+                ].map(([key, label]) => (
+                  <label
+                    key={key}
+                    className={`choice-card ${mediaTypes.includes(key as MediaType) ? "chosen" : ""}`}
                   >
                     <input
-                      id={`radio-${pattern.key}`}
-                      type="radio"
-                      name="save-pattern-choice"
-                      checked={savePathPattern === pattern.key}
-                      readOnly
-                      className="mt-0.5 text-indigo-600 border-slate-705"
+                      type="checkbox"
+                      checked={mediaTypes.includes(key as MediaType)}
+                      onChange={() => toggleMediaType(key as MediaType)}
                     />
-                    <div className="space-y-0.5">
-                      <span className="text-[11px] font-semibold text-slate-250 block">{pattern.title}</span>
-                      <span className="text-[10px] text-slate-500 font-mono block break-all">{pattern.example}</span>
-                    </div>
+                    {label}
                   </label>
                 ))}
               </div>
-            </div>
-
-            {/* Size limitations grids */}
-            <div className="grid grid-cols-2 gap-3 pt-1">
-              <div className="space-y-1">
-                <label className="block text-slate-400">跳过过小文件 (MB)</label>
+              <label className="toggle-row">
+                <span>
+                  <strong>下载后自动保存视频封面</strong>
+                  <small>
+                    截取视频约 10%
+                    处的画面，以“视频名.mp4.cover.jpg”保存在视频旁并一起上传。不依赖
+                    AI 分析，已有封面不会覆盖。
+                  </small>
+                </span>
                 <input
-                  id="input-min-size-limit"
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  className="w-full bg-slate-950/70 border border-slate-800 focus:border-indigo-500 rounded-lg p-2 text-slate-300 font-mono focus:outline-none"
-                  value={minSize}
-                  onChange={(e) => setMinSize(Number(e.target.value) || 0)}
+                  type="checkbox"
+                  aria-label="下载后自动保存视频封面"
+                  checked={generateVideoCovers}
+                  onChange={(event) =>
+                    setGenerateVideoCovers(event.target.checked)
+                  }
                 />
-              </div>
-              <div className="space-y-1">
-                <label className="block text-slate-400">单文件最大限制 (MB)</label>
-                <input
-                  id="input-max-size-limit"
-                  type="number"
-                  min="1"
-                  className="w-full bg-slate-950/70 border border-slate-800 focus:border-indigo-500 rounded-lg p-2 text-slate-300 font-mono focus:outline-none"
-                  value={maxSize}
-                  onChange={(e) => setMaxSize(Number(e.target.value) || 2000)}
-                />
-              </div>
-            </div>
-
-            {/* Date filter point option */}
-            <div className="space-y-1 pt-1">
-              <label className="block text-slate-400 font-medium select-none">
-                只拉取此日期之后发布的文件 (UTC 时间设定)
               </label>
-              <input
-                id="input-date-threshold"
-                type="date"
-                className="w-full bg-slate-950/70 border border-slate-800 focus:border-indigo-500 rounded-lg p-2.5 text-slate-300 font-mono focus:outline-none text-xs"
-                value={dateThreshold}
-                onChange={(e) => setDateThreshold(e.target.value)}
-              />
-              <span className="text-[10px] text-slate-500 block">
-                该日期之前的任何历史对话/频道老消息媒体都会在同步扫描中直接跳过
-              </span>
-            </div>
-
-          </div>
-        </div>
-
-        <div className="lg:col-span-2 space-y-4 bg-slate-900 border border-slate-800 p-5 rounded-xl">
-          <div className="flex items-center gap-2 border-b border-slate-800 pb-3">
-            <Sparkles className="w-4 h-4 text-indigo-400" />
-            <div>
-              <h3 className="text-xs font-semibold text-slate-200">视频 AI 分类归档 (Video Classifier)</h3>
-              <p className="text-[10px] text-slate-500">下载完成的视频自动抽帧并调用视觉模型识别内容类别，归档到对应的类别子文件夹</p>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-[1fr_1.6fr] gap-4 text-xs">
-            {/* 启用开关 */}
-            <div className="flex items-center justify-between bg-slate-950/40 p-3 rounded-lg border border-slate-800">
-              <div className="space-y-0.5 pr-2">
-                <span className="text-xs font-semibold text-slate-300 block">启用 AI 分类</span>
-                <span className="text-[10px] text-slate-500">分类失败或置信度不足时自动保持原目录结构</span>
+              <div className="section-title">
+                <h2>归档目录</h2>
+                <p>定义来源、日期和媒体类型的层级。</p>
               </div>
-              <label className="relative inline-flex items-center cursor-pointer select-none">
+              <div className="pattern-options">
+                {[
+                  [
+                    "channel_media",
+                    "按来源与媒体类型",
+                    "[来源] / [媒体类型] / 文件",
+                  ],
+                  ["channel_date", "按来源与月份", "[来源] / [年-月] / 文件"],
+                  ["date_channel", "按月份与来源", "[年-月] / [来源] / 文件"],
+                ].map(([key, label, example]) => (
+                  <label
+                    key={key}
+                    className={`choice-card ${savePathPattern === key ? "chosen" : ""}`}
+                  >
+                    <input
+                      type="radio"
+                      name="save-pattern"
+                      checked={savePathPattern === key}
+                      onChange={() =>
+                        setSavePathPattern(key as SyncRule["savePathPattern"])
+                      }
+                    />
+                    <span>
+                      <strong>{label}</strong>
+                      <small>
+                        {davDir || "根目录"} / {example}
+                      </small>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </section>
+            <section
+              hidden={section !== "analysis"}
+              data-section="analysis"
+              className="settings-section"
+              aria-label="资源分析设置"
+            >
+              <label className="toggle-row">
+                <span>
+                  <strong>启用资源智能分析</strong>
+                  <small>
+                    支持视频、图片、音频、文档、压缩包和软件。包含 NSFW
+                    独立分类与细分。
+                  </small>
+                </span>
                 <input
-                  id="checkbox-vc-enable"
                   type="checkbox"
                   checked={vcEnable}
-                  className="sr-only peer"
-                  onChange={(e) => setVcEnable(e.target.checked)}
+                  onChange={(event) => setVcEnable(event.target.checked)}
                 />
-                <div className="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-300 after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600" />
               </label>
-            </div>
-
-            {/* API 参数 */}
-            <div className={`space-y-3 ${vcEnable ? '' : 'opacity-50 pointer-events-none'}`}>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <label className="block text-slate-400 font-medium">API Base (兼容 OpenAI 协议)</label>
-                  <input
-                    id="input-vc-api-base"
-                    type="text"
-                    className="w-full bg-slate-950/70 border border-slate-800 focus:border-indigo-500 rounded-lg p-2.5 text-slate-300 font-mono focus:outline-none"
-                    placeholder="https://api.openai.com/v1"
-                    value={vcApiBase}
-                    onChange={(e) => setVcApiBase(e.target.value)}
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="block text-slate-400 font-medium flex items-center gap-1">
-                    API Key
-                    <Key className="w-3 h-3 text-slate-600" />
-                  </label>
-                  <input
-                    id="input-vc-api-key"
-                    type="password"
-                    className="w-full bg-slate-950/70 border border-slate-800 focus:border-indigo-500 rounded-lg p-2.5 text-slate-300 font-mono focus:outline-none"
-                    placeholder="sk-..."
-                    value={vcApiKey}
-                    onChange={(e) => setVcApiKey(e.target.value)}
-                  />
-                </div>
+              <div className="analysis-workflow">
+                <span>
+                  <b>1</b>提取内容证据
+                </span>
+                <span>
+                  <b>2</b>识别资源类别
+                </span>
+                <span>
+                  <b>3</b>按类别生成简介
+                </span>
               </div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <div className="space-y-1">
-                  <label className="block text-slate-400">视觉模型</label>
+              <div className="field-grid">
+                <Field label="模型服务地址" wide>
                   <input
-                    id="input-vc-model"
-                    type="text"
-                    className="w-full bg-slate-950/70 border border-slate-800 focus:border-indigo-500 rounded-lg p-2.5 text-slate-300 font-mono focus:outline-none"
+                    type="url"
+                    value={vcApiBase}
+                    onChange={(event) => setVcApiBase(event.target.value)}
+                  />
+                </Field>
+                <Field label="API Key">
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    value={vcApiKey}
+                    onChange={(event) => setVcApiKey(event.target.value)}
+                  />
+                </Field>
+                <Field label="模型名称">
+                  <input
                     value={vcModel}
-                    onChange={(e) => setVcModel(e.target.value)}
+                    onChange={(event) => setVcModel(event.target.value)}
                   />
-                </div>
-                <div className="space-y-1">
-                  <label className="block text-slate-400">抽帧数量</label>
+                </Field>
+              </div>
+              <div className="section-title">
+                <h2>分析资源范围</h2>
+                <p>未选中的类型仍可同步，但不会自动生成内容分析。</p>
+              </div>
+              <div className="choice-grid">
+                {(
+                  [
+                    "video",
+                    "image",
+                    "audio",
+                    "document",
+                    "archive",
+                    "software",
+                  ] as ResourceKind[]
+                ).map((kind) => (
+                  <label
+                    key={kind}
+                    className={`choice-card ${vcTypes.includes(kind) ? "chosen" : ""}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={vcTypes.includes(kind)}
+                      onChange={() =>
+                        setVcTypes((current) =>
+                          current.includes(kind)
+                            ? current.filter((item) => item !== kind)
+                            : [...current, kind],
+                        )
+                      }
+                    />
+                    {kindLabels[kind]}
+                  </label>
+                ))}
+              </div>
+              <div className="field-grid">
+                <Field
+                  label="分类置信度阈值"
+                  hint="低于此值的结果进入待确认，不强行归类。"
+                >
                   <input
-                    id="input-vc-frames"
                     type="number"
-                    min="1"
-                    max="16"
-                    className="w-full bg-slate-950/70 border border-slate-800 focus:border-indigo-500 rounded-lg p-2.5 text-slate-300 font-mono focus:outline-none"
-                    value={vcMaxFrames}
-                    onChange={(e) => setVcMaxFrames(Number(e.target.value) || 4)}
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="block text-slate-400">视频上限 (MB)</label>
-                  <input
-                    id="input-vc-max-size"
-                    type="number"
-                    min="1"
-                    className="w-full bg-slate-950/70 border border-slate-800 focus:border-indigo-500 rounded-lg p-2.5 text-slate-300 font-mono focus:outline-none"
-                    value={vcMaxSize}
-                    onChange={(e) => setVcMaxSize(Number(e.target.value) || 2048)}
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="block text-slate-400">置信度阈值</label>
-                  <input
-                    id="input-vc-confidence"
-                    type="number"
-                    step="0.05"
                     min="0"
                     max="1"
-                    className="w-full bg-slate-950/70 border border-slate-800 focus:border-indigo-500 rounded-lg p-2.5 text-slate-300 font-mono focus:outline-none"
+                    step="0.05"
                     value={vcMinConfidence}
-                    onChange={(e) => setVcMinConfidence(Number(e.target.value) || 0.4)}
+                    onChange={(event) =>
+                      setVcMinConfidence(Number(event.target.value))
+                    }
                   />
-                </div>
+                </Field>
+                <Field label="单文件分析上限（MB）">
+                  <input
+                    type="number"
+                    min="1"
+                    value={vcMaxSize}
+                    onChange={(event) =>
+                      setVcMaxSize(Number(event.target.value))
+                    }
+                  />
+                </Field>
               </div>
-              <span className="text-[10px] text-slate-500 block leading-relaxed">
-                NSFW 中文子类目录：按产地（日本有码 / 日本无码 / 中文字幕AV / 国产流出 / 国产直播 / 欧美片厂 / 欧美素人 / 韩国 / 泰妹东南亚 / 其他亚洲）和形态（里番动画 / 3D动画 / 订阅网红 / 成人cos / 制服校园 / 偷拍 / 写真擦边 / 短视频擦边 / 多人群体 / SM调教 / 丝袜美足 / 男男 / 女女 / AI生成 / 合集剪辑 等），插入为 频道/nsfw/子类/日期/文件；非 NSFW 内容不插类别目录。
-              </span>
-            </div>
-          </div>
-        </div>
-
-        <div className="lg:col-span-2 space-y-4 bg-slate-900 border border-slate-800 p-5 rounded-xl">
-          <div className="flex items-center gap-2 border-b border-slate-800 pb-3">
-            <Bell className="w-4 h-4 text-indigo-400" />
-            <div>
-              <h3 className="text-xs font-semibold text-slate-200">Bot 启动状态通知</h3>
-              <p className="text-[10px] text-slate-500">控制 Render 重启后 Bot 状态消息发送到哪里</p>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-[1.1fr_1fr] gap-4 text-xs">
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-              {[
-                { key: 'off', label: '关闭', desc: '不发送启动消息' },
-                { key: 'admin', label: 'Bot Owner', desc: '发给 Bot 运行账号' },
-                { key: 'status_chat', label: '状态聊天', desc: '发到指定 chat_id' },
-              ].map((item) => {
-                const active = startupNotificationMode === item.key;
-                return (
-                  <button
-                    key={item.key}
-                    type="button"
-                    onClick={() => setStartupNotificationMode(item.key as BotStartupNotificationMode)}
-                    className={`p-3 rounded-lg border text-left transition-all cursor-pointer ${
-                      active
-                        ? 'bg-indigo-950/50 border-indigo-500/50 text-indigo-300'
-                        : 'bg-slate-950/50 border-slate-800 text-slate-500 hover:text-slate-350 hover:border-slate-700'
-                    }`}
+              <label className="toggle-row compact">
+                <span>
+                  <strong>按分析分类组织新上传文件</strong>
+                  <small>重新分析已归档文件时不会移动其云端位置。</small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={vcOrganize}
+                  onChange={(event) => setVcOrganize(event.target.checked)}
+                />
+              </label>
+              <details className="advanced-settings">
+                <summary>采样与处理参数</summary>
+                <div className="field-grid">
+                  <Field
+                    label="分类采样帧数"
+                    hint="分类识别与核验使用的概览帧数；剧情整理另外按下方预算读取时间段画面。"
                   >
-                    <span className="block text-[11px] font-semibold">{item.label}</span>
-                    <span className="block text-[10px] mt-1">{item.desc}</span>
-                  </button>
-                );
-              })}
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="block text-slate-400 font-medium">状态聊天 ID</label>
-              <input
-                type="text"
-                disabled={startupNotificationMode !== 'status_chat'}
-                required={startupNotificationMode === 'status_chat'}
-                className="w-full bg-slate-950/70 disabled:bg-slate-950/30 disabled:text-slate-650 border border-slate-800 focus:border-indigo-500 rounded-lg p-2.5 text-slate-300 font-mono focus:outline-none"
-                placeholder="-1001234567890 或 @status_channel"
-                value={statusChatId}
-                onChange={(e) => setStatusChatId(e.target.value)}
-              />
-              <span className="text-[10px] text-slate-500 block">
-                Bot 需要在该群组或频道内，并拥有发消息权限
-              </span>
-            </div>
+                    <input
+                      type="number"
+                      min="1"
+                      max="16"
+                      value={vcMaxFrames}
+                      onChange={(event) =>
+                        setVcMaxFrames(Number(event.target.value))
+                      }
+                    />
+                  </Field>
+                  <Field label="剧情采样帧数" hint="默认24帧，最多8个时间窗，每窗包含局部前后画面；语音在原总秒数预算内对齐采样。更多画面会增加模型费用，仍不等于完整观看。">
+                    <input type="number" min="6" max="24" value={vcNarrativeFrames}
+                      onChange={(event) => setVcNarrativeFrames(Number(event.target.value))} />
+                  </Field>
+                  <Field
+                    label="请求超时（秒）"
+                    hint="按分类、简介分别计时；临时错误最多重试一次，重试等待上限翻倍（最多 300 秒），可能产生额外模型调用费用。"
+                  >
+                    <input
+                      type="number"
+                      min="1"
+                      value={vcTimeout}
+                      onChange={(event) =>
+                        setVcTimeout(Number(event.target.value))
+                      }
+                    />
+                  </Field>
+                </div>
+                <label className="toggle-row compact">
+                  <span>
+                    <strong>启用本地语音转写</strong>
+                    <small>
+                      需要已安装的本地转写依赖，语音证据用于音频和视频分析。
+                    </small>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={vcTranscribe}
+                    onChange={(event) => setVcTranscribe(event.target.checked)}
+                  />
+                </label>
+                <label className="toggle-row compact">
+                  <span><strong>允许将 Telegram 文案用于分析</strong>
+                    <small>默认关闭。开启并保存后，后续分析会将已保存的消息文案发送到当前配置的模型服务作为待核实线索；不附带聊天 ID 或频道名称字段。原文仍独立保存。</small></span>
+                  <input type="checkbox" checked={vcShareSourceText} onChange={(event) => setVcShareSourceText(event.target.checked)} />
+                </label>
+                <label className="toggle-row compact">
+                  <span><strong>读取本地字幕用于分析</strong>
+                    <small>开启后优先读取内嵌或同名 SRT/VTT 字幕，并将选取的字幕文本发送到当前模型服务。无可用字幕时按转写设置处理；字幕可能错配，不能直接视为事实。</small></span>
+                  <input type="checkbox" checked={vcUseSubtitles} onChange={(event) => setVcUseSubtitles(event.target.checked)} />
+                </label>
+                <Field label="最大转写时长（秒）">
+                  <input
+                    type="number"
+                    min="1"
+                    value={vcAudioSeconds}
+                    onChange={(event) =>
+                      setVcAudioSeconds(Number(event.target.value))
+                    }
+                  />
+                </Field>
+              </details>
+            </section>
+            <section
+              hidden={section !== "notifications"}
+              data-section="notifications"
+              className="settings-section"
+              aria-label="通知设置"
+            >
+              <div className="section-title">
+                <h2>启动通知</h2>
+                <p>控制 Bot 启动时的状态消息，不影响资源同步。</p>
+              </div>
+              <div className="pattern-options">
+                {[
+                  ["off", "不发送", "保持安静，不发送启动状态。"],
+                  ["admin", "发送给管理员", "使用已配置的 Bot 管理员。"],
+                  [
+                    "status_chat",
+                    "发送到指定会话",
+                    "将运行状态集中发送到指定聊天。",
+                  ],
+                ].map(([key, label, description]) => (
+                  <label
+                    key={key}
+                    className={`choice-card ${startupNotificationMode === key ? "chosen" : ""}`}
+                  >
+                    <input
+                      type="radio"
+                      name="startup-notification"
+                      checked={startupNotificationMode === key}
+                      onChange={() =>
+                        setStartupNotificationMode(
+                          key as BotStartupNotificationMode,
+                        )
+                      }
+                    />
+                    <span>
+                      <strong>{label}</strong>
+                      <small>{description}</small>
+                    </span>
+                  </label>
+                ))}
+              </div>
+              {startupNotificationMode === "status_chat" && (
+                <Field
+                  label="状态会话 ID"
+                  hint="填写 Bot 有权限发送消息的聊天 ID。"
+                >
+                  <input
+                    value={statusChatId}
+                    onChange={(event) => setStatusChatId(event.target.value)}
+                    placeholder="-100…"
+                  />
+                </Field>
+              )}
+            </section>
+          </fieldset>
+        </div>
+        <footer className="settings-savebar">
+          <div aria-live="polite">
+            {saveError ? (
+              <p role="alert" className="danger-text">
+                {saveError}
+              </p>
+            ) : saveFeedback ? (
+              <div>
+                <span className="success-text">
+                  <Check size={17} />
+                  设置已成功保存
+                </span>
+                <p className="muted">连接相关设置需重新连接后生效。</p>
+              </div>
+            ) : (
+              <p className="muted">
+                切换分区不会丢失修改，保存将应用所有分区。
+              </p>
+            )}
           </div>
-        </div>
-
+          <button
+            id="btn-save-config"
+            className="button primary"
+            type="submit"
+            disabled={saving}
+          >
+            {saving ? (
+              <RefreshCw size={17} className="spin" />
+            ) : (
+              <Save size={17} />
+            )}
+            {saving ? "正在保存…" : "保存设置"}
+          </button>
+        </footer>
       </div>
-
-      {/* Button save overall changes */}
-      <div className="bg-slate-950/80 p-4 rounded-xl border border-slate-800/85 flex flex-col sm:flex-row items-center justify-between gap-4">
-        <div className="flex items-start gap-2.5">
-          <HelpCircle className="w-4 h-4 text-slate-500 shrink-0 mt-0.5" />
-          <p className="text-[10px] text-slate-400 leading-relaxed max-w-xl">
-            提示：这些同步细则是即时热交换执行的。每次触发 Telegram 客户端下载事件或流式同步扫描时，程序内部规则链条都会根据上述策略自动做出过滤选择。
-          </p>
-        </div>
-        <button
-          id="btn-save-overall-config"
-          type="submit"
-          className="flex items-center gap-1.5 px-6 py-2.5 hover:scale-[1.01] bg-indigo-600 hover:bg-indigo-500 font-bold rounded-lg text-xs text-white shadow-lg shadow-indigo-950/30 transition-all cursor-pointer select-none"
-        >
-          <Save className="w-4 h-4" />
-          应用并保存全局配置
-        </button>
-      </div>
-
     </form>
+  );
+}
+
+function Field({
+  label,
+  children,
+  hint,
+  wide = false,
+}: {
+  label: string;
+  children: React.ReactNode;
+  hint?: string;
+  wide?: boolean;
+}) {
+  return (
+    <label className={`form-field ${wide ? "field-wide" : ""}`}>
+      <span>{label}</span>
+      {children}
+      {hint && <small>{hint}</small>}
+    </label>
   );
 }

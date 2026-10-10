@@ -11,6 +11,7 @@ from datetime import datetime
 from functools import wraps
 from io import BytesIO, StringIO
 from mimetypes import MimeTypes
+from time import monotonic as _status_now
 from typing import Callable, Iterable, List, Optional, Tuple, Union
 
 import pyrogram
@@ -38,7 +39,8 @@ from module.app import (
     UploadProgressStat,
     UploadStatus,
 )
-from module.download_stat import get_download_result, get_total_download_speed
+from module.download_stat import get_download_result
+from module.task_progress import project_task_progress, task_record_matches
 from module.language import Language, _t
 from module.send_media_group_v2 import cache_media, send_media_group_v2
 from module.upload_stat import update_upload_status, update_upload_status_str
@@ -1074,6 +1076,7 @@ def build_bot_task_summary(
 ) -> str:
     """Build the stable overview section of a Telegram download status message."""
     records = list(task_records)
+    projections = [item.get("_progress") or project_task_progress(item) for item in records]
     processed_count = (
         node.success_download_task
         + node.failed_download_task
@@ -1081,7 +1084,6 @@ def build_bot_task_summary(
     )
     total_count = max(node.total_task, node.total_download_task, processed_count)
     remaining_count = max(total_count - processed_count, 0)
-    progress = int(processed_count / total_count * 100) if total_count else 0
 
     if node.is_stop_transmission:
         status_label = "⏹ 已停止"
@@ -1092,19 +1094,21 @@ def build_bot_task_summary(
             status_label = "❌ 执行失败"
         else:
             status_label = "✅ 全部完成"
-    elif processed_count or records:
-        status_label = "🔄 传输中"
+    elif records:
+        phases = {item["phase"] for item in projections if not item["completed"]}
+        status_label = (
+            {"analyzing": "🧠 ", "downloading": "📥 ", "uploading": "📤 ",
+             "paused": "⏸ ", "failed": "❌ ", "upload_failed": "⚠️ "}.get(next(iter(phases)), "⏳ ")
+            + next(item["phase_label"] for item in projections if item["phase"] in phases)
+            if len(phases) == 1 else "🔄 进行中"
+        )
+    elif processed_count:
+        status_label = "🔄 进行中"
     else:
         status_label = "⏳ 等待中"
 
-    total_bytes = sum(max(int(item.get("total_size", 0)), 0) for item in records)
-    processed_bytes = sum(
-        min(
-            max(int(item.get("down_byte", 0)), 0),
-            max(int(item.get("total_size", 0)), 0),
-        )
-        for item in records
-    )
+    total_bytes = sum(item["total_bytes"] for item in projections)
+    processed_bytes = sum(item["download_bytes"] for item in projections)
     if not processed_bytes:
         processed_bytes = max(int(node.total_download_byte), 0)
 
@@ -1118,18 +1122,35 @@ def build_bot_task_summary(
     elapsed = _format_task_elapsed(
         (now if now is not None else time.time()) - getattr(node, "created_at", time.time())
     )
-    data_label = format_byte(processed_bytes)
+    data_label = format_byte(int(processed_bytes))
     if total_bytes:
-        data_label = f"{data_label} / {format_byte(total_bytes)}"
-    if current_download_speed or current_upload_speed:
+        data_label = f"{data_label} / {format_byte(int(total_bytes))}"
+    if records:
+        current_download_speed = sum(item["download_speed"] for item in projections)
+        current_upload_speed = sum(item["upload_speed"] for item in projections)
+    if node.is_stop_transmission:
+        current_download_speed = current_upload_speed = 0
+    if total_count and processed_count >= total_count:
+        speed_label = "任务已结束"
+    elif current_download_speed or current_upload_speed:
         speed_label = (
             f"↓ {format_byte(current_download_speed)}/s  "
             f"↑ {format_byte(current_upload_speed)}/s"
         )
-    elif total_count and processed_count >= total_count:
-        speed_label = "任务已结束"
     else:
-        speed_label = "等待传输"
+        speed_label = "当前无数据传输"
+
+    stage_lines = ""
+    if total_bytes:
+        download_progress = round(sum(item["total_bytes"] * item["download_progress"] for item in projections) / total_bytes)
+        upload_progress = round(sum(item["total_bytes"] * item["upload_progress"] for item in projections) / total_bytes)
+        waiting_upload = upload_progress == 0 and not any(item["phase"] in ("uploading", "finalizing", "completed") for item in projections)
+        stage_lines = (
+            "📊 阶段进度" + (f"（已知 {len(records)}/{total_count} 个文件）" if len(records) < total_count else "") + "\n"
+            f"📥 下载  [{create_progress_bar(download_progress)}] {download_progress}%\n"
+            f"📤 上传  [{create_progress_bar(upload_progress)}] {upload_progress}%"
+            + (" · 待上传" if waiting_upload else "") + "\n"
+        )
 
     return (
         f"📦 Telegram 下载任务 #{node.task_id}\n"
@@ -1139,12 +1160,10 @@ def build_bot_task_summary(
         f"👤 账号  {profile_label}\n"
         f"💬 来源  {source_label}\n"
         f"🕒 耗时  {elapsed}\n\n"
-        f"📊 总体进度\n"
-        f"[{create_progress_bar(progress)}] {progress}%  "
-        f"({processed_count}/{total_count or 0})\n"
+        f"{stage_lines}"
         f"💾 数据  {data_label}\n"
         f"⚡ 速度  {speed_label}\n\n"
-        f"📋 结果统计\n"
+        f"📋 任务结果 ({processed_count}/{total_count or 0}) · 含分析与上传\n"
         f"├─ ✅ 成功  {node.success_download_task}\n"
         f"├─ ❌ 失败  {node.failed_download_task}\n"
         f"├─ ⏭ 跳过  {node.skip_download_task}\n"
@@ -1157,11 +1176,48 @@ async def report_bot_status(
     node: TaskNode,
     immediate_reply=False,
 ):
-    """see _report_bot_status"""
+    """Coalesce edits and retry status delivery without blocking media work."""
+    if not node.reply_message_id or not node.bot:
+        return
+    if node.status_update_inflight or node.status_delivery_unavailable:
+        return
+    if node.final_status_delivered and node.is_finish():
+        return
+    bot_retry_at = getattr(client, "_task_status_retry_at", 0)
+    if not isinstance(bot_retry_at, (int, float)):
+        bot_retry_at = 0
+    if _status_now() < max(node.status_retry_at, bot_retry_at):
+        return
+    node.status_update_inflight = True
     try:
-        return await _report_bot_status(client, node, immediate_reply)
+        # The final update must not be lost to can_reply's regular throttle.
+        return await _report_bot_status(
+            client, node, immediate_reply or node.is_finish()
+        )
     except Exception as e:
-        logger.debug(f"{e}")
+        retry_after = getattr(e, "retry_after", 0)
+        if isinstance(e, pyrogram.errors.FloodWait):
+            retry_after = e.value
+        if retry_after or getattr(e, "error_code", None) == 429:
+            client._task_status_retry_at = max(
+                bot_retry_at, _status_now() + max(retry_after, 1) + 1
+            )
+        elif getattr(e, "error_code", None) in (400, 401, 403) or isinstance(
+            e, (pyrogram.errors.MessageIdInvalid, pyrogram.errors.Forbidden)
+        ):
+            node.status_delivery_unavailable = True
+            logger.warning(
+                "Task status card unavailable; task={}, error={}",
+                node.task_id, type(e).__name__,
+            )
+        else:
+            node.status_retry_at = _status_now() + 3
+        logger.debug(
+            "Task status delivery deferred; task={}, error={}",
+            node.task_id, type(e).__name__,
+        )
+    finally:
+        node.status_update_inflight = False
 
 
 async def _report_bot_status(
@@ -1221,20 +1277,17 @@ async def _report_bot_status(
         download_result_str = ""
         task_records = []
         download_result = get_download_result()
+        from module.upload_stat import get_upload_result
+        from module.download_stat import get_task_state
+        upload_records = get_upload_result().get(node.chat_id, {})
         if node.chat_id in download_result:
             messages = download_result[node.chat_id]
-            for idx, value in messages.items():
-                task_id = value.get("task_id", 0)
-                if task_id != node.task_id:
+            for idx, value in list(messages.items()):
+                if not task_record_matches(node, idx, value):
                     continue
-                record_profile_id = value.get("profile_id")
-                if node.profile_id and record_profile_id not in (node.profile_id, None):
-                    continue
-                task_records.append({"message_id": idx, **value})
-                if (
-                    value.get("state") in ("failed", "upload_failed")
-                    or value.get("down_byte", 0) >= value.get("total_size", 1)
-                ):
+                progress_state = project_task_progress(value, upload_records.get(idx), control=get_task_state(node.chat_id, idx, node.profile_id))
+                task_records.append({"message_id": idx, **value, "_progress": progress_state})
+                if progress_state["phase"] != "downloading":
                     continue
 
                 temp_file_name = truncate_filename(
@@ -1277,12 +1330,7 @@ async def _report_bot_status(
             upload_result_str = "\n📤 当前上传\n" + upload_result_str
 
         recent_file_result_str = ""
-        terminal_records = [
-            item
-            for item in task_records
-            if item.get("state") in ("failed", "upload_failed")
-            or item.get("down_byte", 0) >= item.get("total_size", 1)
-        ]
+        terminal_records = list(task_records)
         terminal_records.sort(
             key=lambda item: item.get("end_time", item.get("created_at", 0)),
             reverse=True,
@@ -1291,36 +1339,32 @@ async def _report_bot_status(
             recent_file_lines = []
             for position, item in enumerate(terminal_records[:5]):
                 prefix = "└─" if position == len(terminal_records[:5]) - 1 else "├─"
-                if item.get("state") == "upload_failed":
+                phase = item["_progress"]["phase"]
+                if phase == "upload_failed":
                     result_icon = "⚠️"
-                elif item.get("state") == "failed":
+                elif phase == "failed":
                     result_icon = "❌"
-                else:
+                elif phase == "completed":
                     result_icon = "✅"
+                else:
+                    result_icon = "⏳"
                 file_name = truncate_filename(
                     os.path.basename(item.get("file_name", "未知文件")), 32
                 ).replace("`", "'")
                 recent_file_lines.append(
                     f"{prefix} {result_icon} {file_name}  "
                     f"({format_byte(item.get('total_size', 0))})"
+                    + ("" if phase == "completed" else " · " + item["_progress"]["phase_label"])
                 )
-                if item.get("state") in ("failed", "upload_failed") and item.get("error"):
-                    error = truncate_filename(str(item["error"]), 64).replace("`", "'")
+                if phase in ("failed", "upload_failed") and item["_progress"]["error"]:
+                    error = truncate_filename(item["_progress"]["error"], 64).replace("`", "'")
                     recent_file_lines.append(f"   ↳ 原因：{error}")
             recent_file_result_str = "\n📄 最近文件\n" + "\n".join(recent_file_lines) + "\n"
 
-        current_download_speed = sum(
-            max(int(item.get("download_speed", 0)), 0)
-            for item in task_records
-            if item.get("down_byte", 0) < item.get("total_size", 1)
-        )
-        if not current_download_speed:
-            current_download_speed = get_total_download_speed()
-        current_upload_speed = sum(
-            max(int(value.upload_speed), 0)
-            for value in node.upload_stat_dict.values()
-            if value.upload_size < value.total_size
-        )
+        current_download_speed = sum(item["_progress"]["download_speed"] for item in task_records)
+        current_upload_speed = sum(item["_progress"]["upload_speed"] for item in task_records)
+        if not any(item["_progress"]["phase"] == "uploading" for item in task_records):
+            upload_msg_detail_str = upload_result_str = ""
         task_summary = build_bot_task_summary(
             node,
             current_download_speed,
@@ -1344,8 +1388,10 @@ async def _report_bot_status(
             )
         new_msg_str = f"```\n{status_body.rstrip()}\n```"
 
+        # Capture the state represented by this payload before awaiting I/O.
+        # A task may finish while an older in-flight edit is still being sent.
+        is_final_snapshot = node.is_finish()
         if new_msg_str != node.last_edit_msg:
-            node.last_edit_msg = new_msg_str
             callback_prefix = {
                 TaskType.Download: "stop_download",
                 TaskType.Forward: "stop_forward",
@@ -1361,13 +1407,18 @@ async def _report_bot_status(
                     ]
                 ]
             )
-            await client.edit_message_text(
-                node.from_user_id,
-                node.reply_message_id,
-                new_msg_str,
-                parse_mode=pyrogram.enums.ParseMode.MARKDOWN,
-                reply_markup=task_controls,
-            )
+            try:
+                await client.edit_message_text(
+                    node.from_user_id,
+                    node.reply_message_id,
+                    new_msg_str,
+                    parse_mode=pyrogram.enums.ParseMode.MARKDOWN,
+                    reply_markup=task_controls,
+                )
+            except pyrogram.errors.MessageNotModified:
+                pass
+            node.last_edit_msg = new_msg_str
+        node.final_status_delivered = is_final_snapshot
 
 
 def set_max_concurrent_transmissions(
