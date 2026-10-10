@@ -8,7 +8,13 @@ from unittest import mock
 import media_downloader
 import pyrogram
 import module.bot as bot_module
-from module.bot import DownloadBot, direct_download, public_text_hint, send_help_str
+from module.bot import (
+    DownloadBot,
+    direct_download,
+    public_text_hint,
+    send_help_str,
+    unauthorized_help_command,
+)
 from module.telegram_card import render_telegram_card
 import module.profiles as profiles
 import module.web as web
@@ -261,6 +267,18 @@ class BotAccessTestCase(unittest.TestCase):
 
         self.assertTrue(self.bot.can_submit_bot_api_message(message))
 
+    def test_is_admin_user_id_matches_registered_and_runtime(self):
+        self.assertTrue(self.bot.is_admin_user_id(100))
+        self.assertTrue(self.bot.is_admin_user_id(200))
+        self.assertFalse(self.bot.is_admin_user_id(300))
+
+    def test_is_admin_user_id_matches_database_profile(self):
+        with mock.patch("module.profiles.get_profiles", return_value=[
+            {"id": "p2", "account": {"id": 888, "firstName": "Alice"}}
+        ]):
+            self.assertTrue(self.bot.is_admin_user_id(888))
+            self.assertIn(888, self.bot.admin_user_ids)
+
 
 class BotTaskCardTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_public_text_hint_does_not_claim_telegram_links(self):
@@ -311,6 +329,25 @@ class BotTaskCardTestCase(unittest.IsolatedAsyncioTestCase):
         await send_help_str(client, 200)
 
         client.send_message.assert_awaited_once()
+
+    async def test_unauthorized_help_command_replies_notice(self):
+        client = SimpleNamespace(send_message=mock.AsyncMock())
+        message = SimpleNamespace(
+            id=42,
+            text="/help",
+            chat=SimpleNamespace(id=999),
+        )
+
+        with mock.patch.object(
+            bot_module._bot, "mark_private_message_processed", return_value=True
+        ):
+            await unauthorized_help_command(client, message)
+
+        client.send_message.assert_awaited_once_with(
+            999,
+            "当前 Bot 未向你的账号开放。",
+            reply_to_message_id=42,
+        )
 
     def test_is_help_command_text_recognizes_slash_and_plain_text(self):
         self.assertTrue(DownloadBot.is_help_command_text("/help"))

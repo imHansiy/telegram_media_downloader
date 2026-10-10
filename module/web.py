@@ -1762,6 +1762,12 @@ def _save_session_and_start_runtime(client):
                 runtime_enabled=True,
             )
         print("DEBUG: [tg_login] Profile session saved successfully.")
+        if account_meta and account_meta.get("id"):
+            try:
+                from module.bot import register_admin_user_id
+                register_admin_user_id(account_meta.get("id"))
+            except Exception:
+                pass
     else:
         print("WARNING: [tg_login] Database not connected, session NOT saved!")
 

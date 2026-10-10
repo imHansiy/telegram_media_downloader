@@ -19,7 +19,7 @@ from pyrogram.types import Audio, Document, Photo, Video, VideoNote, Voice
 from rich.logging import RichHandler
 
 from module.app import Application, ChatDownloadConfig, DownloadStatus, TaskNode
-from module.bot import start_download_bot, stop_download_bot
+from module.bot import register_admin_user_id, start_download_bot, stop_download_bot
 from module.cloud_drive import CloudDrive
 from module.db import db
 from module.resource_analysis import analyze_resource, detect_resource_kind
@@ -1534,11 +1534,19 @@ def main():
         submitter_user_id = str(submitter_user_id or "")
         for state in runtimes.values():
             me = getattr(state.client, "me", None)
+            me_id = str(getattr(me, "id", "")) if me else ""
+            if not me_id and state.profile_id:
+                try:
+                    p = get_profile(state.profile_id)
+                    acc = p.get("account") or {}
+                    me_id = str(acc.get("id") or "")
+                except Exception:
+                    pass
             if (
                 state.running
-                and me
+                and me_id
                 and submitter_user_id
-                and str(getattr(me, "id", "")) == submitter_user_id
+                and me_id == submitter_user_id
             ):
                 return _runtime_download_payload(state, matched_submitter=True)
 
@@ -1590,6 +1598,8 @@ def main():
 
         try:
             await ensure_client_runtime_ready(runtime_client)
+            if getattr(runtime_client, "me", None):
+                register_admin_user_id(runtime_client.me.id)
             set_max_concurrent_transmissions(
                 runtime_client, runtime_app.max_concurrent_transmissions
             )
@@ -1635,6 +1645,8 @@ def main():
                         and owner_bot_token == runtime_bot_token
                     ):
                         apply_bot_access_config(owner_state.app, runtime_app.config)
+                        if getattr(runtime_client, "me", None):
+                            register_admin_user_id(runtime_client.me.id)
                         logger.info(
                             "Bot access config synced from profile {} to bot owner {}.",
                             profile_id,

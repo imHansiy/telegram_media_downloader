@@ -3,7 +3,7 @@ FROM python:3.11.9-alpine As compile-image
 RUN apk add --no-cache git git-lfs
 
 # 动态时间戳破坏 Docker 镜像层缓存，确保每次部署都真正从 ModelScope 重新拉取最新代码
-RUN echo "Deploy cache bust: 20261010-115200" \
+RUN echo "Deploy cache bust: 20261010-121500" \
     && rm -rf /src \
     && git clone --depth 1 https://www.modelscope.ai/studios/u09f26e1c/telegram-media-downloader.git /src \
     && cd /src && git lfs pull

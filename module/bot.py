@@ -291,13 +291,57 @@ class DownloadBot:
 
         return False
 
+    def register_admin_user_id(self, user_id):
+        """Register a user ID as a recognized bot admin."""
+        if not user_id:
+            return
+        uid_int = None
+        try:
+            uid_int = int(user_id)
+        except (ValueError, TypeError):
+            pass
+        if uid_int is not None and uid_int not in self.admin_user_ids:
+            self.admin_user_ids.append(uid_int)
+        elif str(user_id) not in {str(item) for item in self.admin_user_ids}:
+            self.admin_user_ids.append(user_id)
+
+    def is_admin_user_id(self, user_id) -> bool:
+        """Dynamically check if a user ID is an admin across all configured accounts."""
+        if not user_id:
+            return False
+        uid_str = str(user_id)
+        if uid_str in {str(item) for item in self.admin_user_ids}:
+            return True
+
+        if self.download_runtime_resolver:
+            try:
+                runtime = self.download_runtime_resolver(uid_str)
+                if runtime and runtime.get("matched_submitter"):
+                    self.register_admin_user_id(user_id)
+                    return True
+            except Exception as e:
+                logger.warning(f"Error checking runtime admin: {e}")
+
+        try:
+            from module.profiles import get_profiles
+            for p in get_profiles():
+                acc = p.get("account") or {}
+                acc_id = str(acc.get("id") or "")
+                if acc_id and acc_id == uid_str:
+                    self.register_admin_user_id(user_id)
+                    return True
+        except Exception:
+            pass
+
+        return False
+
     def can_submit_download(self, message: pyrogram.types.Message) -> bool:
         """Check whether a message sender can submit bot download jobs."""
 
         if not message.from_user:
             return False
 
-        if str(message.from_user.id) in {str(item) for item in self.admin_user_ids}:
+        if self.is_admin_user_id(message.from_user.id):
             return True
 
         if not message.chat or message.chat.type != pyrogram.enums.ChatType.PRIVATE:
@@ -417,7 +461,7 @@ class DownloadBot:
         if not user.get("id"):
             return False
 
-        if str(user.get("id")) in {str(item) for item in self.admin_user_ids}:
+        if self.is_admin_user_id(user.get("id")):
             return True
 
         if chat.get("type") != "private":
@@ -1108,16 +1152,38 @@ class DownloadBot:
                 logger.warning(f"set allowed_user_ids error: {e}")
 
         admin = await self.client.get_me()
-        self.admin_user_ids.append(admin.id)
+        self.register_admin_user_id(admin.id)
         logger.info(f"Admin user added: {admin.first_name} (ID: {admin.id})")
+
+        try:
+            from module.profiles import get_profiles
+            for p in get_profiles():
+                acc = p.get("account") or {}
+                acc_id = acc.get("id")
+                if acc_id:
+                    self.register_admin_user_id(acc_id)
+                    logger.info(
+                        f"Profile admin user registered: {acc.get('firstName', '')} (ID: {acc_id})"
+                    )
+        except Exception as e:
+            logger.warning(f"Failed to load profile admins: {e}")
+
+        logger.info(f"Admin user IDs: {self.admin_user_ids}")
         logger.info(f"Configured allowed user IDs: {self.allowed_user_ids}")
         logger.info(f"Bot download access mode: {self.app.bot_download_access_mode}")
 
         await self.bot.set_bot_commands(commands)
 
-        admin_filter = pyrogram.filters.user(self.admin_user_ids)
+        def admin_filter_check(_, __, update):
+            user = getattr(update, "from_user", None)
+            return bool(user and self.is_admin_user_id(user.id))
+
+        admin_filter = pyrogram.filters.create(admin_filter_check, "DynamicAdminFilter")
         download_submitter_filter = self.download_submitter_filter()
         non_admin_submitter_filter = download_submitter_filter & ~admin_filter
+        unauthorized_filter = (
+            pyrogram.filters.private & ~admin_filter & ~download_submitter_filter
+        )
 
         self.bot.add_handler(
             MessageHandler(
@@ -1173,6 +1239,13 @@ class DownloadBot:
                 public_help_command,
                 filters=pyrogram.filters.command(help_commands, prefixes=["/", ""])
                 & non_admin_submitter_filter,
+            )
+        )
+        self.bot.add_handler(
+            MessageHandler(
+                unauthorized_help_command,
+                filters=pyrogram.filters.command(help_commands, prefixes=["/", ""])
+                & unauthorized_filter,
             )
         )
         self.bot.add_handler(
@@ -1237,6 +1310,11 @@ class DownloadBot:
 
 
 _bot = DownloadBot()
+
+
+def register_admin_user_id(user_id):
+    """Register an admin user ID with the singleton bot instance."""
+    _bot.register_admin_user_id(user_id)
 
 
 async def start_download_bot(
@@ -1416,6 +1494,21 @@ async def public_help_command(client: pyrogram.Client, message: pyrogram.types.M
     if not _bot.mark_private_message_processed(message.chat.id, message.id):
         return
     await send_help_str(client, message.chat.id)
+
+
+async def unauthorized_help_command(client: pyrogram.Client, message: pyrogram.types.Message):
+    """Inform unauthorized users that the bot is private."""
+
+    if not _bot.mark_private_message_processed(message.chat.id, message.id):
+        return
+    try:
+        await client.send_message(
+            message.chat.id,
+            "当前 Bot 未向你的账号开放。",
+            reply_to_message_id=message.id,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to send unauthorized notice: {e}")
 
 
 async def public_text_hint(client: pyrogram.Client, message: pyrogram.types.Message):
